@@ -34,9 +34,11 @@ def _timestamp_key(value: Any) -> float:
 
 
 def attach_latest_free_stage(
-    projects: list[dict[str, Any]], heads: Iterable[dict[str, Any]]
+    projects: list[dict[str, Any]],
+    heads: Iterable[dict[str, Any]],
+    locked_resources: Iterable[dict[str, Any]] = (),
 ) -> list[dict[str, Any]]:
-    """Attach the most recently touched free-mode stage to project summaries."""
+    """Attach free-mode navigation and latest-lock metadata to project summaries."""
 
     latest_by_project: dict[int, dict[str, Any]] = {}
     for head in heads:
@@ -59,10 +61,35 @@ def attach_latest_free_stage(
                 "episode_number": int(head.get("episode_number") or 0),
             }
 
+    latest_locked_by_project: dict[int, dict[str, Any]] = {}
+    for resource in locked_resources:
+        stage = str(resource.get("stage") or "")
+        if stage not in _FREE_STAGE_PRIORITY or not resource.get("locked_at"):
+            continue
+        project_id = int(resource.get("project_id") or 0)
+        if project_id <= 0:
+            continue
+        candidate_key = (
+            _timestamp_key(resource.get("locked_at")),
+            _FREE_STAGE_PRIORITY[stage],
+            int(resource.get("episode_number") or 0),
+        )
+        current = latest_locked_by_project.get(project_id)
+        if current is None or candidate_key > current["sort_key"]:
+            latest_locked_by_project[project_id] = {
+                "sort_key": candidate_key,
+                "stage": stage,
+                "episode_number": int(resource.get("episode_number") or 0),
+            }
+
     for project in projects:
         if project.get("workflow_mode") != "free":
             continue
         latest = latest_by_project.get(int(project.get("id") or 0))
         project["latest_stage"] = latest["stage"] if latest else "brief"
         project["latest_episode_number"] = latest["episode_number"] if latest else 0
+        latest_locked = latest_locked_by_project.get(int(project.get("id") or 0))
+        if latest_locked is not None:
+            project["latest_locked_stage"] = latest_locked["stage"]
+            project["latest_locked_episode_number"] = latest_locked["episode_number"]
     return projects

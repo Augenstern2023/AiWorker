@@ -914,6 +914,7 @@ class ProjectsRepository:
                 if project.get("workflow_mode") == "free"
             ]
             heads: list[dict[str, Any]] = []
+            locked_resources: list[dict[str, Any]] = []
             if free_project_ids:
                 heads = self.rows_dict(
                     connection.execute(
@@ -928,7 +929,56 @@ class ProjectsRepository:
                         )
                     ).mappings().all()
                 )
-        return attach_latest_free_stage(projects, heads)
+                for row in self.rows_dict(
+                    connection.execute(
+                        select(
+                            creative_blueprints.c.project_id,
+                            creative_blueprints.c.locked_at,
+                        ).where(
+                            creative_blueprints.c.resource_scope == "free",
+                            creative_blueprints.c.project_id.in_(free_project_ids),
+                            creative_blueprints.c.locked_at.is_not(None),
+                        )
+                    ).mappings().all()
+                ):
+                    locked_resources.append(
+                        {**row, "stage": "brief", "episode_number": 0}
+                    )
+                for row in self.rows_dict(
+                    connection.execute(
+                        select(
+                            creative_characters.c.project_id,
+                            creative_characters.c.locked_at,
+                        ).where(
+                            creative_characters.c.resource_scope == "free",
+                            creative_characters.c.project_id.in_(free_project_ids),
+                            creative_characters.c.locked_at.is_not(None),
+                        )
+                    ).mappings().all()
+                ):
+                    locked_resources.append(
+                        {**row, "stage": "characters", "episode_number": 0}
+                    )
+                locked_resources.extend(
+                    self.rows_dict(
+                        connection.execute(
+                            select(
+                                creative_episodes.c.project_id,
+                                creative_episodes.c.stage,
+                                creative_episodes.c.episode_number,
+                                creative_episodes.c.locked_at,
+                            ).where(
+                                creative_episodes.c.resource_scope == "free",
+                                creative_episodes.c.project_id.in_(free_project_ids),
+                                creative_episodes.c.stage.in_(
+                                    ("outline", "beats", "script")
+                                ),
+                                creative_episodes.c.locked_at.is_not(None),
+                            )
+                        ).mappings().all()
+                    )
+                )
+        return attach_latest_free_stage(projects, heads, locked_resources)
 
     def list_projects_for_bootstrap(
         self, created_by: str, status: str | None = None

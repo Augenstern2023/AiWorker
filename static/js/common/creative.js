@@ -393,7 +393,17 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
-                creativeProjectStatusLabel(status) {
+                creativeProjectStatusLabel(project) {
+                    const status = typeof project === 'string' ? project : project?.status;
+                    if (status === 'free_active') {
+                        return {
+                            brief: 'Brief 已锁定',
+                            characters: '人物已锁定',
+                            outline: '大纲已锁定',
+                            beats: 'Beats 制作中',
+                            script: '场次剧本制作中',
+                        }[project?.latest_locked_stage] || '自由创作中';
+                    }
                     return {
                         created: '待生成方向', direction_review: '方向评审', brief_locked: 'Brief 已锁定',
                         characters_draft: '人物草稿', characters_locked: '人物已锁定', outline_draft: '大纲草稿',
@@ -1688,7 +1698,7 @@ window.aiworkerModules.push(() => ({
                         if (!res.ok || data.status === 'error') throw new Error(data.detail || data.message || '创建生成任务失败');
                         const promptStage = this.promptStageForGenerationAction(action);
                         if (promptStage && body.prompt_template_key) {
-                            delete this.creativeWorkspace.promptLibrary.runSelections[promptStage];
+                            this.clearPromptRunSelection(promptStage);
                         }
                         this.creativeWorkspace.jobId = data.job.job_id;
                         this.creativeWorkspace.jobStatus = data.job.status;
@@ -1811,6 +1821,9 @@ window.aiworkerModules.push(() => ({
                     state.observabilityOpen = false;
                     state.marketplaceOpen = false;
                     state.editing = false;
+                    state.deleteTemplate = null;
+                    state.deleteImpact = null;
+                    state.deleteReplacementTemplateId = '';
                     state.error = '';
                 },
 
@@ -2114,12 +2127,6 @@ window.aiworkerModules.push(() => ({
                     }[status] || status || '-';
                 },
 
-                promptMarketplaceLicenseLabel(code) {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    return (state.marketplaceLicenses || []).find(item => item.code === code)?.label
-                        || code || '-';
-                },
-
                 promptMarketplaceError(data, fallback) {
                     const detail = data?.detail;
                     if (typeof detail === 'string') return detail;
@@ -2138,7 +2145,6 @@ window.aiworkerModules.push(() => ({
                             params.set('q', String(state.marketplaceQuery).trim());
                         }
                         if (state.marketplaceStage) params.set('stage', state.marketplaceStage);
-                        if (state.marketplaceLicense) params.set('license', state.marketplaceLicense);
                         const response = await aiworkerApi.request(
                             `/api/creative/projects/${projectId}/prompt-marketplace?${params.toString()}`
                         );
@@ -2146,12 +2152,13 @@ window.aiworkerModules.push(() => ({
                         if (!response.ok) {
                             throw new Error(this.promptMarketplaceError(data, '读取模板市场失败'));
                         }
+                        state.marketplaceOfficialItems = Array.isArray(data.official_items)
+                            ? data.official_items : [];
                         state.marketplaceItems = Array.isArray(data.items) ? data.items : [];
                         state.marketplaceOwnSubmissions = Array.isArray(data.own_submissions)
                             ? data.own_submissions : [];
                         state.marketplaceModerationQueue = Array.isArray(data.moderation_queue)
                             ? data.moderation_queue : [];
-                        state.marketplaceLicenses = Array.isArray(data.licenses) ? data.licenses : [];
                         state.marketplaceSourceTypes = Array.isArray(data.source_types)
                             ? data.source_types : [];
                         state.marketplacePolicy = Array.isArray(data.policy) ? data.policy : [];
@@ -2177,12 +2184,35 @@ window.aiworkerModules.push(() => ({
                     state.observabilityOpen = false;
                     state.editing = false;
                     state.marketplaceStage = state.stage || '';
-                    state.marketplaceLicense = '';
                     await this.loadPromptMarketplace();
                 },
 
                 closePromptMarketplace() {
                     this.creativeWorkspace.promptLibrary.marketplaceOpen = false;
+                },
+
+                promptMarketplaceOfficialTemplate(item) {
+                    const key = String(item?.template_key || '');
+                    return (this.creativeWorkspace.promptLibrary.templates || []).find(
+                        template => template.owner_scope === 'system'
+                            && String(template.template_key || '') === key
+                    ) || null;
+                },
+
+                useOfficialPromptMarketplaceTemplate(item) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const template = this.promptMarketplaceOfficialTemplate(item);
+                    if (!template || !state.stage) {
+                        state.error = '当前创作步骤无法使用这个官方模板';
+                        return;
+                    }
+                    this.selectPromptTemplate(template);
+                    this.storePromptRunSelection(state.stage, template, '');
+                    state.marketplaceOpen = false;
+                    this.promptLibraryModal?.hide();
+                    this.showCreativeNotice(
+                        `${template.title}将在下次${this.promptStageLabel(state.stage)}生成中使用，不会修改默认设置`
+                    );
                 },
 
                 clearPromptMarketplaceFieldError(field) {
@@ -2208,7 +2238,6 @@ window.aiworkerModules.push(() => ({
                         template: 'promptMarketplacePersonalTemplate',
                         attribution: 'promptMarketplaceAttribution',
                         tags: 'promptMarketplaceTags',
-                        license: 'promptMarketplaceSubmitLicense',
                         sourceType: 'promptMarketplaceSourceType',
                         sourceUrl: 'promptMarketplaceSourceUrl',
                         rights: 'promptMarketplaceRights',
@@ -2221,13 +2250,10 @@ window.aiworkerModules.push(() => ({
                         errors.template = '个人模板名称未填写，请到“我的模板”补充名称';
                     }
                     const attribution = String(state.marketplaceAttributionName || '').trim();
-                    if (!attribution) errors.attribution = '公开署名未填写';
+                    if (!attribution) errors.attribution = '模板署名未填写';
                     const tags = String(state.marketplaceTags || '').split(/[,，\n]/)
                         .map(item => item.trim()).filter(Boolean);
                     if (tags.length > 10) errors.tags = '标签最多填写 10 个，请删减';
-                    if (!(state.marketplaceLicenses || []).some(
-                        item => item.code === state.marketplaceLicenseCode
-                    )) errors.license = '授权许可未选择，请选择一种许可';
                     if (!(state.marketplaceSourceTypes || []).some(
                         item => item.code === state.marketplaceSourceType
                     )) errors.sourceType = '来源类型未选择，请选择模板来源';
@@ -2251,10 +2277,10 @@ window.aiworkerModules.push(() => ({
                         errors.rights = `来源与权利说明至少填写 10 字（当前 ${rights.length} 字）`;
                     }
                     if (!state.marketplacePublicationConfirmed) {
-                        errors.publication = '请确认模板会公开展示并可被安装';
+                        errors.publication = '请确认模板会在公司内部展示并可被安装';
                     }
                     if (!state.marketplaceRightsConfirmed) {
-                        errors.rightsConfirmed = '请确认拥有发布和授权所需权利';
+                        errors.rightsConfirmed = '请确认拥有发布和内部使用所需权利';
                     }
                     state.marketplaceFieldErrors = errors;
                     if (Object.keys(errors).length) {
@@ -2282,7 +2308,6 @@ window.aiworkerModules.push(() => ({
                                     description: String(template.description || '').trim(),
                                     tags,
                                     attribution_name: attribution,
-                                    license_code: state.marketplaceLicenseCode,
                                     source_type: state.marketplaceSourceType,
                                     source_url: sourceUrl,
                                     rights_statement: rights,
@@ -2298,7 +2323,7 @@ window.aiworkerModules.push(() => ({
                         state.marketplacePublicationConfirmed = false;
                         state.marketplaceRightsConfirmed = false;
                         await this.loadPromptMarketplace();
-                        this.showCreativeNotice('模板冻结版本已提交市场审核；审核前不会公开');
+                        this.showCreativeNotice('模板冻结版本已提交审核；通过前不会在模板中心展示');
                     } catch (error) {
                         state.error = error.message || '提交市场审核失败';
                     } finally {
@@ -2356,9 +2381,8 @@ window.aiworkerModules.push(() => ({
                         state.error = '只有项目负责人可以安装市场模板';
                         return;
                     }
-                    const license = this.promptMarketplaceLicenseLabel(item.license_code);
                     if (!window.confirm(
-                        `确认按 ${license} 安装“${item.title}”并保留署名 ${item.attribution_name}？`
+                        `确认将“${item.title}”安装为当前项目的独立副本？`
                     )) return;
                     state.marketplaceSaving = true;
                     state.error = '';
@@ -2372,7 +2396,6 @@ window.aiworkerModules.push(() => ({
                                 headers: {'Content-Type': 'application/json'},
                                 body: JSON.stringify({
                                     operation_id: operationId,
-                                    license_accepted: true,
                                 }),
                             }
                         );
@@ -2483,8 +2506,46 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                promptRunSelectionStorageKey(stage) {
+                    const projectId = this.creativeWorkspace.project?.id || '';
+                    return `aiworker:prompt-next:${projectId}:${stage}`;
+                },
+
+                storePromptRunSelection(stage, template, customRequirements = '') {
+                    const selection = {
+                        templateKey: String(template?.template_key || ''),
+                        revision: Number(template?.revision || 1),
+                        customRequirements: String(customRequirements || '').trim(),
+                    };
+                    this.creativeWorkspace.promptLibrary.runSelections[stage] = selection;
+                    try {
+                        window.sessionStorage?.setItem(
+                            this.promptRunSelectionStorageKey(stage), JSON.stringify(selection)
+                        );
+                    } catch (_) {}
+                    return selection;
+                },
+
+                clearPromptRunSelection(stage) {
+                    delete this.creativeWorkspace.promptLibrary.runSelections[stage];
+                    try {
+                        window.sessionStorage?.removeItem(this.promptRunSelectionStorageKey(stage));
+                    } catch (_) {}
+                },
+
                 promptRunSelection(stage) {
-                    return this.creativeWorkspace.promptLibrary?.runSelections?.[stage] || null;
+                    const state = this.creativeWorkspace.promptLibrary;
+                    if (state?.runSelections?.[stage]) return state.runSelections[stage];
+                    try {
+                        const stored = JSON.parse(
+                            window.sessionStorage?.getItem(this.promptRunSelectionStorageKey(stage)) || 'null'
+                        );
+                        if (stored?.templateKey && Number(stored?.revision || 0) > 0) {
+                            state.runSelections[stage] = stored;
+                            return stored;
+                        }
+                    } catch (_) {}
+                    return null;
                 },
 
                 promptGenerationPayload(stage, body = {}) {
@@ -2502,11 +2563,9 @@ window.aiworkerModules.push(() => ({
                     const state = this.creativeWorkspace.promptLibrary;
                     const template = this.selectedPromptTemplate();
                     if (!template || !state.stage) return;
-                    state.runSelections[state.stage] = {
-                        templateKey: template.template_key,
-                        revision: Number(template.revision || 1),
-                        customRequirements: String(state.customRequirements || '').trim(),
-                    };
+                    this.storePromptRunSelection(
+                        state.stage, template, state.customRequirements
+                    );
                     this.promptLibraryModal?.hide();
                     this.showCreativeNotice(`${template.title}将在下次${this.promptStageLabel(state.stage)}生成中使用，已有内容不变`);
                 },
@@ -2593,6 +2652,154 @@ window.aiworkerModules.push(() => ({
                         state.error = error.message || '创建模板失败';
                     } finally {
                         state.saving = false;
+                    }
+                },
+
+                async deletePersonalPromptTemplate(template) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || !template?.id || state.deletingTemplateId) return;
+                    state.deletingTemplateId = String(template.id);
+                    state.deleteTemplate = null;
+                    state.deleteImpact = null;
+                    state.deleteReplacementTemplateId = '';
+                    state.error = '';
+                    try {
+                        const impactResponse = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/templates/${template.id}/deletion-impact`
+                        );
+                        const impact = await impactResponse.json();
+                        if (!impactResponse.ok) {
+                            throw new Error(impact.detail || '读取模板使用情况失败');
+                        }
+                        if (!impact.can_delete) {
+                            state.deleteTemplate = this.cloneCreativeJson(template);
+                            state.deleteImpact = impact;
+                            state.deleteReplacementTemplateId = String(
+                                impact.replacement_candidates?.[0]?.id || ''
+                            );
+                            setTimeout(() => {
+                                document.getElementById('prompt-delete-rebind-panel')
+                                    ?.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+                                document.getElementById('prompt-delete-replacement')?.focus();
+                            }, 0);
+                            return;
+                        }
+                        const marketNote = Number(impact.market_submission_count || 0) > 0
+                            ? `\n已有 ${impact.market_submission_count} 条市场申请或上架快照会继续保留。`
+                            : '';
+                        if (!window.confirm(
+                            `确定删除“${template.title}”吗？\n删除后会从“我的模板”和选择列表中隐藏，历史生成记录仍会保留。${marketNote}\n此操作不能在界面中恢复。`
+                        )) return;
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/templates/${template.id}`,
+                            {
+                                method: 'DELETE',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    expected_revision: Number(template.revision || 1),
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '删除模板失败');
+                        await this.loadProjectPromptModule(state.stage);
+                        this.clearPersonalPromptDeletePlan();
+                        this.showCreativeNotice('个人模板已删除，历史记录仍保留');
+                    } catch (error) {
+                        state.error = error.message || '删除模板失败';
+                    } finally {
+                        state.deletingTemplateId = '';
+                    }
+                },
+
+                clearPersonalPromptDeletePlan() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    state.deleteTemplate = null;
+                    state.deleteImpact = null;
+                    state.deleteReplacementTemplateId = '';
+                    state.error = '';
+                },
+
+                selectedPromptDeleteReplacement() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    return (state.deleteImpact?.replacement_candidates || []).find(
+                        item => String(item.id) === String(state.deleteReplacementTemplateId)
+                    ) || null;
+                },
+
+                promptDeleteBindingLabel(binding) {
+                    const stage = this.promptStageLabel(binding?.stage);
+                    const episode = Number(binding?.episode_number || 0);
+                    return episode > 0 ? `${stage} · 第 ${episode} 集` : `${stage}阶段默认`;
+                },
+
+                promptDeleteProjectUrl(project, stages = []) {
+                    const stage = ['brief', 'characters', 'outline', 'beats', 'script']
+                        .find(item => (stages || []).includes(item)) || 'brief';
+                    return `/projects/${Number(project?.project_id || 0)}/prompt-templates?stage=${encodeURIComponent(stage)}`;
+                },
+
+                async rebindAndDeletePersonalPromptTemplate() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    const template = state.deleteTemplate;
+                    const replacement = this.selectedPromptDeleteReplacement();
+                    const impact = state.deleteImpact;
+                    if (!projectId || !template?.id || !replacement || state.deletingTemplateId) return;
+                    const referenceCount = Number(impact?.current_project_binding_count || 0);
+                    if (!referenceCount) {
+                        state.error = '当前项目没有可改绑的引用';
+                        return;
+                    }
+                    const willDelete = !(impact?.other_project_references || []).length;
+                    const resultLabel = willDelete
+                        ? '删除这个个人模板'
+                        : '仅完成当前项目改绑';
+                    if (!window.confirm(
+                        `确认将当前项目的 ${referenceCount} 处引用改绑到“${replacement.title}”，并${resultLabel}吗？\n只影响之后的生成，已有内容与历史记录不变。`
+                    )) return;
+                    state.deletingTemplateId = String(template.id);
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/templates/${template.id}/rebind-and-delete`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    expected_revision: Number(template.revision || 1),
+                                    replacement_template_id: replacement.id,
+                                    replacement_template_revision: Number(replacement.revision || 1),
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '改绑失败');
+                        await this.loadProjectPromptModule(state.stage);
+                        if (data.deleted) {
+                            this.clearPersonalPromptDeletePlan();
+                            this.showCreativeNotice('已改绑当前项目并删除个人模板，历史记录仍保留');
+                            return;
+                        }
+                        const impactResponse = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/templates/${template.id}/deletion-impact`
+                        );
+                        const refreshedImpact = await impactResponse.json();
+                        if (!impactResponse.ok) {
+                            throw new Error(refreshedImpact.detail || '读取剩余引用失败');
+                        }
+                        state.deleteImpact = refreshedImpact;
+                        state.deleteReplacementTemplateId = String(
+                            refreshedImpact.replacement_candidates?.[0]?.id || ''
+                        );
+                        this.showCreativeNotice(
+                            `当前项目已改绑；仍有 ${Number(data.remaining_binding_count || 0)} 处其他项目引用待处理`
+                        );
+                    } catch (error) {
+                        state.error = error.message || '改绑并删除模板失败';
+                    } finally {
+                        state.deletingTemplateId = '';
                     }
                 },
 

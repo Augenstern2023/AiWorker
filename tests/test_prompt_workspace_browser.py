@@ -164,3 +164,201 @@ def test_prompt_picker_card_click_selects_template_and_reveals_full_details():
         assert page_errors == [], "\n".join(page_errors)
 
         browser.close()
+
+
+def test_personal_template_delete_previews_impact_and_removes_card():
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            '<main x-data="appData()" '
+            'x-init="creativeWorkspace.project = {id: 9, target_episode_count: 20}; '
+            "creativeWorkspace.promptLibrary.stage = 'brief'\">"
+            '<button id="open-personal" @click="openPromptWorkspacePanel(\'personal\')">我的模板</button>'
+            f"{_modal('center')}</main>"
+        )
+        page_errors = _install_workspace_runtime(page)
+        page.locator("#open-personal").click()
+        page.get_by_text("我的强钩子模板", exact=True).wait_for()
+        page.evaluate(
+            """
+            window.__deleteEvents = [];
+            window.__templateDeleted = false;
+            window.confirm = () => {
+              window.__deleteEvents.push('confirm');
+              return true;
+            };
+            const originalRequest = window.aiworkerApi.request;
+            window.aiworkerApi.request = (url, options = {}) => {
+              if (url.includes('/deletion-impact')) {
+                window.__deleteEvents.push('impact');
+                return Promise.resolve({ok: true, json: async () => ({
+                  can_delete: true,
+                  market_submission_count: 0,
+                  historical_data_preserved: true,
+                  delete_blockers: [],
+                })});
+              }
+              if (options.method === 'DELETE') {
+                window.__deleteEvents.push(`delete:${JSON.parse(options.body).expected_revision}`);
+                window.__templateDeleted = true;
+                return Promise.resolve({ok: true, json: async () => ({deleted: true})});
+              }
+              if (window.__templateDeleted && url.includes('/prompt-modules/')) {
+                return Promise.resolve({ok: true, json: async () => ({
+                  settings: {enabled: true}, templates: [], effective: null,
+                  stage_binding: null, episode_binding: null,
+                })});
+              }
+              return originalRequest(url, options);
+            };
+            undefined;
+            """
+        )
+
+        page.locator("article").filter(
+            has_text="我的强钩子模板"
+        ).locator("button.btn-outline-danger").click()
+        page.get_by_text("当前步骤还没有个人模板", exact=False).wait_for()
+
+        assert page.evaluate("window.__deleteEvents") == [
+            "impact",
+            "confirm",
+            "delete:1",
+        ]
+        assert page.get_by_text("我的强钩子模板", exact=True).count() == 0
+        assert page_errors == [], "\n".join(page_errors)
+        browser.close()
+
+
+def test_personal_template_delete_blocker_does_not_send_delete_request():
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            '<main x-data="appData()" '
+            'x-init="creativeWorkspace.project = {id: 9, target_episode_count: 20}; '
+            "creativeWorkspace.promptLibrary.stage = 'brief'\">"
+            '<button id="open-personal" @click="openPromptWorkspacePanel(\'personal\')">我的模板</button>'
+            f"{_modal('center')}</main>"
+        )
+        page_errors = _install_workspace_runtime(page)
+        page.locator("#open-personal").click()
+        page.get_by_text("我的强钩子模板", exact=True).wait_for()
+        page.evaluate(
+            """
+            window.__deleteMethods = [];
+            const originalRequest = window.aiworkerApi.request;
+            window.aiworkerApi.request = (url, options = {}) => {
+              window.__deleteMethods.push(options.method || 'GET');
+              if (url.includes('/deletion-impact')) {
+                return Promise.resolve({ok: true, json: async () => ({
+                  can_delete: false,
+                  delete_blockers: ['模板仍被项目默认设置、阶段或单集绑定使用，请先改绑'],
+                  active_binding_count: 1,
+                  current_project_binding_count: 1,
+                  current_project_default_bindings: [],
+                  current_project_stage_bindings: [{project_id: 9, stage: 'brief', episode_number: 0}],
+                  other_project_references: [],
+                  replacement_candidates: [],
+                  can_manage_current_project: false,
+                })});
+              }
+              return originalRequest(url, options);
+            };
+            undefined;
+            """
+        )
+
+        page.locator("article").filter(
+            has_text="我的强钩子模板"
+        ).locator("button.btn-outline-danger").click()
+        page.get_by_text("先改绑，再删除", exact=True).wait_for()
+        page.get_by_text("只有项目负责人可以批量改绑", exact=False).wait_for()
+
+        assert "DELETE" not in page.evaluate("window.__deleteMethods")
+        assert page_errors == [], "\n".join(page_errors)
+        browser.close()
+
+
+def test_personal_template_can_rebind_and_delete_from_inline_recovery_panel():
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            '<main x-data="appData()" '
+            'x-init="creativeWorkspace.project = {id: 9, target_episode_count: 20}; '
+            "creativeWorkspace.promptLibrary.stage = 'brief'\">"
+            '<button id="open-personal" @click="openPromptWorkspacePanel(\'personal\')">我的模板</button>'
+            f"{_modal('center')}</main>"
+        )
+        page_errors = _install_workspace_runtime(page)
+        page.locator("#open-personal").click()
+        page.get_by_text("我的强钩子模板", exact=True).wait_for()
+        page.evaluate(
+            """
+            window.__rebindEvents = [];
+            window.__templateDeleted = false;
+            window.confirm = () => {
+              window.__rebindEvents.push('confirm');
+              return true;
+            };
+            const originalRequest = window.aiworkerApi.request;
+            window.aiworkerApi.request = (url, options = {}) => {
+              if (url.includes('/deletion-impact')) {
+                window.__rebindEvents.push('impact');
+                return Promise.resolve({ok: true, json: async () => ({
+                  can_delete: false,
+                  active_binding_count: 1,
+                  current_project_binding_count: 1,
+                  current_project_default_bindings: [],
+                  current_project_stage_bindings: [
+                    {project_id: 9, stage: 'brief', episode_number: 0},
+                  ],
+                  other_project_references: [],
+                  replacement_candidates: [{
+                    id: 'system:generic-vertical-short',
+                    template_key: 'generic-vertical-short',
+                    title: '通用竖屏短剧',
+                    owner_scope: 'system',
+                    revision: 1,
+                    supported_stages: ['brief'],
+                  }],
+                  can_manage_current_project: true,
+                })});
+              }
+              if (url.includes('/rebind-and-delete') && options.method === 'POST') {
+                const body = JSON.parse(options.body);
+                window.__rebindEvents.push(`rebind:${body.replacement_template_id}:${body.expected_revision}`);
+                window.__templateDeleted = true;
+                return Promise.resolve({ok: true, json: async () => ({
+                  rebound: true, deleted: true, remaining_binding_count: 0,
+                })});
+              }
+              if (window.__templateDeleted && url.includes('/prompt-modules/')) {
+                return Promise.resolve({ok: true, json: async () => ({
+                  settings: {enabled: true}, templates: [], effective: null,
+                  stage_binding: null, episode_binding: null,
+                })});
+              }
+              return originalRequest(url, options);
+            };
+            undefined;
+            """
+        )
+
+        page.locator("article").filter(
+            has_text="我的强钩子模板"
+        ).locator("button.btn-outline-danger").click()
+        page.get_by_text("先改绑，再删除", exact=True).wait_for()
+        assert page.locator("#prompt-delete-replacement").input_value() == "system:generic-vertical-short"
+        page.locator("#prompt-delete-rebind-panel button.btn-danger").click()
+        page.get_by_text("当前步骤还没有个人模板", exact=False).wait_for()
+
+        assert page.evaluate("window.__rebindEvents") == [
+            "impact",
+            "confirm",
+            "rebind:system:generic-vertical-short:1",
+        ]
+        assert page_errors == [], "\n".join(page_errors)
+        browser.close()

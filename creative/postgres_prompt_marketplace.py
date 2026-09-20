@@ -27,16 +27,7 @@ from creative.postgres_prompt_store import PromptStore
 from creative.repository import CreativeRepository
 
 
-MARKETPLACE_LICENSES = {
-    "CC-BY-4.0": "CC BY 4.0",
-    "CC-BY-NC-4.0": "CC BY-NC 4.0",
-    "CC0-1.0": "CC0 1.0",
-}
-MARKETPLACE_LICENSE_URLS = {
-    "CC-BY-4.0": "https://creativecommons.org/licenses/by/4.0/",
-    "CC-BY-NC-4.0": "https://creativecommons.org/licenses/by-nc/4.0/",
-    "CC0-1.0": "https://creativecommons.org/publicdomain/zero/1.0/",
-}
+INTERNAL_LICENSE_CODE = "INTERNAL"
 MARKETPLACE_SOURCE_TYPES = {
     "original": "原创",
     "authorized": "已获授权",
@@ -106,9 +97,6 @@ class PromptMarketplaceService:
         item["compatibility"] = json.loads(
             item.pop("compatibility_json") or "{}"
         )
-        item["license_url"] = MARKETPLACE_LICENSE_URLS.get(
-            str(item.get("license_code") or ""), ""
-        )
         item["is_owner"] = bool(
             actor_user_id
             and str(item.get("publisher_user_id") or "") == actor_user_id
@@ -144,7 +132,6 @@ class PromptMarketplaceService:
         description: str,
         tags: list[str],
         attribution_name: str,
-        license_code: str,
         source_type: str,
         source_url: str,
         rights_statement: str,
@@ -163,11 +150,9 @@ class PromptMarketplaceService:
         if str(template.get("status") or "") != "active":
             raise ValueError("已归档模板不能发布")
         if not publication_confirmed:
-            raise ValueError("必须确认模板内容会公开展示并可被安装")
+            raise ValueError("必须确认模板内容会在公司内部展示并可被安装")
         if not rights_confirmed:
-            raise ValueError("必须确认拥有发布与授权所需权利")
-        if license_code not in MARKETPLACE_LICENSES:
-            raise ValueError("不支持的模板许可")
+            raise ValueError("必须确认拥有发布与内部使用所需权利")
         if source_type not in MARKETPLACE_SOURCE_TYPES:
             raise ValueError("不支持的模板来源类型")
         normalized_source_url = str(source_url or "").strip()
@@ -182,7 +167,7 @@ class PromptMarketplaceService:
             raise ValueError("来源与权利说明至少需要 10 个字符")
         normalized_attribution = str(attribution_name or "").strip()
         if not normalized_attribution:
-            raise ValueError("公开署名不能为空")
+            raise ValueError("模板署名不能为空")
         revision = self.prompt_store.get_revision(
             template_id, int(expected_template_revision)
         )
@@ -199,7 +184,7 @@ class PromptMarketplaceService:
             "description": str(description).strip(),
             "tags": cleaned_tags,
             "attribution_name": normalized_attribution,
-            "license_code": license_code,
+            "license_code": INTERNAL_LICENSE_CODE,
             "source_type": source_type,
             "source_url": normalized_source_url,
             "rights_statement": normalized_rights,
@@ -262,7 +247,7 @@ class PromptMarketplaceService:
                     json.dumps(cleaned_tags, ensure_ascii=False),
                     actor_user_id,
                     normalized_attribution,
-                    license_code,
+                    INTERNAL_LICENSE_CODE,
                     source_type,
                     normalized_source_url,
                     normalized_rights,
@@ -304,6 +289,67 @@ class PromptMarketplaceService:
             "contract": "每个登录用户对同一模板只能保留一条已安装评分",
         }
 
+    def _official_items(
+        self,
+        *,
+        project_id: int,
+        actor_user_id: str,
+        query: str,
+        stage: str | None,
+    ) -> list[dict[str, Any]]:
+        """Project the canonical built-ins into the marketplace discovery UI.
+
+        Official templates stay system-owned and immediately usable. They are
+        deliberately not marketplace submissions, so they never acquire an
+        installation, rating, or moderation lifecycle.
+        """
+
+        normalized_query = str(query or "").strip().casefold()
+        items: list[dict[str, Any]] = []
+        for template in self.prompt_store.list_catalog(
+            project_id=project_id, actor_user_id=actor_user_id
+        ):
+            template_key = str(template.get("template_key") or "")
+            if template.get("owner_scope") != "system":
+                continue
+            # Legacy imports may contain system-scoped copies. Only the
+            # canonical built-in identity belongs in the official shelf.
+            if str(template.get("id") or "") != f"system:{template_key}":
+                continue
+            supported_stages = list(template.get("supported_stages") or [])
+            if stage and stage not in supported_stages:
+                continue
+            dimensions = template.get("content", {}).get("dimensions") or {}
+            searchable = " ".join(
+                [
+                    str(template.get("title") or ""),
+                    str(template.get("description") or ""),
+                    str(template.get("content", {}).get("shared_dna") or ""),
+                    *[str(value or "") for value in dimensions.values()],
+                ]
+            ).casefold()
+            if normalized_query and normalized_query not in searchable:
+                continue
+            items.append(
+                {
+                    **template,
+                    "marketplace_kind": "official",
+                    "attribution_name": "AiWorker 官方",
+                    "tags": list(
+                        dict.fromkeys(
+                            str(value) for value in dimensions.values() if value
+                        )
+                    ),
+                    "compatibility": {
+                        "schema_version": PROMPT_LIBRARY_SCHEMA_VERSION,
+                        "runtime_contract": "model-independent-prompt-snapshot-v1",
+                        "supported_stages": supported_stages,
+                        "supported_modes": sorted(PROMPT_LIBRARY_MODES),
+                    },
+                }
+            )
+        return sorted(items, key=lambda item: str(item.get("title") or ""))
+
     def marketplace(
         self,
         *,
@@ -311,15 +357,12 @@ class PromptMarketplaceService:
         actor_user_id: str,
         query: str = "",
         stage: str | None = None,
-        license_code: str | None = None,
         is_admin: bool = False,
         limit: int = 100,
     ) -> dict[str, Any]:
         self._project(project_id)
         if stage and stage not in PROMPT_LIBRARY_STAGES:
             raise ValueError("模板市场阶段筛选无效")
-        if license_code and license_code not in MARKETPLACE_LICENSES:
-            raise ValueError("模板市场许可筛选无效")
         normalized_query = str(query or "").strip().casefold()
         with self._connect() as conn:
             rows = conn.execute(
@@ -361,8 +404,6 @@ class PromptMarketplaceService:
                     item.get("compatibility", {}).get("supported_stages") or []
                 ):
                     continue
-                if license_code and item.get("license_code") != license_code:
-                    continue
                 submission_id = str(item["id"])
                 item["rating"] = self._rating_summary(conn, submission_id)
                 item["install_count"] = int(
@@ -390,6 +431,12 @@ class PromptMarketplaceService:
                 else []
             )
         return {
+            "official_items": self._official_items(
+                project_id=project_id,
+                actor_user_id=actor_user_id,
+                query=query,
+                stage=stage,
+            ),
             "items": listings,
             "own_submissions": [
                 self._submission_row(
@@ -404,21 +451,14 @@ class PromptMarketplaceService:
                 for row in moderation_rows
             ],
             "installations": list(installed_by_submission.values()),
-            "licenses": [
-                {
-                    "code": code,
-                    "label": label,
-                    "url": MARKETPLACE_LICENSE_URLS[code],
-                }
-                for code, label in MARKETPLACE_LICENSES.items()
-            ],
             "source_types": [
                 {"code": code, "label": label}
                 for code, label in MARKETPLACE_SOURCE_TYPES.items()
             ],
             "can_review": bool(is_admin),
             "policy": [
-                "只接受个人模板，提交即同意公开冻结版本的完整模板内容",
+                "官方模板为系统内置内容，可直接选择用于下一次生成，无需安装",
+                "社区发布只接受个人模板，提交即同意在公司内部展示冻结版本的完整内容",
                 "审核通过后才能被其他项目发现和安装",
                 "安装生成项目内独立副本，不自动绑定，也不跟随来源更新",
                 "发布者不能给自己的模板评分；每位用户每个模板只能保留一条评分",
@@ -553,16 +593,12 @@ class PromptMarketplaceService:
         project_id: int,
         submission_id: str,
         operation_id: str,
-        license_accepted: bool,
         actor_user_id: str,
     ) -> dict[str, Any]:
         self._project(project_id)
-        if not license_accepted:
-            raise ValueError("安装前必须接受模板许可与署名要求")
         request_payload = {
             "project_id": int(project_id),
             "submission_id": str(submission_id),
-            "license_accepted": True,
         }
         request_hash = content_hash(request_payload)
         with self._connect() as conn:
@@ -603,8 +639,8 @@ class PromptMarketplaceService:
             template_key = f"project-{template_id}"
             description = str(listing["description"] or "").strip()
             provenance = (
-                f"市场安装 · {listing['attribution_name']} · "
-                f"{listing['license_code']} · 来源版本 v{listing['template_revision']}"
+                f"模板中心安装 · {listing['attribution_name']} · "
+                f"来源版本 v{listing['template_revision']}"
             )
             installed_description = (
                 f"{description}\n{provenance}" if description else provenance

@@ -50,7 +50,6 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
         "title": "审核通过的强钩子模板",
         "description": "适合竖屏短剧",
         "attribution_name": "社区编剧",
-        "license_code": "CC-BY-NC-4.0",
         "source_url": "",
         "tags": ["竖屏", "强钩子"],
         "compatibility": {
@@ -65,10 +64,25 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
         "is_owner": False,
         "status": "approved",
     }
+    official = {
+        "id": "system:generic-vertical-short",
+        "template_key": "generic-vertical-short",
+        "title": "通用竖屏短剧",
+        "description": "官方内置模板",
+        "owner_scope": "system",
+        "revision": 2,
+        "tags": ["竖屏短剧", "强情绪"],
+        "compatibility": {
+            "schema_version": "prompt-library-v1",
+            "supported_stages": ["script"],
+        },
+        "content": {"shared_dna": "每集围绕一个清晰的戏剧动作推进。"},
+    }
     bootstrap = {
         "project": {"id": 9},
         "template": template,
         "listing": listing,
+        "official": official,
     }
     modal = _source("templates/common/workspace/prompt_library_modal.html")
     market_start = modal.index(
@@ -84,7 +98,7 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
         'x-init="creativeWorkspace.project = window.__marketBootstrap.project; '
         "creativeWorkspace.promptLibrary.stage = 'script'; "
         "creativeWorkspace.promptLibrary.settings = {enabled: true}; "
-        "creativeWorkspace.promptLibrary.templates = [window.__marketBootstrap.template]; "
+        "creativeWorkspace.promptLibrary.templates = [window.__marketBootstrap.template, window.__marketBootstrap.official]; "
         "creativeWorkspace.promptLibrary.selectedTemplateKey = window.__marketBootstrap.template.template_key; "
         'creativeWorkspace.promptLibrary.marketplaceOpen = true; loadPromptMarketplace()"'
         f'>{market_panel}</main>'
@@ -136,7 +150,7 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
                   return Promise.resolve({
                     ok: true,
                     json: async () => ({
-                      settings: {enabled: true}, templates: [window.__marketBootstrap.template],
+                      settings: {enabled: true}, templates: [window.__marketBootstrap.template, window.__marketBootstrap.official],
                       effective: window.__marketBootstrap.template,
                       stage_binding: null, episode_binding: null
                     })
@@ -156,9 +170,9 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
                 return Promise.resolve({
                   ok: true,
                   json: async () => ({
+                    official_items: [window.__marketBootstrap.official],
                     items: [item], own_submissions: [], moderation_queue: [],
                     installations: item.installation ? [item.installation] : [],
-                    licenses: [{code: 'CC-BY-NC-4.0', label: 'CC BY-NC 4.0'}],
                     source_types: [
                       {code: 'original', label: '原创'},
                       {code: 'authorized', label: '授权改编'}
@@ -180,13 +194,13 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
         submit_button = page.get_by_role("button", name="提交市场审核")
         assert submit_button.is_enabled()
         submit_button.click()
-        page.get_by_text("公开署名未填写", exact=True).wait_for()
+        page.get_by_text("模板署名未填写", exact=True).wait_for()
         assert page.locator("#promptMarketplaceAttribution").evaluate(
             "element => document.activeElement === element"
         )
         page.get_by_text("来源与权利说明未填写", exact=True).wait_for()
-        page.get_by_text("请确认模板会公开展示并可被安装", exact=True).wait_for()
-        page.get_by_text("请确认拥有发布和授权所需权利", exact=True).wait_for()
+        page.get_by_text("请确认模板会在公司内部展示并可被安装", exact=True).wait_for()
+        page.get_by_text("请确认拥有发布和内部使用所需权利", exact=True).wait_for()
         assert not page.evaluate("window.__marketSubmitted")
 
         page.locator("#promptMarketplaceAttribution").fill("我的署名")
@@ -204,7 +218,7 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
         assert not page.evaluate("window.__marketSubmitted")
 
         page.locator("#promptMarketplaceSourceUrl").fill("https://example.com/source")
-        page.locator("#promptMarketplaceRights").fill("已取得原作者授权，可按所选许可公开使用。")
+        page.locator("#promptMarketplaceRights").fill("已取得原作者授权，可在公司内部项目中使用。")
         page.locator("#promptMarketplacePublicConfirm").check()
         page.locator("#promptMarketplaceRightsConfirm").check()
         submit_button.click()
@@ -214,6 +228,7 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
         )
         assert submission["method"] == "POST"
         assert submission["body"]["source_url"] == "https://example.com/source"
+        assert "license_code" not in submission["body"]
 
         page.evaluate(
             "Alpine.$data(document.querySelector('main')).creativeWorkspace."
@@ -228,7 +243,7 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
             "window.__marketRequests.filter(item => item.url.includes('/marketplace-submissions')).length"
         ) == 1
 
-        install_button = page.get_by_role("button", name="接受许可并安装")
+        install_button = page.get_by_role("button", name="安装到项目")
         install_button.wait_for()
         install_button.click()
         page.get_by_text("已安装为项目独立副本", exact=True).wait_for()
@@ -236,7 +251,7 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
             "window.__marketRequests.find(item => item.url.includes('/install'))"
         )
         assert install_request["method"] == "POST"
-        assert install_request["body"]["license_accepted"] is True
+        assert "license_accepted" not in install_request["body"]
 
         page.get_by_role("button", name="评价已安装模板").click()
         page.get_by_role("button", name="更新我的评分").wait_for()
@@ -248,6 +263,17 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
             "score": 5,
             "review_text": "实际生成后钩子更稳定",
             "expected_revision": 0,
+        }
+
+        page.get_by_role("button", name="立即使用").click()
+        selection = page.evaluate(
+            "Alpine.$data(document.querySelector('main')).creativeWorkspace."
+            "promptLibrary.runSelections.script"
+        )
+        assert selection == {
+            "templateKey": "generic-vertical-short",
+            "revision": 2,
+            "customRequirements": "",
         }
         assert page_errors == []
         browser.close()

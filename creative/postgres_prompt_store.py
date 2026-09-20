@@ -1263,6 +1263,365 @@ class PromptStore:
         saved["revision_id"] = int(cursor.lastrowid)
         return saved
 
+    def personal_template_deletion_impact(
+        self,
+        template_id: str,
+        *,
+        actor_user_id: str,
+        project_id: int | None = None,
+    ) -> dict[str, Any]:
+        template = self.get_template(template_id)
+        if template is None:
+            raise ValueError("模板不存在")
+        if template.get("owner_scope") != "user":
+            raise ValueError("只能删除我的模板")
+        if str(template.get("owner_user_id") or "") != str(actor_user_id):
+            raise PermissionError("只能删除自己的个人模板")
+        with self._connect() as conn:
+            default_rows = conn.execute(
+                "SELECT settings.project_id, projects.name AS project_name "
+                "FROM creative_project_prompt_settings settings "
+                "LEFT JOIN creative_projects projects ON projects.id = settings.project_id "
+                "WHERE settings.default_template_id = ? ORDER BY settings.project_id",
+                (str(template_id),),
+            ).fetchall()
+            binding_rows = conn.execute(
+                "SELECT bindings.project_id, projects.name AS project_name, "
+                "bindings.stage, bindings.episode_number "
+                "FROM creative_project_prompt_bindings bindings "
+                "LEFT JOIN creative_projects projects ON projects.id = bindings.project_id "
+                "WHERE bindings.template_id = ? "
+                "ORDER BY bindings.project_id, bindings.stage, bindings.episode_number",
+                (str(template_id),),
+            ).fetchall()
+            submission_rows = conn.execute(
+                "SELECT id, status FROM creative_prompt_market_submissions "
+                "WHERE template_id = ? ORDER BY created_at DESC",
+                (str(template_id),),
+            ).fetchall()
+        defaults = [dict(row) for row in default_rows]
+        bindings = [dict(row) for row in binding_rows]
+        submissions = [dict(row) for row in submission_rows]
+        active_binding_count = len(defaults) + len(bindings)
+        current_project_id = int(project_id or 0)
+        current_defaults = [
+            row for row in defaults if int(row["project_id"]) == current_project_id
+        ]
+        current_bindings = [
+            row for row in bindings if int(row["project_id"]) == current_project_id
+        ]
+        all_stages = {
+            "brief", "characters", "outline", "beats", "script", "review",
+            "optimization",
+        }
+        required_stages = (
+            all_stages
+            if current_defaults
+            else {str(row["stage"]) for row in current_bindings}
+        )
+        replacement_candidates: list[dict[str, Any]] = []
+        if current_project_id and (current_defaults or current_bindings):
+            for candidate in self.list_catalog(
+                project_id=current_project_id, actor_user_id=actor_user_id
+            ):
+                if str(candidate["id"]) == str(template_id):
+                    continue
+                supported = set(candidate.get("supported_stages") or [])
+                if not required_stages.issubset(supported):
+                    continue
+                replacement_candidates.append(
+                    {
+                        "id": str(candidate["id"]),
+                        "template_key": str(candidate["template_key"]),
+                        "title": str(candidate["title"]),
+                        "owner_scope": str(candidate["owner_scope"]),
+                        "revision": int(candidate["revision"]),
+                        "supported_stages": sorted(supported),
+                    }
+                )
+        other_projects: dict[int, dict[str, Any]] = {}
+        for row in defaults:
+            row_project_id = int(row["project_id"])
+            if row_project_id == current_project_id:
+                continue
+            item = other_projects.setdefault(
+                row_project_id,
+                {
+                    "project_id": row_project_id,
+                    "project_name": str(row.get("project_name") or f"项目 {row_project_id}"),
+                    "default_binding_count": 0,
+                    "stage_binding_count": 0,
+                    "stages": [],
+                },
+            )
+            item["default_binding_count"] += 1
+        for row in bindings:
+            row_project_id = int(row["project_id"])
+            if row_project_id == current_project_id:
+                continue
+            item = other_projects.setdefault(
+                row_project_id,
+                {
+                    "project_id": row_project_id,
+                    "project_name": str(row.get("project_name") or f"项目 {row_project_id}"),
+                    "default_binding_count": 0,
+                    "stage_binding_count": 0,
+                    "stages": [],
+                },
+            )
+            item["stage_binding_count"] += 1
+            stage = str(row["stage"])
+            if stage not in item["stages"]:
+                item["stages"].append(stage)
+        return {
+            "template_id": str(template_id),
+            "title": str(template.get("title") or ""),
+            "status": str(template.get("status") or ""),
+            "active_binding_count": active_binding_count,
+            "default_bindings": defaults,
+            "stage_bindings": bindings,
+            "current_project_binding_count": len(current_defaults) + len(current_bindings),
+            "current_project_default_bindings": current_defaults,
+            "current_project_stage_bindings": current_bindings,
+            "other_project_references": list(other_projects.values()),
+            "required_replacement_stages": sorted(required_stages),
+            "replacement_candidates": replacement_candidates,
+            "market_submission_count": len(submissions),
+            "market_submissions": submissions,
+            "historical_data_preserved": True,
+            "can_delete": active_binding_count == 0,
+            "delete_blockers": (
+                []
+                if active_binding_count == 0
+                else ["模板仍被项目默认设置、阶段或单集绑定使用，请先改绑"]
+            ),
+        }
+
+    def delete_personal_template(
+        self,
+        template_id: str,
+        *,
+        actor_user_id: str,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        impact = self.personal_template_deletion_impact(
+            template_id, actor_user_id=actor_user_id
+        )
+        if impact["status"] == "archived":
+            return {
+                "deleted": True,
+                "template": self.get_template(template_id),
+                "impact": impact,
+            }
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT owner_scope, owner_user_id, status "
+                "FROM creative_prompt_templates WHERE id = ?",
+                (str(template_id),),
+            ).fetchone()
+            if current is None:
+                raise ValueError("模板不存在")
+            if current["owner_scope"] != "user":
+                raise ValueError("只能删除我的模板")
+            if str(current["owner_user_id"] or "") != str(actor_user_id):
+                raise PermissionError("只能删除自己的个人模板")
+            if current["status"] == "archived":
+                return {
+                    "deleted": True,
+                    "template": self.get_template(template_id),
+                    "impact": impact,
+                }
+            active_binding_count = int(
+                conn.execute(
+                    "SELECT ("
+                    "(SELECT COUNT(*) FROM creative_project_prompt_settings "
+                    "WHERE default_template_id = ?) + "
+                    "(SELECT COUNT(*) FROM creative_project_prompt_bindings "
+                    "WHERE template_id = ?)) AS total",
+                    (str(template_id), str(template_id)),
+                ).fetchone()["total"]
+                or 0
+            )
+            if active_binding_count:
+                raise ValueError(
+                    "模板仍被项目默认设置、阶段或单集绑定使用，请先改绑"
+                )
+            latest = conn.execute(
+                "SELECT revision FROM creative_prompt_template_revisions "
+                "WHERE template_id = ? ORDER BY revision DESC LIMIT 1",
+                (str(template_id),),
+            ).fetchone()
+            if latest is None or int(latest["revision"]) != int(expected_revision):
+                raise ValueError("模板版本已发生变化，请刷新后重试")
+            updated = conn.execute(
+                "UPDATE creative_prompt_templates SET status = 'archived', "
+                "catalog_visible = FALSE, updated_at = ? "
+                "WHERE id = ? AND owner_scope = 'user' AND owner_user_id = ? "
+                "AND status = 'active'",
+                (time.time(), str(template_id), str(actor_user_id)),
+            )
+            if int(updated.rowcount or 0) != 1:
+                raise ValueError("模板状态已发生变化，请刷新后重试")
+        deleted_template = self.get_template(template_id) or {}
+        impact["status"] = "archived"
+        return {"deleted": True, "template": deleted_template, "impact": impact}
+
+    def rebind_and_delete_personal_template(
+        self,
+        *,
+        project_id: int,
+        template_id: str,
+        actor_user_id: str,
+        expected_revision: int,
+        replacement_template_id: str,
+        replacement_template_revision: int,
+    ) -> dict[str, Any]:
+        if str(template_id) == str(replacement_template_id):
+            raise ValueError("替代模板不能是待删除模板")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            source = conn.execute(
+                "SELECT * FROM creative_prompt_templates WHERE id = ?",
+                (str(template_id),),
+            ).fetchone()
+            if source is None:
+                raise ValueError("模板不存在")
+            if source["owner_scope"] != "user":
+                raise ValueError("只能删除我的模板")
+            if str(source["owner_user_id"] or "") != str(actor_user_id):
+                raise PermissionError("只能删除自己的个人模板")
+            if source["status"] != "active":
+                raise ValueError("模板状态已发生变化，请刷新后重试")
+            source_revision = conn.execute(
+                "SELECT revision FROM creative_prompt_template_revisions "
+                "WHERE template_id = ? ORDER BY revision DESC LIMIT 1",
+                (str(template_id),),
+            ).fetchone()
+            if source_revision is None or int(source_revision["revision"]) != int(
+                expected_revision
+            ):
+                raise ValueError("模板版本已发生变化，请刷新后重试")
+
+            replacement_row = conn.execute(
+                "SELECT * FROM creative_prompt_templates WHERE id = ?",
+                (str(replacement_template_id),),
+            ).fetchone()
+            if replacement_row is None:
+                raise ValueError("替代模板不存在")
+            replacement = self._template_row(replacement_row)
+            if replacement["owner_scope"] == "user" and str(
+                replacement.get("owner_user_id") or ""
+            ) != str(actor_user_id):
+                raise PermissionError("无权使用该个人模板")
+            if replacement["owner_scope"] == "project" and int(
+                replacement.get("project_id") or 0
+            ) != int(project_id):
+                raise PermissionError("无权使用其他项目的模板")
+            self._assert_template_selectable(replacement)
+            replacement_revision_row = conn.execute(
+                "SELECT * FROM creative_prompt_template_revisions "
+                "WHERE template_id = ? ORDER BY revision DESC LIMIT 1",
+                (str(replacement_template_id),),
+            ).fetchone()
+            if replacement_revision_row is None:
+                raise ValueError("替代模板版本不存在")
+            replacement_revision = self._revision_row(replacement_revision_row)
+            if int(replacement_revision["revision"]) != int(
+                replacement_template_revision
+            ):
+                raise ValueError("替代模板版本已发生变化，请刷新后重试")
+
+            default_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS total FROM creative_project_prompt_settings "
+                    "WHERE project_id = ? AND default_template_id = ?",
+                    (int(project_id), str(template_id)),
+                ).fetchone()["total"]
+                or 0
+            )
+            binding_rows = conn.execute(
+                "SELECT stage FROM creative_project_prompt_bindings "
+                "WHERE project_id = ? AND template_id = ?",
+                (int(project_id), str(template_id)),
+            ).fetchall()
+            binding_count = len(binding_rows)
+            if default_count + binding_count == 0:
+                raise ValueError("当前项目没有需要改绑的引用")
+            required_stages = (
+                {
+                    "brief", "characters", "outline", "beats", "script",
+                    "review", "optimization",
+                }
+                if default_count
+                else {str(row["stage"]) for row in binding_rows}
+            )
+            unsupported = [
+                stage
+                for stage in sorted(required_stages)
+                if not self._supports_stage(replacement_revision, stage)
+            ]
+            if unsupported:
+                raise ValueError(
+                    f"替代模板不支持所需阶段：{'、'.join(unsupported)}"
+                )
+
+            conn.execute(
+                "UPDATE creative_project_prompt_settings "
+                "SET default_template_id = ?, default_template_revision = ?, "
+                "updated_by = ?, updated_at = ? "
+                "WHERE project_id = ? AND default_template_id = ?",
+                (
+                    str(replacement_template_id),
+                    int(replacement_template_revision),
+                    str(actor_user_id),
+                    time.time(),
+                    int(project_id),
+                    str(template_id),
+                ),
+            )
+            conn.execute(
+                "UPDATE creative_project_prompt_bindings "
+                "SET template_id = ?, template_revision = ?, updated_by = ?, updated_at = ? "
+                "WHERE project_id = ? AND template_id = ?",
+                (
+                    str(replacement_template_id),
+                    int(replacement_template_revision),
+                    str(actor_user_id),
+                    time.time(),
+                    int(project_id),
+                    str(template_id),
+                ),
+            )
+            remaining = int(
+                conn.execute(
+                    "SELECT ("
+                    "(SELECT COUNT(*) FROM creative_project_prompt_settings "
+                    "WHERE default_template_id = ?) + "
+                    "(SELECT COUNT(*) FROM creative_project_prompt_bindings "
+                    "WHERE template_id = ?)) AS total",
+                    (str(template_id), str(template_id)),
+                ).fetchone()["total"]
+                or 0
+            )
+            deleted = remaining == 0
+            if deleted:
+                conn.execute(
+                    "UPDATE creative_prompt_templates SET status = 'archived', "
+                    "catalog_visible = FALSE, updated_at = ? WHERE id = ?",
+                    (time.time(), str(template_id)),
+                )
+        return {
+            "rebound": True,
+            "deleted": deleted,
+            "replaced_default_bindings": default_count,
+            "replaced_stage_bindings": binding_count,
+            "remaining_binding_count": remaining,
+            "replacement_template_id": str(replacement_template_id),
+            "replacement_template_revision": int(replacement_template_revision),
+            "template": self.get_template(template_id),
+        }
+
     def project_settings(self, project_id: int) -> dict[str, Any]:
         with self._connect() as conn:
             row = conn.execute(
@@ -1298,6 +1657,15 @@ class PromptStore:
         self._assert_template_selectable(template)
         revision = self.get_revision(template["id"])
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT status, governance_status, approved_revision "
+                "FROM creative_prompt_templates WHERE id = ?",
+                (str(template["id"]),),
+            ).fetchone()
+            if current is None:
+                raise ValueError("默认模板不存在")
+            self._assert_template_selectable(dict(current))
             project = conn.execute(
                 "SELECT id FROM creative_projects WHERE id = ? AND deleted = FALSE",
                 (int(project_id),),
@@ -1365,6 +1733,17 @@ class PromptStore:
         if not self._supports_stage(revision, stage):
             raise ValueError(f"所选模板版本不支持 {stage} 阶段")
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT status, governance_status, approved_revision "
+                "FROM creative_prompt_templates WHERE id = ?",
+                (str(template_id),),
+            ).fetchone()
+            if current is None:
+                raise ValueError("模板不存在")
+            self._assert_template_selectable(
+                dict(current), revision=int(template_revision)
+            )
             conn.execute(
                 """
                 INSERT INTO creative_project_prompt_bindings (

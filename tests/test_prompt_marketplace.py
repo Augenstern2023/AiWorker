@@ -58,7 +58,6 @@ def _submission(
         description="适合竖屏短剧的节奏模板",
         tags=["竖屏", "强钩子", "竖屏"],
         attribution_name="编剧甲",
-        license_code="CC-BY-NC-4.0",
         source_type="original",
         source_url="",
         rights_statement="本人原创并有权许可其他项目安装使用。",
@@ -98,6 +97,7 @@ def test_marketplace_moderates_frozen_personal_template_and_installs_copy(tmp_pa
         template_id=personal["id"],
     )
     assert submission["status"] == "pending"
+    assert submission["license_code"] == "INTERNAL"
     assert submission["tags"] == ["竖屏", "强钩子"]
     assert submission["compatibility"]["schema_version"] == "prompt-library-v1"
 
@@ -137,6 +137,17 @@ def test_marketplace_moderates_frozen_personal_template_and_installs_copy(tmp_pa
         actor_user_id="manager-2",
         stage="script",
     )
+    assert {item["template_key"] for item in catalog["official_items"]} == {
+        "generic-vertical-short",
+        "urban-identity-romcom",
+        "barrage-revenge",
+        "oriental-rule-mystery",
+    }
+    assert all(
+        item["owner_scope"] == "system"
+        and item["marketplace_kind"] == "official"
+        for item in catalog["official_items"]
+    )
     assert [item["id"] for item in catalog["items"]] == [submission["id"]]
     assert catalog["items"][0]["install_count"] == 0
     assert catalog["items"][0]["content"] == submission["content"]
@@ -145,7 +156,6 @@ def test_marketplace_moderates_frozen_personal_template_and_installs_copy(tmp_pa
         project_id=target_project["id"],
         submission_id=submission["id"],
         operation_id="install-v1-target",
-        license_accepted=True,
         actor_user_id="manager-2",
     )
     assert installed["bound"] is False
@@ -155,6 +165,7 @@ def test_marketplace_moderates_frozen_personal_template_and_installs_copy(tmp_pa
     assert installed["installation"]["source_content_hash"] == submission[
         "template_content_hash"
     ]
+    assert installed["installation"]["license_code"] == "INTERNAL"
     store.enable_project(
         target_project["id"],
         actor_user_id="manager-2",
@@ -226,7 +237,7 @@ def test_marketplace_requires_rights_and_uses_installed_one_user_rating(tmp_path
     )
     service = PromptMarketplaceService(repository, store)
 
-    with pytest.raises(ValueError, match="确认模板内容会公开"):
+    with pytest.raises(ValueError, match="确认模板内容会在公司内部展示"):
         service.submit(
             project_id=source_project["id"],
             template_id=personal["id"],
@@ -236,7 +247,6 @@ def test_marketplace_requires_rights_and_uses_installed_one_user_rating(tmp_path
             description="",
             tags=[],
             attribution_name="编剧甲",
-            license_code="CC-BY-4.0",
             source_type="original",
             source_url="",
             rights_statement="本人原创并保留完整发布权利。",
@@ -264,7 +274,6 @@ def test_marketplace_requires_rights_and_uses_installed_one_user_rating(tmp_path
         project_id=target_project["id"],
         submission_id=submission["id"],
         operation_id="rating-install",
-        license_accepted=True,
         actor_user_id="manager-2",
     )
 
@@ -361,7 +370,6 @@ def test_marketplace_rejects_non_original_without_verifiable_source(tmp_path):
             description="",
             tags=[],
             attribution_name="编剧甲",
-            license_code="CC-BY-4.0",
             source_type="authorized",
             source_url="",
             rights_statement="已获得原作者明确书面发布授权。",

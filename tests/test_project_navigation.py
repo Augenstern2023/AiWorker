@@ -41,3 +41,46 @@ def test_latest_free_stage_accepts_postgres_datetimes_and_has_stable_ties() -> N
     assert result[0]["latest_stage"] == "script"
     assert result[0]["latest_episode_number"] == 3
     assert "latest_stage" not in result[1]
+
+
+def test_free_project_without_locked_resources_has_no_locked_stage() -> None:
+    result = attach_latest_free_stage(
+        [{"id": 1, "workflow_mode": "free"}],
+        [],
+    )
+
+    assert result[0]["latest_stage"] == "brief"
+    assert result[0]["latest_episode_number"] == 0
+    assert "latest_locked_stage" not in result[0]
+
+
+def test_latest_free_locked_stage_uses_lock_time_not_last_touched_head() -> None:
+    result = attach_latest_free_stage(
+        [{"id": 1, "workflow_mode": "free"}],
+        [
+            {
+                "project_id": 1,
+                "stage": "script",
+                "episode_number": 2,
+                "updated_at": 30,
+            }
+        ],
+        [
+            {
+                "project_id": 1,
+                "stage": "brief",
+                "episode_number": 0,
+                "locked_at": 10,
+            },
+            {
+                "project_id": 1,
+                "stage": "characters",
+                "episode_number": 0,
+                "locked_at": 20,
+            },
+        ],
+    )
+
+    assert result[0]["latest_stage"] == "script"
+    assert result[0]["latest_locked_stage"] == "characters"
+    assert result[0]["latest_locked_episode_number"] == 0

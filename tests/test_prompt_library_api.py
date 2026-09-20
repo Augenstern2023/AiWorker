@@ -38,6 +38,8 @@ from creative.schema import (
     PromptMarketplaceSubmissionRequest,
     PromptProjectEnableRequest,
     PromptTemplateCreateRequest,
+    PromptTemplateDeleteRequest,
+    PromptTemplateRebindDeleteRequest,
     PromptTemplateRevisionRequest,
 )
 
@@ -674,6 +676,124 @@ def _prompt_project(repository: CreativeRepository):
 
 
 @pytest.mark.asyncio
+async def test_personal_template_deletion_api_previews_impact_and_checks_revision(
+    tmp_path,
+):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = _prompt_project(repository)
+    store = PromptStore(repository)
+    template = store.create_template(
+        title="API 待删除个人模板",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id="owner-1",
+    )
+    router, _, _ = _router(repository, tmp_path)
+    impact_endpoint = _endpoint(
+        router,
+        "/api/creative/projects/{project_id}/prompt-library/templates/{template_id}/deletion-impact",
+        "GET",
+    )
+    delete_endpoint = _endpoint(
+        router,
+        "/api/creative/projects/{project_id}/prompt-library/templates/{template_id}",
+        "DELETE",
+    )
+    principal = _principal("owner-1", admin=True)
+
+    impact = await impact_endpoint(
+        project_id=project["id"],
+        template_id=template["id"],
+        request=_request(FastAPI(), "GET"),
+        principal=principal,
+    )
+    assert impact["can_delete"] is True
+    assert impact["historical_data_preserved"] is True
+
+    changed = builtin_template("generic-vertical-short")
+    changed["shared_dna"] += " 保存一个新版本。"
+    store.save_revision(
+        template["id"], changed, expected_revision=1, actor_user_id="owner-1"
+    )
+    with pytest.raises(HTTPException) as stale:
+        await delete_endpoint(
+            project_id=project["id"],
+            template_id=template["id"],
+            payload=PromptTemplateDeleteRequest(expected_revision=1),
+            request=_request(FastAPI(), "DELETE"),
+            principal=principal,
+        )
+    assert stale.value.status_code == 409
+    assert "模板版本已发生变化" in stale.value.detail
+
+    deleted = await delete_endpoint(
+        project_id=project["id"],
+        template_id=template["id"],
+        payload=PromptTemplateDeleteRequest(expected_revision=2),
+        request=_request(FastAPI(), "DELETE"),
+        principal=principal,
+    )
+    assert deleted["deleted"] is True
+    assert deleted["template"]["status"] == "archived"
+    assert template["id"] not in {
+        item["id"]
+        for item in store.list_catalog(
+            project_id=project["id"], actor_user_id="owner-1"
+        )
+    }
+
+
+@pytest.mark.asyncio
+async def test_personal_template_rebind_and_delete_api_updates_current_project(
+    tmp_path,
+):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = _prompt_project(repository)
+    store = PromptStore(repository)
+    template = store.create_template(
+        title="API 待改绑模板",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id="owner-1",
+    )
+    store.set_binding(
+        project_id=project["id"],
+        stage="script",
+        episode_number=0,
+        template_id=template["id"],
+        template_revision=1,
+        override={"custom_requirements": "保留原有要求"},
+        actor_user_id="owner-1",
+    )
+    replacement = store.get_template_by_key("generic-vertical-short")
+    router, _, _ = _router(repository, tmp_path)
+    endpoint = _endpoint(
+        router,
+        "/api/creative/projects/{project_id}/prompt-library/templates/{template_id}/rebind-and-delete",
+        "POST",
+    )
+
+    result = await endpoint(
+        project_id=project["id"],
+        template_id=template["id"],
+        payload=PromptTemplateRebindDeleteRequest(
+            expected_revision=1,
+            replacement_template_id=replacement["id"],
+            replacement_template_revision=1,
+        ),
+        request=_request(FastAPI()),
+        principal=_principal("owner-1", admin=True),
+    )
+
+    binding = store.binding(project["id"], "script", 0)
+    assert result["deleted"] is True
+    assert binding["template_id"] == replacement["id"]
+    assert binding["override"] == {"custom_requirements": "保留原有要求"}
+
+
+@pytest.mark.asyncio
 async def test_project_template_governance_api_exposes_impact_and_approves_revision(
     tmp_path,
 ):
@@ -839,7 +959,6 @@ async def test_prompt_marketplace_api_requires_review_and_installs_without_bindi
             description="市场 API 验收",
             tags=["竖屏", "通用"],
             attribution_name="编剧甲",
-            license_code="CC-BY-NC-4.0",
             source_type="original",
             rights_statement="本人原创并授权其他项目安装使用。",
             publication_confirmed=True,
@@ -848,12 +967,12 @@ async def test_prompt_marketplace_api_requires_review_and_installs_without_bindi
         request=_request(app),
         principal=_principal("owner-1", admin=True),
     )
+    assert submitted["license_code"] == "INTERNAL"
     pending_market = await market_endpoint(
         project_id=project["id"],
         request=_request(app, "GET"),
         q="",
         stage=None,
-        license_code=None,
         limit=100,
         principal=_principal("owner-1", admin=True),
     )
@@ -878,7 +997,7 @@ async def test_prompt_marketplace_api_requires_review_and_installs_without_bindi
         project_id=project["id"],
         submission_id=submitted["id"],
         payload=PromptMarketplaceInstallRequest(
-            operation_id="market-api-install", license_accepted=True
+            operation_id="market-api-install"
         ),
         request=_request(app),
         principal=_principal("manager-1", admin=True),
@@ -1123,7 +1242,6 @@ async def test_marketplace_install_and_rating_authority(
         description="测试作品",
         tags=[],
         attribution_name="原创作者",
-        license_code="CC-BY-4.0",
         source_type="original",
         source_url="",
         rights_statement="本人原创并授权其他项目安装使用。",
@@ -1145,12 +1263,11 @@ async def test_marketplace_install_and_rating_authority(
             project_id=project["id"],
             submission_id=submitted["id"],
             operation_id="manager-install",
-            license_accepted=True,
             actor_user_id="manager",
         )
     payload = (
         PromptMarketplaceInstallRequest(
-            operation_id="permission-install", license_accepted=True
+            operation_id="permission-install"
         )
         if operation == "install"
         else PromptMarketplaceRatingRequest(

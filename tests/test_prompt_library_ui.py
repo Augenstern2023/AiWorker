@@ -123,6 +123,7 @@ def test_prompt_library_information_architecture_separates_daily_and_advanced_wo
 
 def test_prompt_library_ui_keeps_contract_locked_and_supports_all_mvp_scopes():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
+    script = _read("static/js/common/creative.js")
 
     assert "输出字段、JSON 契约和运行变量由系统锁定" in modal
     assert "作为当前阶段默认模板" in modal
@@ -131,6 +132,13 @@ def test_prompt_library_ui_keeps_contract_locked_and_supports_all_mvp_scopes():
     assert "另存到我的模板" in modal
     assert "另存为项目模板" in modal
     assert "保存为新版本" in modal
+    assert "删除模板" in modal
+    assert "先改绑，再删除" in modal
+    assert "改绑并删除模板" in modal
+    assert "前往该项目改绑" in modal
+    assert "deletePersonalPromptTemplate" in script
+    assert "rebindAndDeletePersonalPromptTemplate" in script
+    assert "deletingTemplateId" in _read("static/js/common/tasks.js")
 
 
 def test_prompt_picker_clicks_full_card_and_shows_selected_template_details():
@@ -221,14 +229,23 @@ def test_prompt_library_ui_exposes_moderated_cross_project_marketplace():
     state = _read("static/js/common/tasks.js")
 
     assert "模板市场" in modal
+    assert "官方模板" in modal
+    assert "官方内置" in modal
+    assert "立即使用" in modal
+    assert "不复制、不安装、不修改默认设置" in modal
     assert "项目模板不能直接发布" in modal
-    assert "完整模板冻结版本会公开展示" in modal
+    assert "完整模板冻结版本会在公司内部展示" in modal
     assert "平台审核队列" in modal
-    assert "接受许可并安装" in modal
+    assert "安装到项目" in modal
+    assert "授权许可" not in modal
+    assert "promptMarketplaceLicense" not in script
+    assert "marketplaceLicense" not in state
     assert "已安装为项目独立副本" in modal
     assert "评分仅来自已安装用户；发布者不能自评" in modal
     assert "不会自动绑定模板或跟随来源更新" in modal
     assert "loadPromptMarketplace" in script
+    assert "useOfficialPromptMarketplaceTemplate" in script
+    assert "marketplaceOfficialItems" in state
     assert "submitSelectedPromptToMarketplace" in script
     assert "reviewPromptMarketplaceSubmission" in script
     assert "installPromptMarketplaceListing" in script
@@ -248,13 +265,55 @@ def test_generation_payload_consumes_a_server_versioned_single_run_selection():
     assert "prompt_template_revision: selection.revision" in script
     assert "prompt_override: {custom_requirements:" in script
     assert "promptStageForGenerationAction(action)" in script
-    assert "runSelections[promptStage]" in script
+    assert "clearPromptRunSelection(promptStage)" in script
     assert "this.promptGenerationPayload('brief'" in script
     assert "this.promptGenerationPayload('characters'" in script
     assert "this.promptGenerationPayload('outline'" in script
     assert "this.promptGenerationPayload('beats'" in script
     assert "this.promptGenerationPayload('script'" in script
     assert "this.promptGenerationPayload('outline', body)" in _read("static/js/writing/outlines.js")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_next_generation_template_selection_survives_navigation_and_is_cleared():
+    program = """
+    const stored = new Map();
+    global.window = {
+      aiworkerModules: [],
+      sessionStorage: {
+        setItem(key, value) { stored.set(key, value); },
+        getItem(key) { return stored.has(key) ? stored.get(key) : null; },
+        removeItem(key) { stored.delete(key); },
+      },
+    };
+    require('./static/js/common/creative.js');
+    const component = window.aiworkerModules[0]();
+    component.creativeWorkspace = {
+      project: {id: 9},
+      promptLibrary: {runSelections: {}},
+    };
+    component.storePromptRunSelection(
+      'script', {template_key: 'generic-vertical-short', revision: 2}, ''
+    );
+    component.creativeWorkspace.promptLibrary.runSelections = {};
+    const restored = component.promptRunSelection('script');
+    if (restored.templateKey !== 'generic-vertical-short' || restored.revision !== 2) {
+      throw new Error(`unexpected restored selection: ${JSON.stringify(restored)}`);
+    }
+    component.clearPromptRunSelection('script');
+    if (component.promptRunSelection('script') !== null) {
+      throw new Error('selection was not cleared');
+    }
+    """
+    result = subprocess.run(
+        ["node", "-e", program],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_old_project_upgrade_is_folded_into_first_real_template_action():

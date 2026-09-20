@@ -66,6 +66,58 @@
                             <button class="btn btn-outline-info btn-sm w-100" type="button" @click="copySelectedPromptTemplate('user')" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">另存到我的模板</button>
                         </div>
                     </div>
+                    <section id="prompt-delete-rebind-panel" class="border border-warning rounded p-3 mt-3" x-show="creativeWorkspace.promptLibrary.deleteTemplate && creativeWorkspace.promptLibrary.deleteImpact" x-cloak aria-labelledby="prompt-delete-rebind-title">
+                        <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+                            <div>
+                                <div id="prompt-delete-rebind-title" class="fw-semibold text-warning">先改绑，再删除</div>
+                                <div class="small mt-1">“<span x-text="creativeWorkspace.promptLibrary.deleteTemplate?.title"></span>”仍有 <span class="fw-semibold" x-text="creativeWorkspace.promptLibrary.deleteImpact?.active_binding_count || 0"></span> 处使用中的引用。</div>
+                            </div>
+                            <button class="btn btn-sm btn-outline-secondary" type="button" @click="clearPersonalPromptDeletePlan" :disabled="Boolean(creativeWorkspace.promptLibrary.deletingTemplateId)">取消</button>
+                        </div>
+
+                        <div class="mt-3" x-show="Number(creativeWorkspace.promptLibrary.deleteImpact?.current_project_binding_count || 0) > 0">
+                            <div class="small fw-semibold">当前项目将改绑以下位置</div>
+                            <ul class="small mb-2 mt-1">
+                                <template x-for="binding in (creativeWorkspace.promptLibrary.deleteImpact?.current_project_default_bindings || [])" :key="`delete-default-${binding.project_id}`">
+                                    <li>项目默认模板</li>
+                                </template>
+                                <template x-for="binding in (creativeWorkspace.promptLibrary.deleteImpact?.current_project_stage_bindings || [])" :key="`delete-binding-${binding.project_id}-${binding.stage}-${binding.episode_number}`">
+                                    <li x-text="promptDeleteBindingLabel(binding)"></li>
+                                </template>
+                            </ul>
+                            <label class="form-label small fw-semibold" for="prompt-delete-replacement">全部替换为</label>
+                            <select id="prompt-delete-replacement" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.deleteReplacementTemplateId" :disabled="Boolean(creativeWorkspace.promptLibrary.deletingTemplateId) || !creativeWorkspace.promptLibrary.deleteImpact?.can_manage_current_project">
+                                <option value="">请选择兼容的替代模板</option>
+                                <template x-for="candidate in (creativeWorkspace.promptLibrary.deleteImpact?.replacement_candidates || [])" :key="`delete-replacement-${candidate.id}`">
+                                    <option :value="candidate.id" x-text="`${candidate.title} · ${promptTemplateOwnerLabel(candidate.owner_scope)} · v${candidate.revision}`"></option>
+                                </template>
+                            </select>
+                            <div class="small text-muted mt-1">只列出覆盖所有占用阶段的可用模板；原有自定义要求会保留。</div>
+                            <div class="alert alert-warning py-2 mt-2 mb-0" x-show="!(creativeWorkspace.promptLibrary.deleteImpact?.replacement_candidates || []).length">当前没有兼容的替代模板，请先安装或创建支持相关阶段的模板。</div>
+                            <div class="alert alert-info py-2 mt-2 mb-0" x-show="creativeWorkspace.promptLibrary.deleteImpact && !creativeWorkspace.promptLibrary.deleteImpact.can_manage_current_project">只有项目负责人可以批量改绑当前项目。请联系项目负责人处理。</div>
+                        </div>
+
+                        <div class="border-top pt-2 mt-3" x-show="(creativeWorkspace.promptLibrary.deleteImpact?.other_project_references || []).length">
+                            <div class="small fw-semibold">其他项目也在使用</div>
+                            <div class="small text-muted">为避免越权修改，需在各项目内分别改绑；当前操作不会改动它们。</div>
+                            <div class="vstack gap-1 mt-2">
+                                <template x-for="project in (creativeWorkspace.promptLibrary.deleteImpact?.other_project_references || [])" :key="`delete-other-project-${project.project_id}`">
+                                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 small border rounded px-2 py-1">
+                                        <span><span x-text="project.project_name"></span> · <span x-text="Number(project.default_binding_count || 0) + Number(project.stage_binding_count || 0)"></span> 处</span>
+                                        <a class="btn btn-outline-info btn-sm" :href="promptDeleteProjectUrl(project, project.stages)">前往该项目改绑</a>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+
+                        <div class="d-flex flex-wrap justify-content-end gap-2 mt-3" x-show="Number(creativeWorkspace.promptLibrary.deleteImpact?.current_project_binding_count || 0) > 0">
+                            <button class="btn btn-outline-secondary btn-sm" type="button" @click="clearPersonalPromptDeletePlan" :disabled="Boolean(creativeWorkspace.promptLibrary.deletingTemplateId)">暂不处理</button>
+                            <button class="btn btn-sm" :class="(creativeWorkspace.promptLibrary.deleteImpact?.other_project_references || []).length ? 'btn-warning' : 'btn-danger'" type="button" @click="rebindAndDeletePersonalPromptTemplate" :disabled="Boolean(creativeWorkspace.promptLibrary.deletingTemplateId) || !creativeWorkspace.promptLibrary.deleteReplacementTemplateId || !creativeWorkspace.promptLibrary.deleteImpact?.can_manage_current_project">
+                                <span class="spinner-border spinner-border-sm me-1" x-show="Boolean(creativeWorkspace.promptLibrary.deletingTemplateId)" aria-hidden="true"></span>
+                                <span x-text="(creativeWorkspace.promptLibrary.deleteImpact?.other_project_references || []).length ? '改绑当前项目' : '改绑并删除模板'"></span>
+                            </button>
+                        </div>
+                    </section>
                     <div class="small text-muted py-3" x-show="!promptTemplatesByOwner('user').length">当前步骤还没有个人模板。可以导入提示词，或从现有模板创建副本。</div>
                     <div class="row g-2 mt-1">
                         <template x-for="template in promptTemplatesByOwner('user')" :key="`personal-template-${template.id}`">
@@ -75,7 +127,12 @@
                                         <div class="d-flex justify-content-between gap-2"><span class="fw-semibold" x-text="template.title"></span><span class="badge text-bg-info" x-text="`v${template.revision}`"></span></div>
                                         <div class="small text-muted mt-1" x-text="template.description || '暂无说明'"></div>
                                         <div class="d-flex flex-wrap gap-1 mt-2"><template x-for="value in promptTemplateDimensionValues(template)" :key="value"><span class="badge text-bg-secondary" x-text="value"></span></template></div>
-                                        <button class="btn btn-outline-primary btn-sm mt-3" type="button" @click="selectPromptTemplate(template); startPromptTemplateEdit()">编辑并发布新版本</button>
+                                        <div class="d-flex flex-wrap justify-content-end gap-2 mt-3">
+                                            <button class="btn btn-outline-primary btn-sm" type="button" @click="selectPromptTemplate(template); startPromptTemplateEdit()" :disabled="Boolean(creativeWorkspace.promptLibrary.deletingTemplateId)">编辑并发布新版本</button>
+                                            <button class="btn btn-outline-danger btn-sm" type="button" @click="deletePersonalPromptTemplate(template)" :disabled="Boolean(creativeWorkspace.promptLibrary.deletingTemplateId)" :aria-label="`删除模板 ${template.title}`">
+                                                <span class="spinner-border spinner-border-sm me-1" x-show="creativeWorkspace.promptLibrary.deletingTemplateId === template.id" aria-hidden="true"></span>删除模板
+                                            </button>
+                                        </div>
                                     </div>
                                 </article>
                             </div>
@@ -162,7 +219,7 @@
                                 </template>
                             </select>
                         </div>
-                        <div class="col-md-5">
+                        <div class="col-md-8">
                             <label class="form-label small" for="promptObservabilityTemplate">模板</label>
                             <select id="promptObservabilityTemplate" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.observabilityTemplateKey" @change="loadPromptObservability">
                                 <option value="">全部可见模板</option>
@@ -246,7 +303,7 @@
                     <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
                         <div>
                             <div class="fw-semibold">模板市场</div>
-                            <div class="small text-muted mt-1">发现审核通过的模板，安装为当前项目的独立副本；市场不会自动绑定模板或跟随来源更新。</div>
+                            <div class="small text-muted mt-1">官方模板无需安装，可直接用于下一次生成；社区模板审核通过后可安装为项目独立副本。</div>
                         </div>
                         <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptMarketplace">关闭</button>
                     </div>
@@ -257,7 +314,7 @@
                     <div class="row g-2 mt-1">
                         <div class="col-md-5">
                             <label class="form-label small" for="promptMarketplaceQuery">搜索</label>
-                            <input id="promptMarketplaceQuery" class="form-control form-control-sm" maxlength="120" x-model="creativeWorkspace.promptLibrary.marketplaceQuery" @keydown.enter.prevent="loadPromptMarketplace" placeholder="名称、标签或公开署名">
+                            <input id="promptMarketplaceQuery" class="form-control form-control-sm" maxlength="120" x-model="creativeWorkspace.promptLibrary.marketplaceQuery" @keydown.enter.prevent="loadPromptMarketplace" placeholder="名称、标签或模板署名">
                         </div>
                         <div class="col-md-3">
                             <label class="form-label small" for="promptMarketplaceStage">兼容阶段</label>
@@ -266,23 +323,16 @@
                                 <template x-for="stage in ['brief','characters','outline','beats','script','review','optimization']" :key="`market-stage-${stage}`"><option :value="stage" x-text="promptStageLabel(stage)"></option></template>
                             </select>
                         </div>
-                        <div class="col-md-3">
-                            <label class="form-label small" for="promptMarketplaceLicense">许可</label>
-                            <select id="promptMarketplaceLicense" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.marketplaceLicense" @change="loadPromptMarketplace">
-                                <option value="">全部许可</option>
-                                <template x-for="license in creativeWorkspace.promptLibrary.marketplaceLicenses" :key="license.code"><option :value="license.code" x-text="license.label"></option></template>
-                            </select>
-                        </div>
                         <div class="col-md-1 d-flex align-items-end">
                             <button class="btn btn-outline-info btn-sm w-100" type="button" @click="loadPromptMarketplace" :disabled="creativeWorkspace.promptLibrary.marketplaceLoading" aria-label="刷新模板市场"><i class="bi bi-arrow-clockwise"></i></button>
                         </div>
                     </div>
 
-                    <div class="text-center text-muted py-3" x-show="creativeWorkspace.promptLibrary.marketplaceLoading">正在读取市场、许可和审核状态…</div>
+                    <div class="text-center text-muted py-3" x-show="creativeWorkspace.promptLibrary.marketplaceLoading">正在读取模板和审核状态…</div>
 
                     <div class="border rounded p-3 mt-3">
                         <div class="fw-semibold">发布当前选中的个人模板</div>
-                        <div class="small text-muted mt-1">提交时冻结当前版本；平台审核通过前不会公开。项目模板不能直接发布，防止项目资产被误公开。</div>
+                        <div class="small text-muted mt-1">提交时冻结当前版本；平台审核通过前不会在模板中心展示。项目模板不能直接发布，防止项目资产被误共享。</div>
                         <div class="mt-2" x-show="promptTemplatesByOwner('user').length" x-cloak>
                             <label class="form-label small" for="promptMarketplacePersonalTemplate">要提交的个人模板</label>
                             <select id="promptMarketplacePersonalTemplate" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.selectedTemplateKey" @change="clearPromptMarketplaceFieldError('template')">
@@ -296,21 +346,14 @@
                         <div x-show="selectedPromptTemplate()?.owner_scope === 'user'" x-cloak>
                             <div class="row g-2 mt-2">
                                 <div class="col-md-6">
-                                    <label class="form-label small" for="promptMarketplaceAttribution">公开署名</label>
-                                    <input id="promptMarketplaceAttribution" class="form-control form-control-sm" maxlength="80" x-model="creativeWorkspace.promptLibrary.marketplaceAttributionName" @input="clearPromptMarketplaceFieldError('attribution')" :aria-invalid="Boolean(creativeWorkspace.promptLibrary.marketplaceFieldErrors.attribution)" placeholder="会随模板和许可公开展示">
+                                    <label class="form-label small" for="promptMarketplaceAttribution">模板署名</label>
+                                    <input id="promptMarketplaceAttribution" class="form-control form-control-sm" maxlength="80" x-model="creativeWorkspace.promptLibrary.marketplaceAttributionName" @input="clearPromptMarketplaceFieldError('attribution')" :aria-invalid="Boolean(creativeWorkspace.promptLibrary.marketplaceFieldErrors.attribution)" placeholder="会随模板在公司内部展示">
                                     <div class="small text-danger mt-1" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.attribution" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.attribution"></div>
                                 </div>
                                 <div class="col-md-6">
                                     <label class="form-label small" for="promptMarketplaceTags">标签</label>
                                     <input id="promptMarketplaceTags" class="form-control form-control-sm" x-model="creativeWorkspace.promptLibrary.marketplaceTags" @input="clearPromptMarketplaceFieldError('tags')" placeholder="竖屏、甜宠、强钩子（最多 10 个）">
                                     <div class="small text-danger mt-1" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.tags" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.tags"></div>
-                                </div>
-                                <div class="col-md-6">
-                                    <label class="form-label small" for="promptMarketplaceSubmitLicense">授权许可</label>
-                                    <select id="promptMarketplaceSubmitLicense" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.marketplaceLicenseCode" @change="clearPromptMarketplaceFieldError('license')">
-                                        <template x-for="license in creativeWorkspace.promptLibrary.marketplaceLicenses" :key="`submit-${license.code}`"><option :value="license.code" x-text="license.label"></option></template>
-                                    </select>
-                                    <div class="small text-danger mt-1" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.license" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.license"></div>
                                 </div>
                                 <div class="col-md-6">
                                     <label class="form-label small" for="promptMarketplaceSourceType">来源类型</label>
@@ -326,18 +369,18 @@
                                 </div>
                                 <div class="col-12">
                                     <label class="form-label small" for="promptMarketplaceRights">来源与权利说明</label>
-                                    <textarea id="promptMarketplaceRights" class="form-control" rows="2" minlength="10" maxlength="2000" x-model="creativeWorkspace.promptLibrary.marketplaceRightsStatement" @input="clearPromptMarketplaceFieldError('rights')" :aria-invalid="Boolean(creativeWorkspace.promptLibrary.marketplaceFieldErrors.rights)" placeholder="说明原创情况、授权范围或开放许可依据。"></textarea>
+                                    <textarea id="promptMarketplaceRights" class="form-control" rows="2" minlength="10" maxlength="2000" x-model="creativeWorkspace.promptLibrary.marketplaceRightsStatement" @input="clearPromptMarketplaceFieldError('rights')" :aria-invalid="Boolean(creativeWorkspace.promptLibrary.marketplaceFieldErrors.rights)" placeholder="说明原创情况、授权范围或内容使用依据。"></textarea>
                                     <div class="small text-danger mt-1" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.rights" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.rights"></div>
                                 </div>
                             </div>
                             <div class="form-check mt-3">
                                 <input id="promptMarketplacePublicConfirm" class="form-check-input" type="checkbox" x-model="creativeWorkspace.promptLibrary.marketplacePublicationConfirmed" @change="clearPromptMarketplaceFieldError('publication')">
-                                <label class="form-check-label small" for="promptMarketplacePublicConfirm">我确认完整模板冻结版本会公开展示，并允许其他项目按所选许可安装。</label>
+                                <label class="form-check-label small" for="promptMarketplacePublicConfirm">我确认完整模板冻结版本会在公司内部展示，并允许其他项目安装。</label>
                                 <div class="small text-danger" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.publication" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.publication"></div>
                             </div>
                             <div class="form-check mt-2">
                                 <input id="promptMarketplaceRightsConfirm" class="form-check-input" type="checkbox" x-model="creativeWorkspace.promptLibrary.marketplaceRightsConfirmed" @change="clearPromptMarketplaceFieldError('rightsConfirmed')">
-                                <label class="form-check-label small" for="promptMarketplaceRightsConfirm">我确认拥有发布和授权所需权利，并愿意接受平台审核。</label>
+                                <label class="form-check-label small" for="promptMarketplaceRightsConfirm">我确认拥有发布和内部使用所需权利，并愿意接受平台审核。</label>
                                 <div class="small text-danger" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.rightsConfirmed" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.rightsConfirmed"></div>
                             </div>
                         </div>
@@ -362,7 +405,7 @@
                         <div class="small text-muted" x-show="!creativeWorkspace.promptLibrary.marketplaceModerationQueue.length">当前没有待审核申请。</div>
                         <template x-for="item in creativeWorkspace.promptLibrary.marketplaceModerationQueue" :key="`market-review-${item.id}`">
                             <div class="border-top pt-2 mt-2">
-                                <div class="d-flex flex-wrap justify-content-between gap-2"><div><span class="fw-semibold" x-text="item.title"></span><span class="small text-muted ms-2" x-text="`${item.attribution_name} · ${promptMarketplaceLicenseLabel(item.license_code)}`"></span></div><div class="d-flex gap-2"><button class="btn btn-success btn-sm" type="button" @click="reviewPromptMarketplaceSubmission(item, 'approve')">批准上架</button><button class="btn btn-outline-danger btn-sm" type="button" @click="reviewPromptMarketplaceSubmission(item, 'reject')">驳回</button></div></div>
+                                <div class="d-flex flex-wrap justify-content-between gap-2"><div><span class="fw-semibold" x-text="item.title"></span><span class="small text-muted ms-2" x-text="item.attribution_name"></span></div><div class="d-flex gap-2"><button class="btn btn-success btn-sm" type="button" @click="reviewPromptMarketplaceSubmission(item, 'approve')">批准上架</button><button class="btn btn-outline-danger btn-sm" type="button" @click="reviewPromptMarketplaceSubmission(item, 'reject')">驳回</button></div></div>
                                 <div class="small mt-1" x-text="item.rights_statement"></div>
                                 <a class="small" x-show="item.source_url" :href="item.source_url" target="_blank" rel="noopener noreferrer">核验来源</a>
                                 <details class="mt-2"><summary class="small">检查冻结模板内容与兼容性</summary><div class="small text-muted mt-1" x-text="`契约 ${item.compatibility?.schema_version} · 哈希 ${item.template_content_hash}`"></div><div class="small mt-1" x-text="item.content?.shared_dna"></div></details>
@@ -370,22 +413,47 @@
                         </template>
                     </section>
 
-                    <div class="d-flex justify-content-between align-items-center mt-4"><div class="fw-semibold">已审核上架</div><div class="small text-muted">评分仅来自已安装用户；发布者不能自评。</div></div>
+                    <section class="mt-4" x-show="creativeWorkspace.promptLibrary.marketplaceOfficialItems.length" x-cloak>
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                            <div><div class="fw-semibold">官方模板</div><div class="small text-muted">系统内置、无需安装；选择后仅用于下一次当前步骤生成。</div></div>
+                            <span class="badge text-bg-primary">AiWorker 官方</span>
+                        </div>
+                        <div class="row g-3 mt-0">
+                            <template x-for="item in creativeWorkspace.promptLibrary.marketplaceOfficialItems" :key="`official-listing-${item.id}`">
+                                <div class="col-lg-6">
+                                    <article class="card h-100 border-primary-subtle">
+                                        <div class="card-body">
+                                            <div class="d-flex justify-content-between gap-2"><div><div class="fw-semibold" x-text="item.title"></div><div class="small text-muted" x-text="item.description || '无模板说明'"></div></div><span class="badge text-bg-primary align-self-start">官方内置</span></div>
+                                            <div class="d-flex flex-wrap gap-1 mt-2"><template x-for="tag in (item.tags || [])" :key="tag"><span class="badge text-bg-secondary" x-text="tag"></span></template></div>
+                                            <details class="mt-3"><summary class="small">查看模板与兼容阶段</summary><div class="small text-muted mt-1" x-text="`兼容：${(item.compatibility?.supported_stages || []).map(stage => promptStageLabel(stage)).join('、')}`"></div><div class="small mt-2" x-text="item.content?.shared_dna"></div></details>
+                                        </div>
+                                        <div class="card-footer d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                            <span class="small text-muted">不复制、不安装、不修改默认设置</span>
+                                            <button class="btn btn-primary btn-sm" type="button" @click="useOfficialPromptMarketplaceTemplate(item)" :disabled="!promptMarketplaceOfficialTemplate(item)" title="仅下次当前步骤生成使用">立即使用</button>
+                                        </div>
+                                    </article>
+                                </div>
+                            </template>
+                        </div>
+                    </section>
+
+                    <div class="d-flex justify-content-between align-items-center mt-4"><div><div class="fw-semibold">社区已审核上架</div><div class="small text-muted">安装不会自动绑定模板或跟随来源更新。</div></div><div class="small text-muted">评分仅来自已安装用户；发布者不能自评。</div></div>
                     <div class="alert alert-info py-2 mt-2" x-show="!creativeWorkspace.promptLibrary.marketplaceCanInstall">只有项目负责人可以安装模板；项目成员仍可浏览，并可评价项目已安装的模板。</div>
-                    <div class="small text-muted py-3" x-show="!creativeWorkspace.promptLibrary.marketplaceLoading && !creativeWorkspace.promptLibrary.marketplaceItems.length">当前筛选条件下没有已上架模板。</div>
+                    <div class="small text-muted py-3" x-show="!creativeWorkspace.promptLibrary.marketplaceLoading && !creativeWorkspace.promptLibrary.marketplaceOfficialItems.length && !creativeWorkspace.promptLibrary.marketplaceItems.length">当前筛选条件下没有可用模板。</div>
+                    <div class="small text-muted py-3" x-show="!creativeWorkspace.promptLibrary.marketplaceLoading && creativeWorkspace.promptLibrary.marketplaceOfficialItems.length && !creativeWorkspace.promptLibrary.marketplaceItems.length">当前还没有社区模板，以上官方模板可直接使用。</div>
                     <div class="row g-3 mt-0">
                         <template x-for="item in creativeWorkspace.promptLibrary.marketplaceItems" :key="`market-listing-${item.id}`">
                             <div class="col-lg-6">
                                 <div class="card h-100 border-info-subtle">
                                     <div class="card-body">
-                                        <div class="d-flex justify-content-between gap-2"><div><div class="fw-semibold" x-text="item.title"></div><div class="small text-muted" x-text="item.description || '无模板说明'"></div></div><a class="badge text-bg-info align-self-start text-decoration-none" :href="item.license_url" target="_blank" rel="noopener noreferrer" x-text="promptMarketplaceLicenseLabel(item.license_code)" title="查看许可原文"></a></div>
+                                        <div><div class="fw-semibold" x-text="item.title"></div><div class="small text-muted" x-text="item.description || '无模板说明'"></div></div>
                                         <div class="d-flex flex-wrap gap-1 mt-2"><template x-for="tag in item.tags" :key="tag"><span class="badge text-bg-secondary" x-text="tag"></span></template></div>
-                                        <div class="row g-2 small mt-2"><div class="col-6"><span class="text-muted">公开署名</span><div x-text="item.attribution_name"></div></div><div class="col-3"><span class="text-muted">安装</span><div x-text="item.install_count || 0"></div></div><div class="col-3"><span class="text-muted">评分</span><div x-text="item.rating?.average === null ? '暂无' : `${item.rating.average} / 5（${item.rating.count}）`"></div></div></div>
-                                        <details class="mt-3"><summary class="small">查看公开模板与兼容性</summary><div class="small text-muted mt-1" x-text="`兼容：${(item.compatibility?.supported_stages || []).map(stage => promptStageLabel(stage)).join('、')}`"></div><div class="small mt-2" x-text="item.content?.shared_dna"></div><a class="small" x-show="item.source_url" :href="item.source_url" target="_blank" rel="noopener noreferrer">查看声明来源</a></details>
+                                        <div class="row g-2 small mt-2"><div class="col-6"><span class="text-muted">模板署名</span><div x-text="item.attribution_name"></div></div><div class="col-3"><span class="text-muted">安装</span><div x-text="item.install_count || 0"></div></div><div class="col-3"><span class="text-muted">评分</span><div x-text="item.rating?.average === null ? '暂无' : `${item.rating.average} / 5（${item.rating.count}）`"></div></div></div>
+                                        <details class="mt-3"><summary class="small">查看模板与兼容性</summary><div class="small text-muted mt-1" x-text="`兼容：${(item.compatibility?.supported_stages || []).map(stage => promptStageLabel(stage)).join('、')}`"></div><div class="small mt-2" x-text="item.content?.shared_dna"></div><a class="small" x-show="item.source_url" :href="item.source_url" target="_blank" rel="noopener noreferrer">查看声明来源</a></details>
                                     </div>
                                     <div class="card-footer d-flex flex-wrap justify-content-end gap-2">
                                         <span class="small text-success me-auto align-self-center" x-show="item.installation">已安装为项目独立副本</span>
-                                        <button class="btn btn-outline-info btn-sm" type="button" x-show="!item.installation" @click="installPromptMarketplaceListing(item)" :disabled="creativeWorkspace.promptLibrary.marketplaceSaving || !creativeWorkspace.promptLibrary.marketplaceCanInstall">接受许可并安装</button>
+                                        <button class="btn btn-outline-info btn-sm" type="button" x-show="!item.installation" @click="installPromptMarketplaceListing(item)" :disabled="creativeWorkspace.promptLibrary.marketplaceSaving || !creativeWorkspace.promptLibrary.marketplaceCanInstall">安装到项目</button>
                                         <button class="btn btn-outline-warning btn-sm" type="button" x-show="item.installation && !item.is_owner" @click="ratePromptMarketplaceListing(item)" :disabled="creativeWorkspace.promptLibrary.marketplaceSaving" x-text="item.my_rating ? '更新我的评分' : '评价已安装模板'"></button>
                                         <button class="btn btn-outline-danger btn-sm" type="button" x-show="creativeWorkspace.promptLibrary.marketplaceCanReview" @click="reviewPromptMarketplaceSubmission(item, 'remove')" :disabled="creativeWorkspace.promptLibrary.marketplaceSaving">平台下架</button>
                                     </div>

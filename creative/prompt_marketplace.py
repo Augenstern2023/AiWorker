@@ -9,16 +9,14 @@
 """Public prompt-marketplace interface backed exclusively by PostgreSQL."""
 
 from creative.postgres_prompt_marketplace import (
-    MARKETPLACE_LICENSE_URLS,
-    MARKETPLACE_LICENSES,
+    INTERNAL_LICENSE_CODE,
     MARKETPLACE_SOURCE_TYPES,
     PromptMarketplaceService,
 )
 
 
 __all__ = [
-    "MARKETPLACE_LICENSE_URLS",
-    "MARKETPLACE_LICENSES",
+    "INTERNAL_LICENSE_CODE",
     "MARKETPLACE_SOURCE_TYPES",
     "PromptMarketplaceService",
 ]

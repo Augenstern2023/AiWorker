@@ -102,6 +102,8 @@ from creative.schema import (
     PromptMarketplaceSubmissionRequest,
     PromptProjectEnableRequest,
     PromptTemplateCreateRequest,
+    PromptTemplateDeleteRequest,
+    PromptTemplateRebindDeleteRequest,
     PromptTemplateRevisionRequest,
     ProjectCreateRequest,
     ProjectUpdateRequest,
@@ -2071,7 +2073,6 @@ def build_creative_router(
         request: Request,
         q: str = Query("", max_length=120),
         stage: str | None = Query(None),
-        license_code: str | None = Query(None, alias="license"),
         limit: int = Query(100, ge=1, le=500),
         principal: Principal = Depends(current_principal),
     ):
@@ -2083,7 +2084,6 @@ def build_creative_router(
                 actor_user_id=principal.user_id,
                 query=q,
                 stage=stage,
-                license_code=license_code,
                 is_admin=principal.is_system_admin,
                 limit=limit,
             )
@@ -2116,7 +2116,6 @@ def build_creative_router(
                 description=payload.description,
                 tags=payload.tags,
                 attribution_name=payload.attribution_name,
-                license_code=payload.license_code,
                 source_type=payload.source_type,
                 source_url=payload.source_url,
                 rights_statement=payload.rights_statement,
@@ -2174,7 +2173,6 @@ def build_creative_router(
                 project_id=project_id,
                 submission_id=submission_id,
                 operation_id=payload.operation_id,
-                license_accepted=payload.license_accepted,
                 actor_user_id=principal.user_id,
             )
         except PermissionError as exc:
@@ -2353,6 +2351,82 @@ def build_creative_router(
                 actor_user_id=principal.user_id,
                 expected_revision=payload.expected_revision,
                 content=payload.content,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.get(
+        "/projects/{project_id}/prompt-library/templates/{template_id}/deletion-impact"
+    )
+    async def get_personal_prompt_template_deletion_impact(
+        project_id: int,
+        template_id: str,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_prompt_project_read_access(request, project_id, principal)
+        try:
+            impact = project_prompt_service.personal_template_deletion_impact(
+                project_id=project_id,
+                template_id=template_id,
+                actor_user_id=principal.user_id,
+            )
+            impact["can_manage_current_project"] = can_manage_prompt_project(
+                request, project_id, principal
+            )
+            return impact
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.delete(
+        "/projects/{project_id}/prompt-library/templates/{template_id}"
+    )
+    async def delete_personal_prompt_template(
+        project_id: int,
+        template_id: str,
+        payload: PromptTemplateDeleteRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_prompt_project_read_access(request, project_id, principal)
+        try:
+            return project_prompt_service.delete_personal_template(
+                project_id=project_id,
+                template_id=template_id,
+                actor_user_id=principal.user_id,
+                expected_revision=payload.expected_revision,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post(
+        "/projects/{project_id}/prompt-library/templates/{template_id}/rebind-and-delete"
+    )
+    async def rebind_and_delete_personal_prompt_template(
+        project_id: int,
+        template_id: str,
+        payload: PromptTemplateRebindDeleteRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_prompt_project_manager(request, project_id, principal)
+        try:
+            return project_prompt_service.rebind_and_delete_personal_template(
+                project_id=project_id,
+                template_id=template_id,
+                actor_user_id=principal.user_id,
+                expected_revision=payload.expected_revision,
+                replacement_template_id=payload.replacement_template_id,
+                replacement_template_revision=payload.replacement_template_revision,
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc

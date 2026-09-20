@@ -90,6 +90,134 @@ def test_catalog_seeds_four_selectable_system_templates(prompt_store):
     assert all(len(item["content"]["dimensions"]) == 7 for item in catalog)
 
 
+def test_personal_template_delete_preserves_history_and_blocks_active_bindings(
+    prompt_store,
+):
+    repository, store = prompt_store
+    project_id = _project(repository)
+    personal = store.create_template(
+        title="待删除个人模板",
+        description="验证安全删除",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id="owner-1",
+    )
+
+    with pytest.raises(PermissionError, match="只能删除自己的个人模板"):
+        store.personal_template_deletion_impact(
+            personal["id"], actor_user_id="other-user"
+        )
+
+    store.set_binding(
+        project_id=project_id,
+        stage="script",
+        episode_number=0,
+        template_id=personal["id"],
+        template_revision=1,
+        override={},
+        actor_user_id="owner-1",
+    )
+    impact = store.personal_template_deletion_impact(
+        personal["id"], actor_user_id="owner-1"
+    )
+    assert impact["can_delete"] is False
+    assert impact["active_binding_count"] == 1
+    with pytest.raises(ValueError, match="请先改绑"):
+        store.delete_personal_template(
+            personal["id"], actor_user_id="owner-1", expected_revision=1
+        )
+
+    system = store.get_template_by_key("generic-vertical-short")
+    store.set_binding(
+        project_id=project_id,
+        stage="script",
+        episode_number=0,
+        template_id=system["id"],
+        template_revision=1,
+        override={},
+        actor_user_id="owner-1",
+    )
+    deleted = store.delete_personal_template(
+        personal["id"], actor_user_id="owner-1", expected_revision=1
+    )
+
+    assert deleted["deleted"] is True
+    assert deleted["template"]["status"] == "archived"
+    assert store.get_revision(personal["id"], 1)["content_hash"] == personal[
+        "content_hash"
+    ]
+    assert personal["template_key"] not in {
+        item["template_key"]
+        for item in store.list_catalog(
+            project_id=project_id, actor_user_id="owner-1"
+        )
+    }
+
+
+def test_personal_template_rebind_is_project_scoped_and_deletes_after_last_reference(
+    prompt_store,
+):
+    repository, store = prompt_store
+    first_project_id = _project(repository, name="第一个改绑项目")
+    second_project_id = _project(repository, name="第二个改绑项目")
+    personal = store.create_template(
+        title="跨项目待改绑模板",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id="owner-1",
+    )
+    replacement = store.get_template_by_key("generic-vertical-short")
+    for project_id in (first_project_id, second_project_id):
+        store.set_binding(
+            project_id=project_id,
+            stage="script",
+            episode_number=0,
+            template_id=personal["id"],
+            template_revision=1,
+            override={"custom_requirements": f"保留项目 {project_id} 要求"},
+            actor_user_id="owner-1",
+        )
+
+    impact = store.personal_template_deletion_impact(
+        personal["id"],
+        actor_user_id="owner-1",
+        project_id=first_project_id,
+    )
+    assert impact["current_project_binding_count"] == 1
+    assert impact["other_project_references"][0]["project_id"] == second_project_id
+    assert replacement["id"] in {
+        candidate["id"] for candidate in impact["replacement_candidates"]
+    }
+
+    first_result = store.rebind_and_delete_personal_template(
+        project_id=first_project_id,
+        template_id=personal["id"],
+        actor_user_id="owner-1",
+        expected_revision=1,
+        replacement_template_id=replacement["id"],
+        replacement_template_revision=1,
+    )
+    first_binding = store.binding(first_project_id, "script", 0)
+    assert first_result["deleted"] is False
+    assert first_result["remaining_binding_count"] == 1
+    assert first_binding["template_id"] == replacement["id"]
+    assert first_binding["override"]["custom_requirements"].startswith("保留项目")
+    assert store.get_template(personal["id"])["status"] == "active"
+
+    second_result = store.rebind_and_delete_personal_template(
+        project_id=second_project_id,
+        template_id=personal["id"],
+        actor_user_id="owner-1",
+        expected_revision=1,
+        replacement_template_id=replacement["id"],
+        replacement_template_revision=1,
+    )
+    assert second_result["deleted"] is True
+    assert second_result["remaining_binding_count"] == 0
+    assert store.get_template(personal["id"])["status"] == "archived"
+
+
 def test_prompt_store_uses_alembic_managed_governance_schema(prompt_store):
     repository, store = prompt_store
     schema = inspect(repository.database.engine)

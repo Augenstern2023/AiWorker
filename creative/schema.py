@@ -228,6 +228,16 @@ class PromptTemplateRevisionRequest(BaseModel):
     content: dict[str, Any]
 
 
+class PromptTemplateDeleteRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+
+
+class PromptTemplateRebindDeleteRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    replacement_template_id: str = Field(min_length=1, max_length=200)
+    replacement_template_revision: int = Field(ge=1)
+
+
 class PromptMarketplaceSubmissionRequest(BaseModel):
     operation_id: str = Field(min_length=1, max_length=200)
     expected_template_revision: int = Field(ge=1)
@@ -235,11 +245,6 @@ class PromptMarketplaceSubmissionRequest(BaseModel):
     description: str = Field("", max_length=1000)
     tags: list[str] = Field(default_factory=list, max_length=10)
     attribution_name: str = Field(min_length=1, max_length=80)
-    license_code: Literal[
-        "CC-BY-4.0",
-        "CC-BY-NC-4.0",
-        "CC0-1.0",
-    ]
     source_type: Literal[
         "original", "authorized", "open_license", "public_domain"
     ]
@@ -258,7 +263,6 @@ class PromptMarketplaceReviewRequest(BaseModel):
 
 class PromptMarketplaceInstallRequest(BaseModel):
     operation_id: str = Field(min_length=1, max_length=200)
-    license_accepted: bool = False
 
 
 class PromptMarketplaceRatingRequest(BaseModel):

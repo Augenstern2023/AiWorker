@@ -327,6 +327,55 @@ class ProjectPromptService:
             actor_user_id=actor_user_id,
         )
 
+    def personal_template_deletion_impact(
+        self,
+        *,
+        project_id: int,
+        template_id: str,
+        actor_user_id: str,
+    ) -> dict[str, Any]:
+        self._project(project_id)
+        return self.store.personal_template_deletion_impact(
+            template_id,
+            actor_user_id=actor_user_id,
+            project_id=project_id,
+        )
+
+    def delete_personal_template(
+        self,
+        *,
+        project_id: int,
+        template_id: str,
+        actor_user_id: str,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        self._project(project_id)
+        return self.store.delete_personal_template(
+            template_id,
+            actor_user_id=actor_user_id,
+            expected_revision=expected_revision,
+        )
+
+    def rebind_and_delete_personal_template(
+        self,
+        *,
+        project_id: int,
+        template_id: str,
+        actor_user_id: str,
+        expected_revision: int,
+        replacement_template_id: str,
+        replacement_template_revision: int,
+    ) -> dict[str, Any]:
+        self._project(project_id)
+        return self.store.rebind_and_delete_personal_template(
+            project_id=project_id,
+            template_id=template_id,
+            actor_user_id=actor_user_id,
+            expected_revision=expected_revision,
+            replacement_template_id=replacement_template_id,
+            replacement_template_revision=replacement_template_revision,
+        )
+
     def governance(self, project_id: int) -> dict[str, Any]:
         self._project(project_id)
         items = self.store.list_project_template_governance(project_id)

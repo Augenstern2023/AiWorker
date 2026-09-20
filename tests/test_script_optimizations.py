@@ -348,6 +348,47 @@ def test_optimization_request_expands_cross_episode_findings_to_review_scope() -
     assert result["target_episode_numbers"] == [2, 3]
 
 
+@pytest.mark.parametrize("finding_episode_number", [None, 0, "", "unknown", 4])
+def test_optimization_request_scopes_episode_finding_to_review_episode(
+    finding_episode_number,
+) -> None:
+    review = {
+        "source_type": "project",
+        "source_payload": {"formal": True},
+        "status": "confirmed",
+        "final_verdict": "建议修改",
+        "episode_numbers": [1, 2, 3, 4, 5],
+        "report": {
+            "core_findings": [],
+            "episode_reviews": [
+                {
+                    "episode_number": 2,
+                    "summary": "第二集需要调整。",
+                    "findings": [
+                        {
+                            "title": "仅第二集的问题",
+                            "episode_number": finding_episode_number,
+                            "change_route": "script_only",
+                        }
+                    ],
+                }
+            ],
+            "cross_episode_findings": [],
+        },
+    }
+
+    result = validate_optimization_request(
+        review,
+        "direct",
+        [{"ref": "episode:0:0", "episode_numbers": []}],
+    )
+
+    assert result["target_episode_numbers"] == [2]
+    assert result["selected_findings"] == [
+        {"ref": "episode:0:0", "episode_numbers": [2]}
+    ]
+
+
 def test_optimization_request_rejects_a_finding_that_requires_outline_revision() -> None:
     review = {
         "source_type": "project",
@@ -396,6 +437,50 @@ async def test_optimization_template_cannot_replace_output_or_outline_guards() -
     )
 
     assert result["script"]["episode_title"] == "优化稿"
+
+
+@pytest.mark.asyncio
+async def test_direct_optimization_sends_only_current_episode_summary() -> None:
+    requests = []
+
+    class FakeProvider:
+        async def complete_json(self, messages):
+            import json
+
+            requests.append(json.loads(messages[-1]["content"]))
+            return {"script": {"episode_title": "优化稿", "scenes": []}}
+
+    await optimize_episode(
+        FakeProvider(),
+        mode="direct",
+        episode_number=2,
+        script_content={"episode_title": "原稿", "scenes": []},
+        beats_content=None,
+        review_context={},
+        findings=[{"title": "第二集问题", "evidence": "证据", "suggestion": "建议"}],
+        summaries=[
+            {
+                "episode_number": 1,
+                "summary": "第一集摘要",
+                "findings": [{"title": "第一集问题", "evidence": "不应发送"}],
+            },
+            {
+                "episode_number": 2,
+                "summary": "第二集摘要",
+                "findings": [{"title": "已由 selected_findings 单独发送"}],
+            },
+            {
+                "episode_number": 3,
+                "summary": "第三集摘要",
+                "findings": [{"title": "第三集问题", "evidence": "不应发送"}],
+            },
+        ],
+    )
+
+    assert requests[0]["episode_summaries"] == [
+        {"episode_number": 2, "summary": "第二集摘要"}
+    ]
+    assert requests[0]["selected_findings"][0]["title"] == "第二集问题"
 
 
 @pytest.mark.asyncio

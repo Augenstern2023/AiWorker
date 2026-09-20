@@ -3,6 +3,7 @@
 
     const draftId = new URLSearchParams(window.location.search).get('optimization_draft');
     let reviewId = Number(new URLSearchParams(window.location.search).get('review_id') || 0);
+    let hasUnsavedChanges = false;
     if (!window.aiworkerApi) return;
     const expectedKind = window.location.pathname.endsWith('/beats') ? 'beats' : 'script';
 
@@ -16,14 +17,12 @@
     }
 
     function showReviewBackLink(reviewId = null) {
-        if (expectedKind !== 'script' || !draftId) return;
-        const link = document.getElementById('script-page-back-link');
-        const label = document.getElementById('script-page-back-label');
-        if (!link || !label) return;
+        if (!draftId) return;
+        const link = document.getElementById('optimization-draft-review-back-link');
+        if (!link) return;
         link.href = reviewId ? `/review/scripts?review_id=${reviewId}` : '/review/scripts';
         link.title = '返回审核';
         link.setAttribute('aria-label', '返回审核');
-        label.textContent = '返回审核';
         link.hidden = false;
     }
 
@@ -32,14 +31,26 @@
     }
 
     async function linkBackToReview(draft) {
-        if (!draft.optimization_id) return;
+        if (!draft.optimization_id) return null;
         const response = await aiworkerApi.request(`/api/script-optimizations/${encodeURIComponent(draft.optimization_id)}`);
         const optimization = await response.json();
         if (response.ok && optimization.review_id) {
             reviewId = Number(optimization.review_id);
             showReviewBackLink(reviewId);
+            return optimization;
         }
+        return null;
     }
+
+    function setUnsavedChanges(value) {
+        hasUnsavedChanges = Boolean(value);
+    }
+
+    window.addEventListener('beforeunload', (event) => {
+        if (!hasUnsavedChanges) return;
+        event.preventDefault();
+        event.returnValue = '';
+    });
 
     function waitForScriptWorkspace(timeoutMs = 1200) {
         return new Promise((resolve) => {
@@ -314,6 +325,12 @@
         const candidates = (project.episodes || []).filter((item) => (
             item.stage === context.stage && Number(item.episode_number) === Number(context.episodeNumber)
         ));
+        if (project.workflow_mode === 'free') {
+            const head = (project.resource_heads || []).find((item) => (
+                item.stage === context.stage && Number(item.episode_number) === Number(context.episodeNumber)
+            ));
+            return candidates.find((item) => String(item.id) === String(head?.resource_ref || '')) || null;
+        }
         return candidates.sort((left, right) => (
             Number(right.version || 0) - Number(left.version || 0) || Number(right.id || 0) - Number(left.id || 0)
         ))[0] || null;
@@ -330,7 +347,10 @@
         if (multiline) control.rows = 2;
         else control.type = type;
         control.value = value || '';
-        control.addEventListener('input', () => update(control.value));
+        control.addEventListener('input', () => {
+            update(control.value);
+            setUnsavedChanges(true);
+        });
         wrap.append(caption, control);
         return wrap;
     }
@@ -361,17 +381,56 @@
         URL.revokeObjectURL(link.href);
     }
 
-    async function applyOptimizationDraft(draft, content, button, message) {
+    async function saveOptimizationDraft(draft, content, button, message) {
         button.disabled = true;
-        message.textContent = '正在应用并锁定...';
+        message.textContent = '正在保存草稿...';
+        try {
+            const response = await aiworkerApi.request(`/api/script-optimization-drafts/${encodeURIComponent(draft.id)}`, {
+                method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({content}),
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.detail || '保存优化草稿失败');
+            setUnsavedChanges(false);
+            message.textContent = '草稿已保存，可以稍后继续编辑。';
+        } catch (error) {
+            message.textContent = error.message || '保存优化草稿失败';
+        } finally {
+            button.disabled = false;
+        }
+    }
+
+    async function regenerateOptimizationDraft(draft, button, message) {
+        if (hasUnsavedChanges && !window.confirm('当前有未保存修改，重新生成后这些修改不会保留。确定继续吗？')) return;
+        button.disabled = true;
+        message.textContent = '正在创建本集重新生成任务...';
+        try {
+            const response = await aiworkerApi.request(`/api/script-optimization-drafts/${encodeURIComponent(draft.id)}/regenerate`, {
+                method: 'POST',
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.detail || '重新生成本集失败');
+            setUnsavedChanges(false);
+            window.location.assign(reviewPageUrl());
+        } catch (error) {
+            message.textContent = error.message || '重新生成本集失败';
+            button.disabled = false;
+        }
+    }
+
+    async function applyOptimizationDraft(draft, content, lockAfterAccept, button, message) {
+        if (lockAfterAccept && !window.confirm('应用后将立即锁定这个场次剧本版本，确定继续吗？')) return;
+        button.disabled = true;
+        message.textContent = lockAfterAccept ? '正在应用并锁定...' : '正在应用为新版本...';
         try {
             const response = await aiworkerApi.request(`/api/script-optimization-drafts/${encodeURIComponent(draft.id)}/accept`, {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({content, lock_after_accept: true}),
+                body: JSON.stringify({content, lock_after_accept: lockAfterAccept}),
             });
             const payload = await response.json();
             if (!response.ok) throw new Error(payload.detail || '应用优化草稿失败');
-            message.textContent = '已应用并锁定场次剧本。';
+            setUnsavedChanges(false);
+            message.textContent = lockAfterAccept ? '已应用并锁定场次剧本。' : '已应用为新的可编辑版本。';
             window.location.assign(reviewPageUrl());
         } catch (error) {
             message.textContent = error.message || '应用优化草稿失败';
@@ -391,20 +450,35 @@
         title.className = 'mb-0';
         title.textContent = `AI 优化场次剧本 · 第 ${draft.episode_number} 集`;
         const actions = document.createElement('div');
-        actions.className = 'd-flex gap-2';
+        actions.className = 'd-flex flex-wrap gap-2';
         const download = document.createElement('button');
         download.type = 'button';
         download.className = 'btn btn-outline-info btn-sm';
         download.textContent = '下载草稿';
         download.addEventListener('click', () => downloadOptimizationDraft(content));
+        const save = document.createElement('button');
+        save.type = 'button';
+        save.className = 'btn btn-outline-primary btn-sm';
+        save.textContent = '保存草稿';
         const apply = document.createElement('button');
         apply.type = 'button';
-        apply.className = 'btn btn-warning btn-sm';
-        apply.textContent = '应用并锁定';
+        apply.className = 'btn btn-primary btn-sm';
+        apply.textContent = '应用为新版本';
+        const applyAndLock = document.createElement('button');
+        applyAndLock.type = 'button';
+        applyAndLock.className = 'btn btn-warning btn-sm';
+        applyAndLock.textContent = '应用并锁定';
+        const regenerate = document.createElement('button');
+        regenerate.type = 'button';
+        regenerate.className = 'btn btn-outline-warning btn-sm';
+        regenerate.textContent = '重新生成本集';
         const message = document.createElement('div');
         message.className = 'small text-muted ms-auto';
-        apply.addEventListener('click', () => applyOptimizationDraft(draft, content, apply, message));
-        actions.append(download, apply);
+        save.addEventListener('click', () => saveOptimizationDraft(draft, content, save, message));
+        apply.addEventListener('click', () => applyOptimizationDraft(draft, content, false, apply, message));
+        applyAndLock.addEventListener('click', () => applyOptimizationDraft(draft, content, true, applyAndLock, message));
+        regenerate.addEventListener('click', () => regenerateOptimizationDraft(draft, regenerate, message));
+        actions.append(download, save, regenerate, apply, applyAndLock);
         header.append(title, actions);
         section.append(header);
         section.append(editorField('集标题', content.episode_title, (value) => { content.episode_title = value; }, {column: 'col-12'}));
@@ -440,7 +514,10 @@
                     option.selected = block.type === value;
                     typeSelect.append(option);
                 });
-                typeSelect.addEventListener('change', () => { block.type = typeSelect.value; });
+                typeSelect.addEventListener('change', () => {
+                    block.type = typeSelect.value;
+                    setUnsavedChanges(true);
+                });
                 typeWrap.append(typeSelect);
                 row.append(
                     typeWrap,
@@ -456,12 +533,59 @@
         mount(section, workspace);
     }
 
+    function renderDraftNavigation(draft, optimization, before = null) {
+        if (!optimization) return;
+        const peers = (optimization.drafts || [])
+            .filter((item) => item.kind === draft.kind)
+            .sort((left, right) => Number(left.episode_number) - Number(right.episode_number) || Number(left.id) - Number(right.id));
+        const index = peers.findIndex((item) => Number(item.id) === Number(draft.id));
+        if (index < 0) return;
+        const navigation = document.createElement('nav');
+        navigation.className = 'd-flex flex-wrap justify-content-between align-items-center gap-2 mb-3';
+        navigation.setAttribute('aria-label', '优化草稿导航');
+        const position = document.createElement('span');
+        position.className = 'small text-muted';
+        position.textContent = `草稿 ${index + 1}/${peers.length}`;
+        const actions = document.createElement('div');
+        actions.className = 'd-flex gap-2';
+        const draftUrl = (item) => {
+            const stage = item.kind === 'beats' ? 'beats' : 'scripts';
+            return `/writing/projects/${optimization.project_id}/episodes/${item.episode_number}/${stage}?optimization_draft=${item.id}&review_id=${reviewId || optimization.review_id}`;
+        };
+        const previous = document.createElement(index > 0 ? 'a' : 'button');
+        previous.className = 'btn btn-outline-light btn-sm';
+        previous.textContent = '上一份';
+        if (index > 0) previous.href = draftUrl(peers[index - 1]);
+        else previous.disabled = true;
+        const next = document.createElement(index < peers.length - 1 ? 'a' : 'button');
+        next.className = 'btn btn-outline-light btn-sm';
+        next.textContent = '下一份';
+        if (index < peers.length - 1) next.href = draftUrl(peers[index + 1]);
+        else next.disabled = true;
+        actions.append(previous, next);
+        navigation.append(position, actions);
+        mount(navigation, before);
+    }
+
     function renderDraftComparison(draft, current, before = null) {
         const section = document.createElement('section');
         section.className = 'border-top border-bottom py-3 mb-3';
+        const header = document.createElement('div');
+        header.className = 'd-flex flex-wrap justify-content-between align-items-center gap-2 mb-2';
         const heading = document.createElement('h5');
-        heading.className = 'mb-2';
+        heading.className = 'mb-0';
         heading.textContent = `AI 优化草稿 · 第 ${draft.episode_number} 集`;
+        header.append(heading);
+        const message = document.createElement('div');
+        message.className = 'small text-muted mb-2';
+        if (expectedKind === 'beats' && ['ready', 'rejected'].includes(draft.status)) {
+            const regenerate = document.createElement('button');
+            regenerate.type = 'button';
+            regenerate.className = 'btn btn-outline-warning btn-sm';
+            regenerate.textContent = '重新生成本集';
+            regenerate.addEventListener('click', () => regenerateOptimizationDraft(draft, regenerate, message));
+            header.append(regenerate);
+        }
         const summary = document.createElement('div');
         summary.className = 'small text-muted mb-2';
         summary.textContent = '左侧为当前版本，右侧为 AI 优化草稿。';
@@ -477,20 +601,22 @@
             previewColumn('当前版本', current?.content, expectedKind, diff.currentStatus),
             previewColumn('AI 优化草稿', draft.content, expectedKind, diff.draftStatus),
         );
-        section.append(heading, summary, legend, comparison);
+        section.append(header, message, summary, legend, comparison);
         mount(section, before);
+        return section;
     }
 
     async function loadDraft() {
         const response = await aiworkerApi.request(`/api/script-optimization-drafts/${encodeURIComponent(draftId)}`);
         const draft = await response.json();
         if (!response.ok || draft.kind !== expectedKind) return;
-        linkBackToReview(draft).catch(() => {});
+        const optimization = await linkBackToReview(draft).catch(() => null);
         const current = await loadCurrentEpisode(pageContext()).catch(() => null);
         const workspace = expectedKind === 'script' ? await waitForScriptWorkspace() : null;
         workspace?.classList.add('d-none');
-        renderDraftComparison(draft, current, workspace);
-        if (expectedKind === 'script') renderScriptEditor(draft, workspace);
+        const comparison = renderDraftComparison(draft, current, workspace);
+        renderDraftNavigation(draft, optimization, comparison);
+        if (expectedKind === 'script' && draft.status === 'ready') renderScriptEditor(draft, workspace);
     }
 
     async function loadDraftEntries() {

@@ -710,15 +710,6 @@ window.aiworkerModules.push(() => ({
                 setImitationReason(content, value) {
                     content.imitation_reason = String(value || '').trim();
                 },
-                continuityStatusLabel(status) {
-                    const code = String(status || '').trim().toLowerCase();
-                    return {
-                        active: '有效', blocked: '受阻', weakened: '削弱', aborted: '已中止',
-                        low: '低', discovered: '已发现', established: '已确立', disclosed: '已公开',
-                        confirmed: '已确认', hidden: '隐藏', lost: '遗失', destroyed: '已毁坏',
-                        transferred: '已转移', revoked: '已撤销', resolved: '已解决',
-                    }[code] || status || '-';
-                },
                 setListField(target, key, value) { target[key] = String(value || '').split(/[,，\n]/).map(item => item.trim()).filter(Boolean); },
                 textareaRows(value, charactersPerLine = 28) {
                     const lines = String(value || '').split('\n');
@@ -1383,34 +1374,6 @@ window.aiworkerModules.push(() => ({
                 removeContinuityUpdate(beat, updateIndex) {
                     if (!Array.isArray(beat.continuity_updates)) return;
                     beat.continuity_updates.splice(Number(updateIndex), 1);
-                },
-
-                projectContinuityLedger() {
-                    const latestByEpisode = new Map();
-                    const project = this.creativeWorkspace.project;
-                    (project?.episodes || [])
-                        .filter(item => item.stage === 'beats'
-                            && (project?.workflow_mode === 'free'
-                                ? String(this.creativeHead('beats', item.episode_number)?.resource_ref || '') === String(item.id)
-                                : item.upstream_refs?.outline_batch_id === project?.outline_batch_id))
-                        .forEach(item => {
-                            const current = latestByEpisode.get(Number(item.episode_number));
-                            if (!current || Number(item.version) > Number(current.version)) {
-                                latestByEpisode.set(Number(item.episode_number), item);
-                            }
-                        });
-                    const ledger = new Map();
-                    [...latestByEpisode.values()]
-                        .sort((a, b) => Number(a.episode_number) - Number(b.episode_number))
-                        .forEach(item => (item.content?.beats || [])
-                            .sort((a, b) => Number(a.order) - Number(b.order))
-                            .forEach(beat => (beat.continuity_updates || []).forEach(update => {
-                                if (update?.kind && update?.name) ledger.set(`${update.kind}:${update.name}`, update);
-                            })));
-                    return [...ledger.values()].map(item => ({
-                        ...item,
-                        status: this.continuityStatusLabel(item.status),
-                    }));
                 },
 
                 currentEpisodeHasLockedBeats() {

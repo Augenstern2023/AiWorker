@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from creative.free_mode_service import FreeCreativeModeService
 from creative.project_prompt_service import ProjectPromptService
 from creative.repository import CreativeRepository
+from creative.script_service import validate_beats, validate_script
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.schema import Principal
@@ -47,6 +48,10 @@ class OptimizationRejectRequest(BaseModel):
 class OptimizationDraftAcceptRequest(BaseModel):
     content: dict[str, Any] | None = None
     lock_after_accept: bool = False
+
+
+class OptimizationDraftUpdateRequest(BaseModel):
+    content: dict[str, Any]
 
 
 def build_script_optimization_router(
@@ -186,6 +191,38 @@ def build_script_optimization_router(
             })
         return meta
 
+    def optimization_job_payload(
+        optimization: dict[str, Any], *, actor_user_id: str
+    ) -> dict[str, Any]:
+        prompt_snapshot = dict(optimization.get("prompt_snapshot") or {})
+        return {
+            "platform": "creative",
+            "crawler_type": "screenplay_optimization",
+            "keywords": [],
+            "save_data_option": "json",
+            "get_comments": False,
+            "get_sub_comments": False,
+            "extra": {
+                "optimization_id": optimization["id"],
+                "review_id": optimization["review_id"],
+                "project_id": optimization["project_id"],
+                "created_by_user_id": actor_user_id,
+                "runtime_dir": str(Path(runtime_dir).resolve()),
+                "prompt_snapshot": prompt_snapshot,
+                "prompt_template_id": str(prompt_snapshot.get("template_id") or ""),
+                "prompt_template_key": str(prompt_snapshot.get("template_key") or ""),
+                "prompt_template_revision": int(prompt_snapshot.get("revision") or 0),
+                "prompt_content_hash": str(prompt_snapshot.get("content_hash") or ""),
+            },
+        }
+
+    def create_optimization_job(
+        optimization: dict[str, Any], *, actor_user_id: str
+    ) -> Any:
+        return job_manager.create_job(
+            optimization_job_payload(optimization, actor_user_id=actor_user_id)
+        )
+
     @router.post("/api/script-reviews/{review_id}/optimizations", status_code=201)
     async def create_optimization(
         review_id: int,
@@ -227,42 +264,20 @@ def build_script_optimization_router(
             created_by=principal.user_id,
             prompt_snapshot=prompt_snapshot,
         )
-        job_payload = {
-            "platform": "creative",
-            "crawler_type": "screenplay_optimization",
-            "keywords": [],
-            "save_data_option": "json",
-            "get_comments": False,
-            "get_sub_comments": False,
-            "extra": {
-                "optimization_id": optimization["id"],
-                "review_id": review_id,
-                "project_id": project["id"],
-                "created_by_user_id": principal.user_id,
-                "runtime_dir": str(Path(runtime_dir).resolve()),
-                "prompt_snapshot": prompt_snapshot,
-                "prompt_template_id": str(
-                    (prompt_snapshot or {}).get("template_id") or ""
-                ),
-                "prompt_template_key": str(
-                    (prompt_snapshot or {}).get("template_key") or ""
-                ),
-                "prompt_template_revision": int(
-                    (prompt_snapshot or {}).get("revision") or 0
-                ),
-                "prompt_content_hash": str(
-                    (prompt_snapshot or {}).get("content_hash") or ""
-                ),
-            },
-        }
         try:
-            state = job_manager.create_job(job_payload)
+            state = create_optimization_job(
+                optimization, actor_user_id=principal.user_id
+            )
         except JobConflictError as exc:
-            repository.fail_script_optimization(optimization["id"], str(exc))
-            raise HTTPException(409, str(exc)) from exc
+            failed = repository.fail_script_optimization(optimization["id"], str(exc))
+            return {"optimization": failed, "job_id": "", "start_error": str(exc)}
         except Exception as exc:
-            repository.fail_script_optimization(optimization["id"], str(exc))
-            raise HTTPException(503, "无法创建剧本优化任务") from exc
+            failed = repository.fail_script_optimization(optimization["id"], str(exc))
+            return {
+                "optimization": failed,
+                "job_id": "",
+                "start_error": "无法创建剧本优化任务",
+            }
         optimization = repository.set_script_optimization_job(optimization["id"], str(state.job_id))
         return {"optimization": optimization, "job_id": state.job_id}
 
@@ -327,23 +342,121 @@ def build_script_optimization_router(
             raise HTTPException(404, "优化任务不存在")
         assert_prompt_access(optimization, principal)
         review = get_review_or_404(request, principal, int(optimization["review_id"]))
-        if optimization["status"] != "failed" or not optimization.get("job_id"):
-            raise HTTPException(409, "只有已失败且存在原任务的优化任务可以继续生成")
+        if optimization["status"] != "failed":
+            raise HTTPException(409, "只有已失败的优化任务可以继续生成")
         assert_fresh_review(review)
         try:
             repository.prepare_script_optimization_resume(optimization_id)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         try:
-            state = job_manager.retry(str(optimization["job_id"]))
-        except (JobConflictError, JobNotFoundError) as exc:
+            if optimization.get("job_id"):
+                try:
+                    state = job_manager.retry(str(optimization["job_id"]))
+                except JobNotFoundError:
+                    state = create_optimization_job(
+                        optimization, actor_user_id=principal.user_id
+                    )
+            else:
+                state = create_optimization_job(
+                    optimization, actor_user_id=principal.user_id
+                )
+        except JobConflictError as exc:
             repository.fail_script_optimization(optimization_id, str(exc))
-            raise HTTPException(409, "原任务尚不可重试或已不存在") from exc
+            raise HTTPException(409, "优化任务正在运行或暂不可重试") from exc
         except Exception as exc:
             repository.fail_script_optimization(optimization_id, str(exc))
             raise HTTPException(503, "无法启动优化任务续跑") from exc
         resumed = repository.set_script_optimization_job(optimization_id, str(state.job_id))
         return {"optimization": resumed, "job_id": str(state.job_id)}
+
+    @router.patch("/api/script-optimization-drafts/{draft_id}")
+    async def update_draft(
+        draft_id: int,
+        payload: OptimizationDraftUpdateRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_permission(principal, "script.optimize.accept")
+        draft = repository.get_script_optimization_draft(draft_id)
+        if not draft:
+            raise HTTPException(404, "优化草稿不存在")
+        optimization = repository.get_script_optimization(int(draft["optimization_id"]))
+        if not optimization:
+            raise HTTPException(404, "优化任务不存在")
+        assert_prompt_access(optimization, principal)
+        get_review_or_404(request, principal, int(optimization["review_id"]))
+        try:
+            content = (
+                validate_beats(payload.content, allow_legacy=True)
+                if draft["kind"] == "beats"
+                else validate_script(payload.content)
+            )
+            return repository.update_script_optimization_draft_content(
+                draft_id, content
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post(
+        "/api/script-optimization-drafts/{draft_id}/regenerate", status_code=201
+    )
+    async def regenerate_draft(
+        draft_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_permission(principal, "script.optimize.generate")
+        draft = repository.get_script_optimization_draft(draft_id)
+        if not draft:
+            raise HTTPException(404, "优化草稿不存在")
+        source = repository.get_script_optimization(int(draft["optimization_id"]))
+        if not source:
+            raise HTTPException(404, "优化任务不存在")
+        assert_prompt_access(source, principal)
+        review = get_review_or_404(request, principal, int(source["review_id"]))
+        project = assert_fresh_review(review)
+        episode_number = int(draft["episode_number"])
+        selected_findings = [
+            {
+                "ref": str(item.get("ref") or ""),
+                "episode_numbers": [episode_number],
+            }
+            for item in source.get("selected_findings") or []
+            if episode_number in {
+                int(number) for number in item.get("episode_numbers") or []
+            }
+        ]
+        if not selected_findings:
+            raise HTTPException(409, "该集没有可复用的审核问题")
+        optimization = repository.create_script_optimization(
+            review_id=int(source["review_id"]),
+            project_id=int(project["id"]),
+            mode=str(source["mode"]),
+            source_fingerprint=str(review["source_fingerprint"]),
+            selected_findings=selected_findings,
+            target_episode_numbers=[episode_number],
+            created_by=principal.user_id,
+            prompt_snapshot=dict(source.get("prompt_snapshot") or {}),
+        )
+        try:
+            state = create_optimization_job(
+                optimization, actor_user_id=principal.user_id
+            )
+        except JobConflictError as exc:
+            failed = repository.fail_script_optimization(optimization["id"], str(exc))
+            return {"optimization": failed, "job_id": "", "start_error": str(exc)}
+        except Exception as exc:
+            failed = repository.fail_script_optimization(optimization["id"], str(exc))
+            return {
+                "optimization": failed,
+                "job_id": "",
+                "start_error": "无法创建剧本优化任务",
+            }
+        optimization = repository.set_script_optimization_job(
+            optimization["id"], str(state.job_id)
+        )
+        return {"optimization": optimization, "job_id": str(state.job_id)}
 
     @router.get("/api/script-optimization-drafts/{draft_id}")
     async def get_draft(

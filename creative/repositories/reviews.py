@@ -795,6 +795,25 @@ class ReviewsRepository:
             ).mappings().one_or_none()
         return self._script_optimization_draft(self.row_dict(row)) if row is not None else None
 
+    def update_script_optimization_draft_content(
+        self, draft_id: int, content: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Save user edits while an optimization draft is still pending."""
+
+        with self.transaction_scope() as connection:
+            updated = connection.execute(
+                update(script_optimization_drafts)
+                .where(
+                    script_optimization_drafts.c.id == int(draft_id),
+                    script_optimization_drafts.c.status == "ready",
+                )
+                .values(content_json=jsonb_copy(content), updated_at=utc_now())
+                .returning(script_optimization_drafts.c.id)
+            ).scalar_one_or_none()
+            if updated is None:
+                raise ValueError("只有待采纳的优化草稿可以保存")
+        return self.get_script_optimization_draft(draft_id) or {}
+
     def list_episode_script_optimization_drafts(
         self, project_id: int, episode_number: int, kind: str
     ) -> list[dict[str, Any]]:

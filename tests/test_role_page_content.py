@@ -249,7 +249,7 @@ def test_project_beats_uses_multiline_controls_for_long_content():
         assert f'<input class="form-control form-control-sm" x-model="{field}"' not in beats
 
 
-def test_project_beats_exposes_story_change_cost_and_continuity_ledger():
+def test_project_beats_exposes_story_change_cost_and_continuity_updates():
     beats = _read("templates/common/workspace/project_beats.html")
 
     for label, field in (
@@ -260,7 +260,7 @@ def test_project_beats_exposes_story_change_cost_and_continuity_ledger():
         assert label in beats
         assert field in beats
     assert "连续性变更" in beats
-    assert "连续性账本" in beats
+    assert "连续性账本" not in beats
 
 
 def test_project_beats_long_text_controls_wrap_without_clipping():

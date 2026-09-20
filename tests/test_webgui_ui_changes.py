@@ -744,6 +744,9 @@ def test_script_review_polls_optimization_tasks_until_drafts_are_ready():
 
     assert "scheduleOptimizationHistory" in script
     assert "['queued', 'running'].includes(optimization.status)" in script
+    assert "重新生成本集" in script
+    assert "请填写放弃原因" in script
+    assert "rejection_note: rejectionNote" in script
 
 
 def test_script_review_shows_a_progress_modal_while_the_review_runs():
@@ -764,17 +767,21 @@ def test_script_review_shows_a_progress_modal_while_generating_optimization_draf
 
     assert 'id="scriptOptimizationProgressModal"' in template
     assert 'id="script-optimization-progress-view-drafts"' in template
+    assert 'id="script-optimization-progress-retry"' in template
     assert "showOptimizationProgress" in script
     assert "updateOptimizationProgress" in script
     assert "showOptimizationProgressError" in script
+    assert "retryOptimization" in script
 
 
 def test_writing_pages_load_optimization_draft_comparison():
     template = _source("templates/writing/scripts.html")
+    beats_template = _source("templates/writing/beats.html")
     assert "optimization_draft.js" in template
-    assert 'id="script-page-back-link"' in template
+    assert 'id="optimization-draft-review-back-link"' in template
+    assert 'id="optimization-draft-review-back-link"' in beats_template
     assert "optimization_draft.js?v={{ asset_version }}-return-review" in template
-    assert "optimization_draft.js" in _source("templates/writing/beats.html")
+    assert "optimization_draft.js" in beats_template
     script = _source("static/js/writing/optimization_draft.js")
     assert "/optimization-drafts" in script
     assert "AI 优化草稿" in script
@@ -783,12 +790,22 @@ def test_writing_pages_load_optimization_draft_comparison():
     assert "当前版本" in script
     assert "renderScriptEditor" in script
     assert "applyOptimizationDraft" in script
+    assert "saveOptimizationDraft" in script
+    assert "regenerateOptimizationDraft" in script
+    assert "renderDraftNavigation" in script
+    assert "beforeunload" in script
     assert "window.location.assign(reviewPageUrl())" in script
     assert "下载草稿" in script
+    assert "保存草稿" in script
+    assert "应用为新版本" in script
+    assert "应用并锁定" in script
+    assert "上一份" in script
+    assert "下一份" in script
+    assert "重新生成本集" in script
     assert "renderDraftComparison" in script
     assert "waitForScriptWorkspace" in script
     assert "返回审核" in script
-    assert "script-page-back-link" in script
+    assert "optimization-draft-review-back-link" in script
     assert "review_id=${reviewId}" in script
     assert "computeLineDiff" in script
     assert "line.scope" in script
@@ -1897,15 +1914,13 @@ def test_script_series_generation_does_not_offer_resume_for_an_old_beats_version
     assert "全剧生成中" in scripts
 
 
-def test_continuity_ledger_renders_known_status_codes_in_chinese():
+def test_project_beats_does_not_render_a_continuity_ledger():
     creative = _source("static/js/common/creative.js")
     beats = _source("templates/common/workspace/project_beats.html")
 
-    assert "continuityStatusLabel(status)" in creative
-    assert "blocked: '受阻'" in creative
-    assert "active: '有效'" in creative
-    assert "status: this.continuityStatusLabel(item.status)" in creative
-    assert 'x-text="item.status"' in beats
+    assert "projectContinuityLedger()" not in creative
+    assert "continuityStatusLabel(status)" not in creative
+    assert "连续性账本" not in beats
 
 
 def test_scene_script_lifecycle_badges_have_readable_backgrounds():

@@ -30,9 +30,26 @@ def report_findings(review: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if isinstance(item, dict):
             findings[f"core:{index}"] = item
     for review_index, episode_review in enumerate(report.get("episode_reviews") or []):
+        try:
+            review_episode_number = int(
+                (episode_review or {}).get("episode_number") or 0
+            )
+        except (TypeError, ValueError):
+            review_episode_number = 0
         for finding_index, item in enumerate((episode_review or {}).get("findings") or []):
             if isinstance(item, dict):
-                findings[f"episode:{review_index}:{finding_index}"] = item
+                finding = dict(item)
+                try:
+                    finding_episode_number = int(
+                        finding.get("episode_number") or 0
+                    )
+                except (TypeError, ValueError):
+                    finding_episode_number = 0
+                if review_episode_number > 0:
+                    finding["episode_number"] = review_episode_number
+                elif finding_episode_number > 0:
+                    finding["episode_number"] = finding_episode_number
+                findings[f"episode:{review_index}:{finding_index}"] = finding
     for index, item in enumerate(report.get("cross_episode_findings") or []):
         if isinstance(item, dict):
             findings[f"cross:{index}"] = item
@@ -93,6 +110,7 @@ async def optimize_episode(
     on_phase: Any = None,
 ) -> dict[str, dict[str, Any]]:
     compact_context = _compact_review_context(review_context)
+    episode_summaries = _compact_episode_summaries(summaries, episode_number)
     system = _optimization_system(prompt_snapshot)
     if mode == "structure":
         await _notify_phase(on_phase, "beats")
@@ -112,7 +130,7 @@ async def optimize_episode(
                         "beats": beats_content,
                         "review_context": compact_context,
                         "selected_findings": findings,
-                        "episode_summaries": summaries,
+                        "episode_summaries": episode_summaries,
                     },
                     ensure_ascii=False,
                 ),
@@ -141,7 +159,7 @@ async def optimize_episode(
                         "beats": optimized_beats,
                         "review_context": compact_context,
                         "selected_findings": findings,
-                        "episode_summaries": summaries,
+                        "episode_summaries": episode_summaries,
                     },
                     ensure_ascii=False,
                 ),
@@ -170,7 +188,7 @@ async def optimize_episode(
                     "beats": beats_content,
                     "review_context": compact_context,
                     "selected_findings": findings,
-                    "episode_summaries": summaries,
+                    "episode_summaries": episode_summaries,
                 },
                 ensure_ascii=False,
             ),
@@ -207,6 +225,28 @@ def _compact_review_context(review_context: dict[str, Any]) -> dict[str, Any]:
         for duplicate in ("text", "script", "beats"):
             compact_episode.pop(duplicate, None)
         compact["episode"] = compact_episode
+    return compact
+
+
+def _compact_episode_summaries(
+    summaries: list[dict[str, Any]], episode_number: int
+) -> list[dict[str, Any]]:
+    """Keep only non-duplicated summary context for the episode being optimized."""
+    compact: list[dict[str, Any]] = []
+    for item in summaries or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            item_episode_number = int(item.get("episode_number") or 0)
+        except (TypeError, ValueError):
+            continue
+        if item_episode_number != int(episode_number):
+            continue
+        summary = str(item.get("summary") or "").strip()
+        if summary:
+            compact.append(
+                {"episode_number": item_episode_number, "summary": summary}
+            )
     return compact
 
 

@@ -54,12 +54,16 @@ from creative.script_service import (
     generate_episode_script_chunk,
     generate_outline_bundle,
 )
+from creative.script_series import (
+    SCRIPT_SERIES_MAX_CONCURRENCY,
+    resolve_script_series_chunk_size,
+    run_ordered_script_windows,
+)
 from system_database import SystemDatabase, SystemDatabaseSettings
 
 
 MAX_INLINE_SOURCE_SNAPSHOT_BYTES = 2 * 1024 * 1024
 BEATS_SERIES_CHUNK_SIZE = 10
-SCRIPT_SERIES_CHUNK_SIZE = 2
 
 
 def create_provider(model_record_id: str | None = None):
@@ -852,7 +856,7 @@ async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
                 payload={"stage": action, "completed": completed, "total": total_episodes},
             )
         series_chunk_size = (
-            SCRIPT_SERIES_CHUNK_SIZE
+            resolve_script_series_chunk_size(provider)
             if action == "script"
             else BEATS_SERIES_CHUNK_SIZE
         )
@@ -988,44 +992,139 @@ async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
                 range_start, range_end, checkpoint_items, meta
             )
 
-        for start in range(
-            completed + 1, total_episodes + 1, series_chunk_size
-        ):
-            end = min(total_episodes, start + series_chunk_size - 1)
-            retry_completed = start - 1
-            if action == "beats":
+        if action == "beats":
+            for start in range(
+                completed + 1, total_episodes + 1, series_chunk_size
+            ):
+                end = min(total_episodes, start + series_chunk_size - 1)
                 await generate_and_save_beats_range(start, end)
-                continue
-            await wait_if_paused(job)
-            outlines = locked_outlines_for_range(start, end)
-            selected_beats = {
-                int(item["episode_number"]): item
-                for item in repository.compatible_locked_beats(
-                    project, range(start, end + 1)
+        else:
+            script_ranges = [
+                (start, min(total_episodes, start + series_chunk_size - 1))
+                for start in range(
+                    completed + 1, total_episodes + 1, series_chunk_size
                 )
-            }
-            if sorted(selected_beats) != list(range(start, end + 1)):
-                raise ValueError(
-                    f"未找到第 {start}-{end} 集的当前兼容 locked Beats"
+            ]
+
+            async def generate_script_range(
+                script_range: tuple[int, int],
+            ) -> list[
+                tuple[int, int, list[tuple[int, dict[str, Any]]], dict[str, Any]]
+            ]:
+                range_start, range_end = script_range
+                await wait_if_paused(job)
+                outlines = locked_outlines_for_range(range_start, range_end)
+                selected_beats = {
+                    int(item["episode_number"]): item
+                    for item in repository.compatible_locked_beats(
+                        project, range(range_start, range_end + 1)
+                    )
+                }
+                if sorted(selected_beats) != list(range(range_start, range_end + 1)):
+                    raise ValueError(
+                        f"未找到第 {range_start}-{range_end} 集的当前兼容 locked Beats"
+                    )
+                beats_by_episode = {
+                    episode_number: selected_beats[episode_number]["content"]
+                    for episode_number in range(range_start, range_end + 1)
+                }
+                request_provider = _create_generation_provider(extra)
+                setattr(request_provider, "retry_callback", report_retry)
+                try:
+                    checkpoint_items, meta = await generate_episode_script_chunk(
+                        request_provider,
+                        project,
+                        brief,
+                        outlines,
+                        characters,
+                        relationships,
+                        beats_by_episode,
+                        continuity_ledger=_continuity_ledger_through(
+                            project, range_start - 1, repository=repository
+                        ),
+                        prompt_snapshot=prompt_snapshot or None,
+                    )
+                except LLMOutputTruncatedError as exc:
+                    if range_start == range_end:
+                        raise LLMOutputTruncatedError(
+                            f"第 {range_start} 集场次剧本生成仍达到模型输出上限；"
+                            "请提高模型输出上限或减少单集正文长度",
+                            finish_reason=exc.finish_reason,
+                            returned_chars=exc.returned_chars,
+                        ) from exc
+                    midpoint = (range_start + range_end - 1) // 2
+                    emit(
+                        job,
+                        "progress",
+                        f"第 {range_start}-{range_end} 集场次剧本输出达到上限，"
+                        f"自动拆分为第 {range_start}-{midpoint} 集和"
+                        f"第 {midpoint + 1}-{range_end} 集",
+                        "warning",
+                        {
+                            "stage": action,
+                            "completed": range_start - 1,
+                            "total": total_episodes,
+                            "split_start": range_start,
+                            "split_end": range_end,
+                            "left_start": range_start,
+                            "left_end": midpoint,
+                            "right_start": midpoint + 1,
+                            "right_end": range_end,
+                            "finish_reason": exc.finish_reason,
+                            "returned_chars": exc.returned_chars,
+                        },
+                    )
+                    return [
+                        *await generate_script_range((range_start, midpoint)),
+                        *await generate_script_range((midpoint + 1, range_end)),
+                    ]
+                return [(range_start, range_end, checkpoint_items, meta)]
+
+            async def persist_script_range(
+                _script_range: tuple[int, int],
+                checkpoints: list[
+                    tuple[
+                        int,
+                        int,
+                        list[tuple[int, dict[str, Any]]],
+                        dict[str, Any],
+                    ]
+                ],
+            ) -> None:
+                nonlocal retry_completed
+                for range_start, range_end, checkpoint_items, meta in checkpoints:
+                    await save_series_checkpoint(
+                        range_start, range_end, checkpoint_items, meta
+                    )
+                    retry_completed = range_end
+
+            def report_parallel_downgrade(exc: Exception) -> None:
+                emit(
+                    job,
+                    "progress",
+                    "并行生成遇到模型限流或网络波动，已自动降为串行续跑",
+                    "warning",
+                    {
+                        "stage": action,
+                        "completed": retry_completed,
+                        "total": total_episodes,
+                        "script_batch_concurrency": 1,
+                        "reason": str(exc),
+                    },
                 )
-            beats_by_episode = {
-                episode_number: selected_beats[episode_number]["content"]
-                for episode_number in range(start, end + 1)
-            }
-            checkpoint_items, meta = await generate_episode_script_chunk(
-                provider,
-                project,
-                brief,
-                outlines,
-                characters,
-                relationships,
-                beats_by_episode,
-                continuity_ledger=_continuity_ledger_through(
-                    project, start - 1, repository=repository
-                ),
-                prompt_snapshot=prompt_snapshot or None,
+
+            emit(
+                job,
+                "log",
+                f"场次剧本将按每批 {series_chunk_size} 集、最多 "
+                f"{SCRIPT_SERIES_MAX_CONCURRENCY} 批并行生成",
             )
-            await save_series_checkpoint(start, end, checkpoint_items, meta)
+            await run_ordered_script_windows(
+                script_ranges,
+                generate=generate_script_range,
+                persist=persist_script_range,
+                on_downgrade=report_parallel_downgrade,
+            )
         result = {
             "action": action, "series_generation": True, "batch_id": series_batch_id,
             "episode_count": total_episodes, "resumed_from_episode": completed,

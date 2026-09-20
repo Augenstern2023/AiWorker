@@ -406,7 +406,7 @@ window.aiworkerModules.push(() => ({
                 creativeProjectStageUrl(project) {
                     const projectId = encodeURIComponent(String(project?.id || ''));
                     if (!projectId) return '#';
-                    const stage = {
+                    const sequentialStage = {
                         created: 'brief',
                         direction_review: 'brief',
                         brief_locked: 'characters',
@@ -422,12 +422,22 @@ window.aiworkerModules.push(() => ({
                         scripts_in_progress: 'script',
                         completed: 'script',
                     }[project?.status] || 'brief';
+                    const allowedStages = ['brief', 'characters', 'outline', 'beats', 'script'];
+                    const stage = project?.workflow_mode === 'free'
+                        && allowedStages.includes(project?.latest_stage)
+                        ? project.latest_stage
+                        : sequentialStage;
+                    const latestEpisode = Math.min(
+                        Math.max(1, Number(project?.latest_episode_number || 1)),
+                        Math.max(1, Number(project?.target_episode_count || 1))
+                    );
+                    const allEpisodes = project?.workflow_mode !== 'free';
                     return {
                         brief: `/planning/projects/${projectId}/brief`,
                         characters: `/planning/projects/${projectId}/characters`,
                         outline: `/writing/projects/${projectId}/outlines?episode=all`,
-                        beats: `/writing/projects/${projectId}/episodes/1/beats?episode=all`,
-                        script: `/writing/projects/${projectId}/episodes/1/scripts?episode=all`,
+                        beats: `/writing/projects/${projectId}/episodes/${latestEpisode}/beats${allEpisodes ? '?episode=all' : ''}`,
+                        script: `/writing/projects/${projectId}/episodes/${latestEpisode}/scripts${allEpisodes ? '?episode=all' : ''}`,
                     }[stage];
                 },
 
@@ -3272,7 +3282,11 @@ window.aiworkerModules.push(() => ({
                             && ['locked', 'approved'].includes(item.status)
                             && String(this.creativeHead('beats', item.episode_number)?.resource_ref || '') === String(item.id)
                         ).map(item => Number(item.episode_number)));
-                        return {required, locked: locked.size, missing: []};
+                        return {
+                            required, locked: locked.size,
+                            missing: Array.from({length: required}, (_, index) => index + 1)
+                                .filter(number => !locked.has(number)),
+                        };
                     }
                     const locked = new Set((project?.episodes || []).filter(item =>
                         item.stage === 'beats' && ['locked', 'approved'].includes(item.status)
@@ -3291,7 +3305,6 @@ window.aiworkerModules.push(() => ({
                 },
 
                 projectScriptsSeriesBlockReason() {
-                    if (this.isFreeCreativeProject()) return '';
                     const progress = this.lockedProjectBeatsProgress();
                     if (!progress.required) return '请先锁定分集大纲';
                     return progress.missing.length
@@ -3527,7 +3540,7 @@ window.aiworkerModules.push(() => ({
                     const currentJob = this.jobs.find(item => item.job_id === this.creativeWorkspace.jobId);
                     const extra = currentJob?.job?.extra || {};
                     if (!String(extra.operation_id || '').trim()) return true;
-                    return status === 'failed' && String(extra.workflow_mode || 'sequential') === 'sequential';
+                    return status === 'failed';
                 },
                 creativeProgressIndeterminate() {
                     const progress = this.creativeWorkspace.jobProgress || {};
@@ -3636,10 +3649,7 @@ window.aiworkerModules.push(() => ({
                     const currentJob = this.jobs.find(item => item.job_id === this.creativeWorkspace.jobId);
                     const currentExtra = currentJob?.job?.extra || {};
                     const operationBound = Boolean(String(currentExtra.operation_id || '').trim());
-                    if (operationBound && (
-                        this.creativeWorkspace.jobStatus !== 'failed'
-                        || String(currentExtra.workflow_mode || 'sequential') !== 'sequential'
-                    )) return;
+                    if (operationBound && this.creativeWorkspace.jobStatus !== 'failed') return;
                     const projectId = Number(currentExtra.project_id || this.creativeWorkspace.project?.id || 0);
                     const retryUrl = operationBound
                         ? `/api/creative/projects/${projectId}/generation-jobs/${this.creativeWorkspace.jobId}/retry`

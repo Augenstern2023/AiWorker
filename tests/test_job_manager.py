@@ -416,6 +416,78 @@ def test_job_manager_allows_independent_creative_generation_jobs(
     assert another_project.job_id == "outlines-project-2"
 
 
+def test_video_parameter_analysis_can_run_with_active_creative_generation(
+    monkeypatch, tmp_path
+):
+    """Read-only analysis must not inherit the platform-wide creative lock."""
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    generation = CrawlJob(
+        job_id="script-episode-10",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "project_id": 3,
+            "action": "script",
+            "episode_number": 10,
+        },
+    )
+    manager.jobs[generation.job_id] = JobState(job=generation, status="running")
+    manager.processes[generation.job_id] = FakeProcess()
+
+    analysis = manager.start_job(
+        CrawlJob(
+            job_id="video-parameters-project-3",
+            platform="creative",
+            crawler_type="video_parameter_recommendation",
+            extra={"project_id": 3},
+        ),
+        start_monitor=False,
+    )
+
+    assert analysis.job_id == "video-parameters-project-3"
+
+
+def test_video_parameter_analysis_remains_project_scoped(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    existing = CrawlJob(
+        job_id="video-parameters-project-3",
+        platform="creative",
+        crawler_type="video_parameter_recommendation",
+        extra={"project_id": 3},
+    )
+    manager.jobs[existing.job_id] = JobState(job=existing, status="running")
+    manager.processes[existing.job_id] = FakeProcess()
+
+    with pytest.raises(JobConflictError, match="platform 'creative'"):
+        manager.start_job(
+            CrawlJob(
+                job_id="video-parameters-project-3-duplicate",
+                platform="creative",
+                crawler_type="video_parameter_recommendation",
+                extra={"project_id": 3},
+            ),
+            start_monitor=False,
+        )
+
+    independent = manager.start_job(
+        CrawlJob(
+            job_id="video-parameters-project-4",
+            platform="creative",
+            crawler_type="video_parameter_recommendation",
+            extra={"project_id": 4},
+        ),
+        start_monitor=False,
+    )
+
+    assert independent.job_id == "video-parameters-project-4"
+
+
 @pytest.mark.parametrize(
     ("extra", "duplicate_extra"),
     [
@@ -1956,6 +2028,49 @@ def test_failed_operation_can_be_atomically_relaunched_for_retry(
     )
 
     assert retried.job_id == "failed-job"
+    assert launches == ["launched"]
+
+
+def test_failed_free_operation_retry_preserves_missing_workflow_task(
+    monkeypatch, tmp_path
+):
+    launches = []
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker",
+        lambda *_args, **_kwargs: launches.append("launched") or FakeProcess(),
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    payload = _creative_operation_payload(job_id="failed-free-job")
+    payload["extra"].update(
+        {
+            "workflow_mode": "free",
+            "operation_id": "free-operation-retry",
+            "created_by_user_id": "writer-1",
+            "project_id": "9",
+        }
+    )
+    failed = JobState(job=CrawlJob.from_dict(payload), status="failed")
+    manager.storage.upsert_job(failed)
+    retry_payload = _creative_operation_payload(job_id="unused-free-retry")
+    retry_payload["extra"].update(
+        {
+            "workflow_mode": "free",
+            "operation_id": "free-operation-retry",
+            "created_by_user_id": "writer-1",
+            "retry_failed_operation": True,
+        }
+    )
+
+    retried = manager.get_or_create_job(
+        "free-operation-retry",
+        retry_payload,
+        created_by_user_id="writer-1",
+        workflow_task_id=None,
+        project_id=9,
+    )
+
+    assert retried.job_id == "failed-free-job"
+    assert "workflow_task_id" not in retried.job.extra
     assert launches == ["launched"]
 
 

@@ -34,6 +34,7 @@ from creative.database_schema import (
     creative_characters,
     creative_episodes,
     creative_projects,
+    creative_resource_heads,
     creative_seeds,
     creative_topics,
 )
@@ -1061,6 +1062,55 @@ def test_list_projects_filters_bootstrap_status_and_topic(
         for item in postgres_creative.list_projects(topic_id=seeded_topic["topic_id"])
     ] == [ready["id"]]
     assert postgres_creative.list_projects(topic_id=987654321) == []
+
+
+def test_list_projects_exposes_latest_free_head_for_navigation(
+    postgres_creative,
+) -> None:
+    project, _ = postgres_creative.ensure_original_project(
+        seed_text="自由创作种子",
+        name="自由创作跳转",
+        target_episode_count=12,
+        created_by="free-lister",
+        creation_request_id="req-list-free-navigation",
+        workflow_mode="free",
+    )
+    postgres_creative.mark_project_bootstrap_status(project["id"], "ready")
+    now = utc_now()
+    with postgres_creative.database.transaction() as connection:
+        connection.execute(
+            creative_resource_heads.insert(),
+            [
+                {
+                    "project_id": project["id"],
+                    "resource_scope": "free",
+                    "stage": "brief",
+                    "episode_number": 0,
+                    "resource_ref": "11",
+                    "resource_version": 1,
+                    "revision": 1,
+                    "updated_at": now,
+                    "updated_by": "free-lister",
+                },
+                {
+                    "project_id": project["id"],
+                    "resource_scope": "free",
+                    "stage": "beats",
+                    "episode_number": 6,
+                    "resource_ref": "21",
+                    "resource_version": 1,
+                    "revision": 1,
+                    "updated_at": now + timedelta(minutes=1),
+                    "updated_by": "free-lister",
+                },
+            ],
+        )
+
+    listed = next(
+        item for item in postgres_creative.list_projects() if item["id"] == project["id"]
+    )
+    assert listed["latest_stage"] == "beats"
+    assert listed["latest_episode_number"] == 6
 
 
 def test_bootstrap_status_transitions_and_listing(postgres_creative) -> None:

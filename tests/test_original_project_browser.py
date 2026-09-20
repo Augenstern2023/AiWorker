@@ -216,6 +216,56 @@ def test_project_list_links_open_the_projects_current_stage() -> None:
     assert actual_urls == expected_urls
 
 
+def test_free_project_list_links_open_the_latest_active_resource() -> None:
+    projects = [
+        {"id": 9, "status": "free_active", "workflow_mode": "free"},
+        {"id": 9, "status": "free_active", "workflow_mode": "free", "latest_stage": "brief"},
+        {"id": 9, "status": "free_active", "workflow_mode": "free", "latest_stage": "characters"},
+        {"id": 9, "status": "free_active", "workflow_mode": "free", "latest_stage": "outline"},
+        {
+            "id": 9,
+            "status": "free_active",
+            "workflow_mode": "free",
+            "latest_stage": "beats",
+            "latest_episode_number": 4,
+            "target_episode_count": 20,
+        },
+        {
+            "id": 9,
+            "status": "free_active",
+            "workflow_mode": "free",
+            "latest_stage": "script",
+            "latest_episode_number": 7,
+            "target_episode_count": 20,
+        },
+    ]
+    expected_urls = [
+        "/planning/projects/9/brief",
+        "/planning/projects/9/brief",
+        "/planning/projects/9/characters",
+        "/writing/projects/9/outlines?episode=all",
+        "/writing/projects/9/episodes/4/beats",
+        "/writing/projects/9/episodes/7/scripts",
+    ]
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content('<body data-workspace-page="planning-projects"></body>')
+        page.add_script_tag(content=_source("static/js/common/creative.js"))
+        page.add_script_tag(content=_source("static/js/common/tasks.js"))
+        actual_urls = page.evaluate(
+            """projects => {
+                const workspace = appData();
+                return projects.map(project => workspace.creativeProjectStageUrl(project));
+            }""",
+            projects,
+        )
+        browser.close()
+
+    assert actual_urls == expected_urls
+
+
 @pytest.mark.parametrize(
     ("workspace_page", "expected_project_url"),
     (

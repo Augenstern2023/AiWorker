@@ -393,7 +393,17 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
-                creativeProjectStatusLabel(status) {
+                creativeProjectStatusLabel(project) {
+                    const status = typeof project === 'string' ? project : project?.status;
+                    if (status === 'free_active') {
+                        return {
+                            brief: 'Brief 已锁定',
+                            characters: '人物已锁定',
+                            outline: '大纲已锁定',
+                            beats: 'Beats 制作中',
+                            script: '场次剧本制作中',
+                        }[project?.latest_locked_stage] || '自由创作中';
+                    }
                     return {
                         created: '待生成方向', direction_review: '方向评审', brief_locked: 'Brief 已锁定',
                         characters_draft: '人物草稿', characters_locked: '人物已锁定', outline_draft: '大纲草稿',

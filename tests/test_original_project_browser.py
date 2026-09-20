@@ -266,6 +266,47 @@ def test_free_project_list_links_open_the_latest_active_resource() -> None:
     assert actual_urls == expected_urls
 
 
+def test_free_project_status_label_shows_the_latest_locked_stage() -> None:
+    projects = [
+        {"status": "free_active", "workflow_mode": "free"},
+        {
+            "status": "free_active",
+            "workflow_mode": "free",
+            "latest_locked_stage": "brief",
+        },
+        {
+            "status": "free_active",
+            "workflow_mode": "free",
+            "latest_locked_stage": "characters",
+        },
+        {
+            "status": "free_active",
+            "workflow_mode": "free",
+            "latest_locked_stage": "beats",
+        },
+        {"status": "beats_in_progress", "workflow_mode": "sequential"},
+    ]
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content('<body data-workspace-page="planning-projects"></body>')
+        page.add_script_tag(content=_source("static/js/common/creative.js"))
+        page.add_script_tag(content=_source("static/js/common/tasks.js"))
+        labels = page.evaluate(
+            "projects => projects.map(project => appData().creativeProjectStatusLabel(project))",
+            projects,
+        )
+        browser.close()
+
+    assert labels == [
+        "自由创作中",
+        "Brief 已锁定",
+        "人物已锁定",
+        "Beats 制作中",
+        "Beats 制作中",
+    ]
+
+
 @pytest.mark.parametrize(
     ("workspace_page", "expected_project_url"),
     (

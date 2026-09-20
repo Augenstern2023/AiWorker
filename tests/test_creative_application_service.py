@@ -26,8 +26,8 @@ from identity.schema import Principal
 
 
 @pytest.fixture
-def creative_context(tmp_path: Path) -> SimpleNamespace:
-    repository = CreativeRepository(tmp_path / "creative.db")
+def creative_context(tmp_path: Path, postgres_creative) -> SimpleNamespace:
+    repository = postgres_creative
     workflow = MagicMock()
     workflow.ensure_project_task.return_value = {
         "id": "brief-task",
@@ -405,19 +405,35 @@ def test_first_brief_rejects_second_root_and_imitation_project(
             actor=creative_context.actor,
         )
 
-    imitation, _ = creative_context.repository.ensure_original_project(
-        seed_text="仿写种子",
-        name="仿写项目",
-        target_episode_count=1,
+    topic = creative_context.repository.upsert_topics(
+        [
+            {
+                "platform": "hg",
+                "job_id": "creative-service-imitation",
+                "source_path": "creative-service-imitation.json",
+                "captured_at": "2026-09-20",
+                "title": "仿写原剧",
+                "score": 90,
+                "confidence": "high",
+                "score_details": {},
+                "recommendation": "adopt",
+                "evidence": [],
+            }
+        ]
+    )[0]
+    creative_context.repository.update_topic(topic["id"], "adopted")
+    breakdown = creative_context.repository.create_breakdown(
+        topic["id"], {"core_conflict": "原剧冲突"}, {}, []
+    )
+    creative_context.repository.lock_breakdown(breakdown["id"])
+    imitation = creative_context.repository.create_project(
+        topic["id"],
+        breakdown["id"],
+        "仿写项目",
+        1,
         created_by=creative_context.actor.user_id,
         creation_request_id="imitation-project",
     )
-    with creative_context.repository._connect() as connection:
-        connection.execute("PRAGMA ignore_check_constraints = ON")
-        connection.execute(
-            "UPDATE creative_projects SET creation_mode = 'imitation' WHERE id = ?",
-            (imitation["id"],),
-        )
     with pytest.raises(ValueError, match="original"):
         service.persist_draft(
             project_id=imitation["id"],

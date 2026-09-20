@@ -31,6 +31,7 @@
     const optimizationProgressBar = document.getElementById('script-optimization-progress-bar');
     const optimizationProgressElapsed = document.getElementById('script-optimization-progress-elapsed');
     const optimizationProgressError = document.getElementById('script-optimization-progress-error');
+    const optimizationProgressRetry = document.getElementById('script-optimization-progress-retry');
     const optimizationProgressViewDrafts = document.getElementById('script-optimization-progress-view-drafts');
     const returnReviewId = Number(new URLSearchParams(window.location.search).get('review_id') || 0);
     let activeReviewId = null;
@@ -179,6 +180,7 @@
             optimizationProgressError.textContent = '';
             optimizationProgressError.classList.add('d-none');
         }
+        optimizationProgressRetry?.classList.add('d-none');
         optimizationProgressViewDrafts?.classList.add('d-none');
         refreshOptimizationProgressElapsed();
         if (optimizationProgress.elapsedTimer) window.clearInterval(optimizationProgress.elapsedTimer);
@@ -215,6 +217,7 @@
             optimizationProgressError.textContent = '';
             optimizationProgressError.classList.add('d-none');
         }
+        optimizationProgressRetry?.classList.toggle('d-none', !failed);
         optimizationProgressViewDrafts?.classList.toggle('d-none', !completed && !savedEpisodes);
         if (!isRunning && optimizationProgress.elapsedTimer) {
             window.clearInterval(optimizationProgress.elapsedTimer);
@@ -235,6 +238,9 @@
             optimizationProgressError.textContent = message || '创建优化草稿任务失败，请稍后重试。';
             optimizationProgressError.classList.remove('d-none');
         }
+        optimizationProgressRetry?.classList.toggle(
+            'd-none', !optimizationProgress.optimizationId,
+        );
         if (optimizationProgress.elapsedTimer) {
             window.clearInterval(optimizationProgress.elapsedTimer);
             optimizationProgress.elapsedTimer = null;
@@ -754,6 +760,43 @@
         optimizationTimers.set(review.id, next);
     }
 
+    async function retryOptimization(optimizationId, button = null, review = null, container = null) {
+        if (!optimizationId) return;
+        if (button) button.disabled = true;
+        try {
+            const payload = await readJson(await aiworkerApi.request(`/api/script-optimizations/${optimizationId}/retry`, { method: 'POST' }));
+            optimizationProgress.optimizationId = payload.optimization.id;
+            optimizationProgress.startedAt = Date.now();
+            updateOptimizationProgress(payload.optimization);
+            if (review && container) await loadOptimizationHistory(review, container);
+            else if (activeReviewId) await openReview(activeReviewId);
+        } catch (requestError) {
+            showError(requestError.message);
+            if (optimizationProgressError) {
+                optimizationProgressError.textContent = requestError.message;
+                optimizationProgressError.classList.remove('d-none');
+            }
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    async function regenerateOptimizationDraft(draftId, review, container, button) {
+        button.disabled = true;
+        showOptimizationProgress(`${sourceLabel(review)} · 重新生成单集草稿`);
+        try {
+            const payload = await readJson(await aiworkerApi.request(`/api/script-optimization-drafts/${draftId}/regenerate`, { method: 'POST' }));
+            optimizationProgress.optimizationId = payload.optimization.id;
+            updateOptimizationProgress(payload.optimization);
+            await loadOptimizationHistory(review, container);
+        } catch (requestError) {
+            showError(requestError.message);
+            showOptimizationProgressError(requestError.message);
+        } finally {
+            button.disabled = false;
+        }
+    }
+
     async function loadOptimizationHistory(review, container) {
         try {
             const payload = await readJson(await aiworkerApi.request(`/api/script-reviews/${review.id}/optimizations`));
@@ -775,17 +818,9 @@
                     retry.type = 'button';
                     retry.className = 'btn btn-outline-warning btn-sm mt-2';
                     retry.textContent = '继续生成未完成集数';
-                    retry.addEventListener('click', async () => {
-                        retry.disabled = true;
-                        try {
-                            const payload = await readJson(await aiworkerApi.request(`/api/script-optimizations/${optimization.id}/retry`, { method: 'POST' }));
-                            updateOptimizationProgress(payload.optimization);
-                            await loadOptimizationHistory(review, container);
-                        } catch (requestError) {
-                            showError(requestError.message);
-                            retry.disabled = false;
-                        }
-                    });
+                    retry.addEventListener('click', () => retryOptimization(
+                        optimization.id, retry, review, container,
+                    ));
                     container.append(retry);
                 }
                 (optimization.drafts || []).forEach((draft) => {
@@ -816,6 +851,18 @@
                         }
                         row.append(reject);
                     }
+                    const canRegenerate = ['ready', 'rejected'].includes(draft.status)
+                        && (optimization.mode !== 'structure' || draft.kind === 'beats');
+                    if (canRegenerate) {
+                        const regenerate = document.createElement('button');
+                        regenerate.type = 'button';
+                        regenerate.className = 'btn btn-outline-warning btn-sm';
+                        regenerate.textContent = '重新生成本集';
+                        regenerate.addEventListener('click', () => regenerateOptimizationDraft(
+                            draft.id, review, container, regenerate,
+                        ));
+                        row.append(regenerate);
+                    }
                     container.append(row);
                 });
             });
@@ -835,15 +882,22 @@
     }
 
     async function rejectOptimizationDraft(draftId, review, container) {
+        const rejectionNote = window.prompt('请填写放弃原因（可选），取消则保留草稿。', '');
+        if (rejectionNote === null) return;
         try {
             await readJson(await aiworkerApi.request(`/api/script-optimization-drafts/${draftId}/reject`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ rejection_note: rejectionNote }),
             }));
             await loadOptimizationHistory(review, container);
         } catch (requestError) {
             showError(requestError.message);
         }
     }
+
+    optimizationProgressRetry?.addEventListener('click', () => retryOptimization(
+        optimizationProgress.optimizationId, optimizationProgressRetry,
+    ));
 
     async function downloadReviewReport(reviewId) {
         try {

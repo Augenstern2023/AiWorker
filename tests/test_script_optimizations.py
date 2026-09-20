@@ -189,6 +189,81 @@ def test_failed_optimization_can_retry_with_its_saved_drafts(tmp_path) -> None:
     assert client.post(f"/api/script-optimizations/{optimization['id']}/retry").status_code == 409
 
 
+def test_failed_optimization_without_an_original_job_recreates_it(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(repository)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    repository.fail_script_optimization(optimization["id"], "启动失败")
+
+    class JobManager:
+        def __init__(self):
+            self.payloads = []
+
+        def create_job(self, payload):
+            self.payloads.append(payload)
+            return SimpleNamespace(job_id="replacement-job")
+
+    jobs = JobManager()
+    response = _admin_client(repository, jobs).post(
+        f"/api/script-optimizations/{optimization['id']}/retry"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["job_id"] == "replacement-job"
+    assert jobs.payloads[0]["extra"]["optimization_id"] == optimization["id"]
+    assert repository.get_script_optimization(optimization["id"])["status"] == "queued"
+
+
+def test_job_launch_failure_stays_visible_and_can_be_retried(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(repository)
+    PromptStore(repository).enable_project(
+        project["id"], actor_user_id="admin-1"
+    )
+
+    class JobManager:
+        def __init__(self) -> None:
+            self.create_attempts = 0
+
+        def create_job(self, _payload):
+            self.create_attempts += 1
+            if self.create_attempts == 1:
+                raise RuntimeError("queue unavailable")
+            return SimpleNamespace(job_id="retry-after-launch-failure")
+
+    jobs = JobManager()
+    client = _admin_client(repository, jobs)
+    created = client.post(
+        f"/api/script-reviews/{review['id']}/optimizations",
+        json={
+            "mode": "direct",
+            "findings": [{"ref": "core:0", "episode_numbers": [1]}],
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    failed = created.json()["optimization"]
+    assert failed["status"] == "failed"
+    assert created.json()["start_error"] == "无法创建剧本优化任务"
+    history = client.get(
+        f"/api/script-reviews/{review['id']}/optimizations"
+    ).json()["items"]
+    assert [item["id"] for item in history] == [failed["id"]]
+
+    retried = client.post(
+        f"/api/script-optimizations/{failed['id']}/retry"
+    )
+
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["job_id"] == "retry-after-launch-failure"
+    assert retried.json()["optimization"]["status"] == "queued"
+
+
 @pytest.mark.parametrize(
     ("optimization_mode", "change_route", "prompt_mode"),
     [("direct", "script_only", "single"), ("structure", "beats_then_script", "series")],
@@ -766,6 +841,89 @@ def test_episode_page_can_list_its_optimization_draft_entries(tmp_path) -> None:
 
     assert response.status_code == 200
     assert [item["id"] for item in response.json()["items"]] == [completed["drafts"][0]["id"]]
+
+
+def test_ready_script_optimization_draft_can_be_saved_before_accepting(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, scripts = _project_with_review(repository)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    completed = repository.complete_script_optimization(
+        optimization["id"],
+        [{
+            "episode_number": 1, "kind": "script",
+            "source_episode_id": scripts[0]["id"],
+            "source_fingerprint": content_fingerprint(scripts[0]["content"]),
+            "content": {"episode_title": "AI 原稿", "scenes": []},
+        }],
+    )
+    draft_id = completed["drafts"][0]["id"]
+    edited = {
+        "episode_title": "人工调整稿",
+        "scenes": [{
+            "sequence_no": 1, "scene_no": 1, "time_of_day": "日",
+            "interior_exterior": "内", "location": "客厅", "props": [],
+            "characters": ["主角"],
+            "blocks": [{"type": "action", "text": "主角推门而入。"}],
+        }],
+    }
+
+    saved = _admin_client(repository).patch(
+        f"/api/script-optimization-drafts/{draft_id}", json={"content": edited}
+    )
+
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["content"] == edited
+    assert repository.get_script_optimization_draft(draft_id)["status"] == "ready"
+
+
+def test_one_optimization_episode_can_be_regenerated_with_the_frozen_settings(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, scripts = _project_with_review(repository, episode_count=2)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1, 2]}],
+        target_episode_numbers=[1, 2], created_by="admin-1",
+        prompt_snapshot={
+            "stage": "optimization", "mode": "single", "owner_scope": "system",
+        },
+    )
+    completed = repository.complete_script_optimization(
+        optimization["id"],
+        [{
+            "episode_number": number, "kind": "script",
+            "source_episode_id": source["id"],
+            "source_fingerprint": content_fingerprint(source["content"]),
+            "content": {"episode_title": f"优化稿 {number}", "scenes": []},
+        } for number, source in enumerate(scripts, start=1)],
+    )
+
+    class JobManager:
+        def __init__(self):
+            self.payloads = []
+
+        def create_job(self, payload):
+            self.payloads.append(payload)
+            return SimpleNamespace(job_id="regenerated-episode")
+
+    jobs = JobManager()
+    response = _admin_client(repository, jobs).post(
+        f"/api/script-optimization-drafts/{completed['drafts'][0]['id']}/regenerate"
+    )
+
+    assert response.status_code == 201, response.text
+    regenerated = response.json()["optimization"]
+    assert regenerated["target_episode_numbers"] == [1]
+    assert regenerated["selected_findings"] == [
+        {"ref": "core:0", "episode_numbers": [1]}
+    ]
+    assert regenerated["prompt_snapshot"] == optimization["prompt_snapshot"]
+    assert jobs.payloads[0]["extra"]["optimization_id"] == regenerated["id"]
 
 
 def test_episode_drafts_use_historical_workflow_identity_for_project_access(

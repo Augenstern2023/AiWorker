@@ -6239,6 +6239,19 @@ class CreativeRepository:
             ).fetchone()
         return self._script_optimization_draft(dict(row)) if row else None
 
+    def update_script_optimization_draft_content(
+        self, draft_id: int, content: dict[str, Any]
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE script_optimization_drafts SET content_json = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'ready'",
+                (json.dumps(content, ensure_ascii=False), time.time(), draft_id),
+            )
+            if cursor.rowcount < 1:
+                raise ValueError("只有待采纳的优化草稿可以保存")
+        return self.get_script_optimization_draft(draft_id) or {}
+
     def list_episode_script_optimization_drafts(
         self, project_id: int, episode_number: int, kind: str
     ) -> list[dict[str, Any]]:

@@ -534,6 +534,7 @@ _INTENTIONAL_ADDITIONS = frozenset(
         "record_production_export",
         "record_production_status",
         "reserve_project_identity",
+        "restore_video_parameter_recommendation",
         "save_script_optimization_episode",
         "set_video_parameter_recommendation_job",
         "start_video_parameter_recommendation",

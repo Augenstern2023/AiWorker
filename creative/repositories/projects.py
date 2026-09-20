@@ -62,6 +62,7 @@ from creative.database_schema import (
     creative_seeds,
     creative_topics,
 )
+from creative.project_navigation import attach_latest_free_stage
 from creative.repositories.base import from_epoch_seconds, utc_now
 from creative.script_service import normalize_script_content
 
@@ -864,7 +865,28 @@ class ProjectsRepository:
                     creative_projects.c.id.desc(),
                 )
             ).mappings().all()
-        return self.rows_dict(rows)
+            projects = self.rows_dict(rows)
+            free_project_ids = [
+                int(project["id"])
+                for project in projects
+                if project.get("workflow_mode") == "free"
+            ]
+            heads: list[dict[str, Any]] = []
+            if free_project_ids:
+                heads = self.rows_dict(
+                    connection.execute(
+                        select(
+                            creative_resource_heads.c.project_id,
+                            creative_resource_heads.c.stage,
+                            creative_resource_heads.c.episode_number,
+                            creative_resource_heads.c.updated_at,
+                        ).where(
+                            creative_resource_heads.c.resource_scope == "free",
+                            creative_resource_heads.c.project_id.in_(free_project_ids),
+                        )
+                    ).mappings().all()
+                )
+        return attach_latest_free_stage(projects, heads)
 
     def list_projects_for_bootstrap(
         self, created_by: str, status: str | None = None

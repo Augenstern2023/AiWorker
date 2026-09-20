@@ -13,9 +13,11 @@ import json
 import sqlite3
 import time
 import uuid
+from datetime import datetime, timezone
 
 from creative.free_mode_service import FreeCreativeModeService
 from creative.outline_fields import outline_field_source_fingerprint
+from creative.project_navigation import attach_latest_free_stage
 from creative.repository import CreativeRepository
 
 
@@ -107,6 +109,76 @@ def test_existing_projects_default_to_sequential_mode(tmp_path):
     assert project["workflow_mode"] == "sequential"
     assert project["mode_revision"] == 0
     assert project["resource_heads"] == []
+
+
+def test_free_project_list_exposes_latest_head_for_navigation(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = create_free_project(repository)
+    service = FreeCreativeModeService(repository)
+
+    initial = repository.list_projects()[0]
+    assert initial["latest_stage"] == "brief"
+    assert initial["latest_episode_number"] == 0
+
+    service.create_brief(
+        project["id"],
+        {"title": "谎言回声", "logline": "女孩借能力揭开家族秘密"},
+        expected_head_revision=0,
+        actor_user_id="owner-1",
+    )
+    service.create_episode_resource(
+        project["id"],
+        "script",
+        2,
+        {"episode_title": "真相浮现", "scenes": []},
+        expected_head_revision=0,
+        actor_user_id="owner-1",
+    )
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_resource_heads SET updated_at = 100 "
+            "WHERE project_id = ? AND stage = 'brief'",
+            (project["id"],),
+        )
+        connection.execute(
+            "UPDATE creative_resource_heads SET updated_at = 200 "
+            "WHERE project_id = ? AND stage = 'script' AND episode_number = 2",
+            (project["id"],),
+        )
+
+    listed = repository.list_projects()[0]
+    assert listed["latest_stage"] == "script"
+    assert listed["latest_episode_number"] == 2
+
+
+def test_latest_free_stage_accepts_postgres_datetimes_and_has_stable_ties():
+    projects = [
+        {"id": 1, "workflow_mode": "free"},
+        {"id": 2, "workflow_mode": "sequential"},
+    ]
+    same_time = datetime(2026, 9, 18, 8, 30, tzinfo=timezone.utc)
+
+    result = attach_latest_free_stage(
+        projects,
+        [
+            {
+                "project_id": 1,
+                "stage": "beats",
+                "episode_number": 8,
+                "updated_at": same_time,
+            },
+            {
+                "project_id": 1,
+                "stage": "script",
+                "episode_number": 3,
+                "updated_at": same_time,
+            },
+        ],
+    )
+
+    assert result[0]["latest_stage"] == "script"
+    assert result[0]["latest_episode_number"] == 3
+    assert "latest_stage" not in result[1]
 
 
 def test_free_candidate_generation_can_preserve_the_current_head(tmp_path):

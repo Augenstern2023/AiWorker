@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 from creative.outline_fields import OUTLINE_TEXT_FIELDS, outline_field_source_fingerprint
 from creative.outline_overview import normalize_series_overview, read_series_overview
+from creative.project_navigation import attach_latest_free_stage
 
 
 def canonical_request_hash(payload: Any) -> str:
@@ -2009,15 +2010,35 @@ class CreativeRepository:
             clauses.append("p.topic_id = ?")
             params.append(topic_id)
         with self._connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT p.*, t.title AS topic_title
-                FROM creative_projects p LEFT JOIN creative_topics t ON t.id = p.topic_id
-                WHERE {' AND '.join(clauses)} ORDER BY p.updated_at DESC, p.id DESC
-                """,
-                params,
-            ).fetchall()
-        return [dict(row) for row in rows]
+            projects = [
+                dict(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT p.*, t.title AS topic_title
+                    FROM creative_projects p LEFT JOIN creative_topics t ON t.id = p.topic_id
+                    WHERE {' AND '.join(clauses)} ORDER BY p.updated_at DESC, p.id DESC
+                    """,
+                    params,
+                ).fetchall()
+            ]
+            free_project_ids = [
+                int(project["id"])
+                for project in projects
+                if project.get("workflow_mode") == "free"
+            ]
+            heads: list[dict[str, Any]] = []
+            if free_project_ids:
+                placeholders = ",".join("?" for _ in free_project_ids)
+                heads = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT project_id, stage, episode_number, updated_at "
+                        "FROM creative_resource_heads WHERE resource_scope = 'free' "
+                        f"AND project_id IN ({placeholders})",
+                        free_project_ids,
+                    ).fetchall()
+                ]
+        return attach_latest_free_stage(projects, heads)
 
     def list_projects_for_bootstrap(
         self, created_by: str, status: str | None = None

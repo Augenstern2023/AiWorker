@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -494,6 +495,84 @@ async def test_free_series_api_forwards_one_selected_model_to_all_episodes(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_free_script_series_api_uses_each_locked_beats_head(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from unittest.mock import Mock
+
+    from creative import api as creative_api
+    from creative.api import build_creative_router
+    from creative.schema import FreeCreativeSeriesGenerateRequest
+
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = _free_project(repository)
+    service = FreeCreativeModeService(repository)
+    beats_ids: dict[int, int] = {}
+    for episode_number in range(1, 4):
+        created = service.create_episode_resource(
+            project["id"],
+            "beats",
+            episode_number,
+            {"beats": [{"order": 1, "event": f"第 {episode_number} 集"}]},
+            expected_head_revision=0,
+            actor_user_id="owner-1",
+        )
+        beats_id = int(created["resource"]["id"])
+        beats_ids[episode_number] = beats_id
+        service.lock_resource(
+            project_id=project["id"],
+            stage="beats",
+            resource_ref=str(beats_id),
+            expected_head_revision=1,
+            actor_user_id="owner-1",
+            episode_number=episode_number,
+        )
+
+    jobs = []
+
+    def create_job(payload, **_kwargs):
+        jobs.append(payload)
+        return SimpleNamespace(to_dict=lambda: {"job_id": "script-series-api"})
+
+    monkeypatch.setattr(
+        creative_api, "TopicService", lambda *_args, **_kwargs: SimpleNamespace()
+    )
+    router = build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=Mock(),
+        application_service=Mock(assert_stage_write_access=Mock()),
+        job_manager=SimpleNamespace(create_job=create_job),
+    )
+    endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path
+        == "/api/creative/projects/{project_id}/free/scripts/generate-series"
+    )
+
+    await endpoint(
+        project_id=project["id"],
+        payload=FreeCreativeSeriesGenerateRequest(
+            operation_id="script-series-api-operation",
+            expected_head_revisions={1: 0, 2: 0, 3: 0},
+        ),
+        principal=SimpleNamespace(user_id="owner-1"),
+    )
+
+    contexts = {
+        number: service.get_generation_context(context_id)
+        for number, context_id in jobs[0]["extra"]["free_context_ids"].items()
+    }
+    assert {
+        int(number): int(context["context_manifest"]["beats"]["resource_ref"])
+        for number, context in contexts.items()
+    } == beats_ids
+
+
+@pytest.mark.asyncio
 async def test_free_beats_series_generates_every_episode_and_preserves_locked_versions(
     tmp_path,
     monkeypatch,
@@ -920,22 +999,37 @@ async def test_free_script_series_generates_every_episode_and_updates_each_head(
         )
         for episode_number in range(1, 4)
     }
-    generated_episodes: list[int] = []
+    generated_ranges: list[list[int]] = []
+    active_requests = 0
+    max_active_requests = 0
 
-    async def generate_script(
+    async def generate_script_chunk(
         _provider,
         _project,
-        _outline,
+        _brief,
+        outlines,
         _characters,
-        _beats,
-        episode_number,
+        _relationships,
+        beats_by_episode,
         **_kwargs,
     ):
-        generated_episodes.append(episode_number)
-        return {
-            "episode_title": f"第 {episode_number} 集",
-            "scenes": [],
-        }, {"model": "fake"}
+        nonlocal active_requests, max_active_requests
+        episode_numbers = [int(item["episode_number"]) for item in outlines]
+        generated_ranges.append(episode_numbers)
+        assert sorted(beats_by_episode) == episode_numbers
+        active_requests += 1
+        max_active_requests = max(max_active_requests, active_requests)
+        try:
+            await asyncio.sleep(0.01)
+            return [
+                (
+                    episode_number,
+                    {"episode_title": f"第 {episode_number} 集", "scenes": []},
+                )
+                for episode_number in episode_numbers
+            ], {"model": "fake"}
+        finally:
+            active_requests -= 1
 
     monkeypatch.setattr(
         free_phase4_worker,
@@ -943,7 +1037,9 @@ async def test_free_script_series_generates_every_episode_and_updates_each_head(
         lambda _config: object(),
     )
     monkeypatch.setattr(
-        free_phase4_worker, "generate_episode_script", generate_script
+        free_phase4_worker,
+        "generate_episode_script_chunk",
+        generate_script_chunk,
     )
     job = CrawlJob(
         job_id="free-script-series",
@@ -973,7 +1069,8 @@ async def test_free_script_series_generates_every_episode_and_updates_each_head(
 
     await free_phase4_worker.run_free_generation(job, repository, emit)
 
-    assert generated_episodes == [1, 2, 3]
+    assert generated_ranges == [[1, 2], [3]]
+    assert max_active_requests == 2
     refreshed = repository.get_project(project["id"])
     assert refreshed is not None
     generated = [
@@ -984,6 +1081,8 @@ async def test_free_script_series_generates_every_episode_and_updates_each_head(
     ]
     assert len(generated) == 3
     assert all(item["generation_meta"]["series_generation"] is True for item in generated)
+    assert [item["generation_meta"]["preferred_chunk_size"] for item in generated] == [2, 2, 2]
+    assert [item["generation_meta"]["actual_chunk_size"] for item in generated] == [2, 2, 1]
     heads = {
         int(item["episode_number"]): item
         for item in refreshed["resource_heads"]
@@ -997,3 +1096,105 @@ async def test_free_script_series_generates_every_episode_and_updates_each_head(
     assert events[-1][0] == "job_finished"
     assert events[-1][1]["action"] == "script"
     assert events[-1][1]["episode_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_free_script_series_retry_resumes_after_saved_chunk(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = _free_project(repository)
+    service = FreeCreativeModeService(repository)
+    contexts = {
+        episode_number: service.create_generation_context(
+            context_id=f"resume-script-context-{episode_number}",
+            project_id=project["id"],
+            stage="script",
+            episode_number=episode_number,
+            instruction="保持连续",
+            context_refs={},
+            actor_user_id="owner-1",
+        )
+        for episode_number in range(1, 4)
+    }
+    requested_ranges: list[list[int]] = []
+    fail_last_chunk = True
+
+    async def generate_script_chunk(
+        _provider,
+        _project,
+        _brief,
+        outlines,
+        _characters,
+        _relationships,
+        _beats_by_episode,
+        **_kwargs,
+    ):
+        episode_numbers = [int(item["episode_number"]) for item in outlines]
+        requested_ranges.append(episode_numbers)
+        if episode_numbers == [3] and fail_last_chunk:
+            raise RuntimeError("模拟最后一批失败")
+        return [
+            (
+                episode_number,
+                {"episode_title": f"第 {episode_number} 集", "scenes": []},
+            )
+            for episode_number in episode_numbers
+        ], {"model": "fake"}
+
+    monkeypatch.setattr(
+        free_phase4_worker,
+        "create_llm_provider_from_config",
+        lambda _config: object(),
+    )
+    monkeypatch.setattr(
+        free_phase4_worker,
+        "generate_episode_script_chunk",
+        generate_script_chunk,
+    )
+    job = CrawlJob(
+        job_id="free-script-series-resume",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "script",
+            "normalized_stage": "script",
+            "workflow_mode": "free",
+            "project_id": project["id"],
+            "episode_number": None,
+            "created_by_user_id": "owner-1",
+            "operation_id": "operation-script-series-resume",
+            "series": True,
+            "episode_start": 1,
+            "episode_end": 3,
+            "free_context_ids": {
+                str(number): context["id"] for number, context in contexts.items()
+            },
+            "expected_head_revisions": {"1": 0, "2": 0, "3": 0},
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="模拟最后一批失败"):
+        await free_phase4_worker.run_free_generation(
+            job, repository, lambda *_args, **_kwargs: None
+        )
+
+    fail_last_chunk = False
+    events: list[tuple[str, str, dict[str, Any]]] = []
+
+    def emit(_job, event_type: str, message: str, **kwargs) -> None:
+        events.append((event_type, message, dict(kwargs.get("payload") or {})))
+
+    await free_phase4_worker.run_free_generation(job, repository, emit)
+
+    assert requested_ranges == [[1, 2], [3], [3]]
+    assert any("已恢复 2/3 集" in message for _, message, _ in events)
+    generated = [
+        item
+        for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "script"
+        and item.get("generation_meta", {}).get("operation_id")
+        == "operation-script-series-resume"
+    ]
+    assert [item["episode_number"] for item in generated] == [1, 2, 3]

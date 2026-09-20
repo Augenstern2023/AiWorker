@@ -2722,6 +2722,88 @@ def test_phase4_worker_saves_series_scripts_in_two_episode_chunks(tmp_path, monk
     assert "locked_beats" in provider.calls[0][1]["content"]
 
 
+def test_phase4_worker_splits_truncated_script_chunk_into_single_episodes(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository)
+    repository.update_project(project["id"], {"target_episode_count": 2})
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"],
+        [outline_episode(1), outline_episode(2)],
+        "全剧弧线",
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    for episode_number in range(1, 3):
+        beats = repository.create_episode_beats(
+            project["id"], episode_number, valid_beat_content()
+        )
+        repository.lock_episode_beats(beats["id"])
+    provider = SequentialProvider([
+        LLMOutputTruncatedError(
+            "1-2 truncated", finish_reason="length", returned_chars=60_000
+        ),
+        {"episodes": [{"episode": 1, **valid_script_content(1)}]},
+        {"episodes": [{"episode": 2, **valid_script_content(2)}]},
+    ])
+    events = []
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    monkeypatch.setattr(
+        phase4_worker,
+        "emit",
+        lambda job, event, message, level="info", payload=None: events.append(
+            {
+                "event": event,
+                "message": message,
+                "level": level,
+                "payload": payload or {},
+            }
+        ),
+    )
+    job = CrawlJob(
+        job_id="creative-worker-series-scripts-split",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "script",
+            "series": True,
+            "project_id": project["id"],
+            "db_path": str(db_path),
+            "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(
+                repository,
+                project["id"],
+                "worker-generation-operation-script-split",
+            ),
+        },
+    )
+
+    asyncio.run(phase4_worker.run(job))
+
+    scripts = [
+        item
+        for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "script"
+    ]
+    assert [item["episode_number"] for item in scripts] == [1, 2]
+    assert len(provider.calls) == 3
+    assert any(
+        item["level"] == "warning"
+        and item["payload"].get("split_start") == 1
+        and item["payload"].get("split_end") == 2
+        for item in events
+    )
+
+
 def test_phase4_worker_surfaces_provider_retry_progress(tmp_path, monkeypatch):
     class ProviderWithRetryNotice(SequentialProvider):
         retry_callback = None

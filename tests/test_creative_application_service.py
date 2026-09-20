@@ -345,6 +345,50 @@ def test_application_service_marks_failed_operation_retry_without_changing_ident
     assert extra["retry_failed_operation"] is True
 
 
+def test_application_service_retries_failed_free_generation_with_same_operation(
+    creative_context,
+) -> None:
+    project = creative_context.repository.create_original_project(
+        seed_text="自由创作种子",
+        name="自由创作续跑",
+        target_episode_count=3,
+        created_by=creative_context.actor.user_id,
+        creation_request_id="free-retry-project",
+        workflow_mode="free",
+    )
+    creative_context.jobs.get_or_create_job.return_value = SimpleNamespace(
+        job_id="free-retry-job", status="pending"
+    )
+    payload = {
+        "platform": "creative",
+        "crawler_type": "phase4_generate",
+        "extra": {
+            "action": "script",
+            "normalized_stage": "script",
+            "workflow_mode": "free",
+            "project_id": project["id"],
+            "operation_id": "free-retry-operation",
+            "generation_request_hash": "free-request-hash",
+            "created_by_user_id": creative_context.actor.user_id,
+            "series": True,
+        },
+    }
+
+    creative_context.application_service.retry_generation_job(
+        job_state={"status": "failed", "job": payload},
+        actor=creative_context.actor,
+    )
+
+    call = creative_context.jobs.get_or_create_job.call_args
+    assert call.args[0] == "free-retry-operation"
+    assert call.args[1]["extra"]["retry_failed_operation"] is True
+    assert call.kwargs == {
+        "created_by_user_id": creative_context.actor.user_id,
+        "workflow_task_id": None,
+        "project_id": project["id"],
+    }
+
+
 def test_application_service_spills_large_snapshot_to_relative_chunks(
     creative_context,
 ) -> None:

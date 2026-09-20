@@ -1167,6 +1167,8 @@ async def generate_episode_script_chunk(
     )
     try:
         collect(await provider.complete_json(messages), episode_numbers)
+    except LLMOutputTruncatedError:
+        raise
     except Exception as exc:
         if is_retryable_llm_exception(exc):
             raise
@@ -1206,6 +1208,8 @@ async def generate_episode_script_chunk(
         )
         try:
             collect(await provider.complete_json(repair_request), missing)
+        except LLMOutputTruncatedError:
+            raise
         except Exception as exc:
             if is_retryable_llm_exception(exc):
                 raise

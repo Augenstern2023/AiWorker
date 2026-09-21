@@ -16,6 +16,7 @@ import config
 
 from analysis.llm import (
     LLMOutputTruncatedError,
+    apply_reasoning_effort_override,
     create_llm_provider_from_config,
     get_llm_usage_snapshot,
 )
@@ -58,10 +59,15 @@ async def _wait_if_paused(job: CrawlJob, emit: Callable[..., None]) -> None:
 def _create_generation_provider(extra: dict[str, Any]) -> Any:
     model_record_id = str(extra.get("llm_model_record_id") or "").strip()
     if model_record_id:
-        return create_llm_provider_from_config(
+        provider = create_llm_provider_from_config(
             config, model_record_id=model_record_id
         )
-    return create_llm_provider_from_config(config)
+    else:
+        provider = create_llm_provider_from_config(config)
+    apply_reasoning_effort_override(
+        provider, str(extra.get("reasoning_effort") or "")
+    )
+    return provider
 
 
 def _llm_generation_meta(
@@ -84,6 +90,9 @@ def _llm_generation_meta(
             getattr(provider, "model_display_name", "")
             or getattr(provider, "model", "")
             or ""
+        ),
+        "reasoning_effort": str(
+            getattr(provider, "reasoning_effort", "") or ""
         ),
     }
     return {key: value for key, value in values.items() if value}
@@ -800,7 +809,9 @@ async def run_free_generation(
                 characters,
                 relationships,
                 on_progress=progress,
-                reasoning_effort="high",
+                reasoning_effort=str(
+                    getattr(provider, "reasoning_effort", "") or ""
+                ),
                 **prompt_kwargs,
             )
             result = service.create_outline(

@@ -384,6 +384,17 @@ class OpenAICompatibleLLMProvider(LLMProvider):
     def _effective_max_output_tokens(self) -> int | None:
         return 0 if self.max_output_tokens_rejected else self.max_output_tokens
 
+    def _reasoning_effort_for_request(
+        self, model: str, messages: List[Dict[str, str]]
+    ) -> str:
+        supported = reasoning_efforts_for_model(model)
+        if not supported:
+            return ""
+        resolved = resolve_reasoning_effort(self.reasoning_effort, messages)
+        if resolved not in supported:
+            raise LLMError(f"模型 {model} 不支持推理档位 {resolved}")
+        return resolved
+
     async def _complete_text_with_model(self, model: str, messages: List[Dict[str, str]], json_mode: bool, api_key: str, json_schema: Dict[str, Any] | None = None) -> str:
         schema = self._effective_json_schema(json_schema)
         max_output_tokens = self._effective_max_output_tokens()
@@ -437,8 +448,8 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             model or self.model,
             messages,
             json_mode=json_mode,
-            reasoning_effort=resolve_reasoning_effort(
-                self.reasoning_effort, messages
+            reasoning_effort=self._reasoning_effort_for_request(
+                model, messages
             ),
             max_output_tokens=max_output_tokens,
             json_schema=json_schema,
@@ -465,8 +476,8 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             model or self.model,
             messages,
             json_mode=json_mode,
-            reasoning_effort=resolve_reasoning_effort(
-                self.reasoning_effort, messages
+            reasoning_effort=self._reasoning_effort_for_request(
+                model, messages
             ),
             max_output_tokens=max_output_tokens,
             json_schema=json_schema,
@@ -693,7 +704,9 @@ def resolve_reasoning_effort(
     normalized = str(configured or "auto").strip().lower()
     if normalized in SUPPORTED_REASONING_EFFORTS:
         return normalized
-    return select_reasoning_effort(messages)
+    if normalized == "auto":
+        return select_reasoning_effort(messages)
+    raise LLMError(f"不支持的推理档位 {normalized}")
 
 
 def provider_defaults(provider: str) -> Dict[str, str]:
@@ -970,6 +983,23 @@ def create_llm_provider_from_config(
     if selected_settings is not None:
         settings.update(selected_settings)
         settings["max_output_tokens"] = resolved_max_output_tokens
+    model_reasoning_efforts = reasoning_efforts_for_model(
+        str(settings.get("model") or "")
+    )
+    configured_reasoning_effort = str(
+        settings.get("reasoning_effort") or ""
+    ).strip().lower()
+    if not model_reasoning_efforts:
+        settings["reasoning_effort"] = ""
+    elif (
+        configured_reasoning_effort
+        and configured_reasoning_effort != "auto"
+        and configured_reasoning_effort not in model_reasoning_efforts
+    ):
+        raise LLMError(
+            f"模型 {settings.get('model')} 不支持配置的推理档位 "
+            f"{configured_reasoning_effort}"
+        )
     provider_id = str(settings.get("provider_id") or "")
     api_key_resolver = None
     if settings_repository is not None and provider_id:

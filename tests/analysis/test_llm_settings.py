@@ -554,6 +554,8 @@ def test_repository_lists_and_resolves_enabled_models_without_exposing_secrets(
                 "display_name": "编剧模型 A",
                 "label": "Creative Gateway / 编剧模型 A",
                 "is_default": True,
+                "supports_reasoning_effort": False,
+                "reasoning_effort_options": [],
             }
         ],
     }

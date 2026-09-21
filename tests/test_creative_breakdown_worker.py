@@ -12,8 +12,10 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
 from sqlalchemy import text
 
+from analysis.llm import LLMError
 from core.job import CrawlJob
 from creative import breakdown_worker
 from creative.postgres_repository import PostgresCreativeRepository
@@ -21,6 +23,7 @@ from creative.postgres_repository import PostgresCreativeRepository
 
 class Provider:
     provider_name = "test-llm"
+    model = "gpt-5.6-sol"
 
     def __init__(self, response: dict):
         self.response = response
@@ -33,6 +36,27 @@ class SlowProvider(Provider):
     async def complete_json(self, messages):
         await asyncio.sleep(0.04)
         return self.response
+
+
+def test_breakdown_worker_applies_per_request_reasoning_effort(monkeypatch) -> None:
+    provider = Provider({})
+    monkeypatch.setattr(breakdown_worker, "create_provider", lambda: provider)
+
+    resolved = breakdown_worker.create_generation_provider(
+        {"reasoning_effort": "medium"}
+    )
+
+    assert resolved is provider
+    assert provider.reasoning_effort == "medium"
+
+
+def test_breakdown_worker_rejects_unsupported_reasoning_effort(monkeypatch) -> None:
+    provider = Provider({})
+    provider.model = "gemini-3.5-flash"
+    monkeypatch.setattr(breakdown_worker, "create_provider", lambda: provider)
+
+    with pytest.raises(LLMError, match="不支持推理档位 high"):
+        breakdown_worker.create_generation_provider({"reasoning_effort": "high"})
 
 
 def seed_topic(repository) -> tuple[dict, dict]:

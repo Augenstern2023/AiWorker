@@ -463,6 +463,32 @@ window.aiworkerModules.push(() => ({
                     return this.creativeWorkspace.project?.workflow_mode === 'free';
                 },
 
+                syncGenerationReasoningEfforts(state, defaultModelRecordId = null) {
+                    if (defaultModelRecordId !== null) {
+                        state.defaultModelRecordId = String(defaultModelRecordId || '');
+                    }
+                    const selectedId = String(
+                        state.modelRecordId || state.defaultModelRecordId || ''
+                    );
+                    const selected = (state.modelOptions || []).find(
+                        item => String(item.id) === selectedId
+                    );
+                    state.reasoningEffortOptions = Array.isArray(selected?.reasoning_effort_options)
+                        ? selected.reasoning_effort_options : [];
+                    const allowed = new Set(
+                        state.reasoningEffortOptions.map(item => String(item.value))
+                    );
+                    if (!allowed.has(String(state.reasoningEffort || ''))) {
+                        state.reasoningEffort = '';
+                    }
+                },
+
+                selectedGenerationModelRecordId(state) {
+                    return String(
+                        state.modelRecordId || state.defaultModelRecordId || ''
+                    ).trim();
+                },
+
                 async loadSequentialGenerationModels() {
                     const state = this.creativeWorkspace.sequentialGeneration;
                     state.loading = true;
@@ -472,6 +498,9 @@ window.aiworkerModules.push(() => ({
                         const data = await response.json();
                         if (!response.ok) throw new Error(data.detail || '读取可用模型失败');
                         state.modelOptions = Array.isArray(data.items) ? data.items : [];
+                        this.syncGenerationReasoningEfforts(
+                            state, data.default_model_record_id
+                        );
                     } catch (error) {
                         state.error = `${error.message || '读取可用模型失败'}；可继续使用全局默认模型`;
                     } finally {
@@ -483,7 +512,8 @@ window.aiworkerModules.push(() => ({
                     const state = this.creativeWorkspace.sequentialGeneration;
                     Object.assign(state, {
                         pending: {url, body, action, options}, modelRecordId: '',
-                        modelOptions: [], error: '', loading: true,
+                        defaultModelRecordId: '', modelOptions: [], reasoningEffort: '',
+                        reasoningEffortOptions: [], error: '', loading: true,
                     });
                     this.sequentialGenerationModelModal?.show();
                     await this.loadSequentialGenerationModels();
@@ -493,11 +523,19 @@ window.aiworkerModules.push(() => ({
                     const state = this.creativeWorkspace.sequentialGeneration;
                     const pending = state.pending;
                     if (!pending || state.loading) return;
+                    const reasoningEffort = String(state.reasoningEffort || '').trim();
+                    const modelRecordId = reasoningEffort
+                        ? this.selectedGenerationModelRecordId(state)
+                        : String(state.modelRecordId || '').trim();
+                    if (reasoningEffort && !modelRecordId) {
+                        state.error = '选择推理档位前必须先选择一个可用模型';
+                        return;
+                    }
                     state.pending = null;
                     this.sequentialGenerationModelModal?.hide();
-                    const modelRecordId = String(state.modelRecordId || '').trim();
                     const body = modelRecordId
-                        ? {...pending.body, llm_model_record_id: modelRecordId} : pending.body;
+                        ? {...pending.body, llm_model_record_id: modelRecordId} : {...pending.body};
+                    if (reasoningEffort) body.reasoning_effort = reasoningEffort;
                     return this.startCreativeGeneration(
                         pending.url, body, pending.action, {...pending.options, modelConfirmed: true}
                     );
@@ -2969,7 +3007,8 @@ window.aiworkerModules.push(() => ({
                     Object.assign(state, {
                         stage, series: Boolean(options.series), instruction: '', contextOptions: {},
                         count: Number(this.creativeWorkspace.directionCount || 3),
-                        modelOptions: [], modelRecordId: '',
+                        modelOptions: [], modelRecordId: '', defaultModelRecordId: '',
+                        reasoningEffortOptions: [], reasoningEffort: '',
                         contextRefs: {brief_id: null, character_batch_id: '', outline_batch_id: '', beats_id: null},
                         loading: true, submitting: false, error: '', requestSequence
                     });
@@ -3024,6 +3063,9 @@ window.aiworkerModules.push(() => ({
                         state.contextOptions = contextData;
                         state.modelOptions = Array.isArray(modelData.items) ? modelData.items : [];
                         state.modelRecordId = String(modelData.default_model_record_id || '');
+                        this.syncGenerationReasoningEfforts(
+                            state, modelData.default_model_record_id
+                        );
                     } catch (error) {
                         if (requestSequence !== state.requestSequence) return;
                         if (error?.name === 'AbortError') return;
@@ -3068,8 +3110,12 @@ window.aiworkerModules.push(() => ({
                             context_refs: refs,
                         };
                         Object.assign(payload, this.promptGenerationPayload(stage));
-                        const modelRecordId = String(state.modelRecordId || '').trim();
+                        const reasoningEffort = String(state.reasoningEffort || '').trim();
+                        const modelRecordId = reasoningEffort
+                            ? this.selectedGenerationModelRecordId(state)
+                            : String(state.modelRecordId || '').trim();
                         if (modelRecordId) payload.llm_model_record_id = modelRecordId;
+                        if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
                         if (stage === 'brief') payload.count = Number(state.count || 3);
                         if (series) {
                             payload.expected_head_revisions = Object.fromEntries(

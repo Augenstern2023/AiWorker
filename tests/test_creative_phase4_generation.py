@@ -55,7 +55,7 @@ def test_phase4_worker_creates_provider_with_selected_model(monkeypatch) -> None
         provider_id="provider-1",
         provider_display_name="主提供商",
         model_record_id="model-record-2",
-        model="model-api-2",
+        model="gpt-5.6-sol",
         model_display_name="模型二",
     )
 
@@ -66,17 +66,31 @@ def test_phase4_worker_creates_provider_with_selected_model(monkeypatch) -> None
     monkeypatch.setattr(phase4_worker, "create_provider", create_provider)
 
     resolved = phase4_worker._create_generation_provider(
-        {"llm_model_record_id": "model-record-2"}
+        {"llm_model_record_id": "model-record-2", "reasoning_effort": "xhigh"}
     )
     meta = phase4_worker._provider_generation_meta(resolved)
 
     assert selected == ["model-record-2"]
     assert meta["llm_provider_name"] == "主提供商"
     assert meta["llm_model_display_name"] == "模型二"
+    assert resolved.reasoning_effort == "xhigh"
+
+
+def test_outline_worker_prefers_per_request_reasoning_effort() -> None:
+    job = CrawlJob(
+        job_id="outline-reasoning-override",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={"action": "outlines", "reasoning_effort": "max"},
+    )
+
+    provider = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="low")
+    assert phase4_worker._resolve_outline_reasoning_effort(job, provider) == "max"
 
 
 class SequentialProvider:
     provider_name = "test-llm"
+    model = "gpt-5.6-sol"
 
     def __init__(self, responses):
         self.responses = list(responses)
@@ -2493,8 +2507,8 @@ def test_outline_worker_retry_progress_preserves_active_batch_telemetry(tmp_path
     assert all(payload["request_elapsed_seconds"] >= 0 for payload in retries)
 
 
-@pytest.mark.parametrize("configured_effort", ["xhigh", "max", "turbo"])
-def test_outline_worker_falls_back_to_high_reasoning_and_warns_for_invalid_setting(
+@pytest.mark.parametrize("configured_effort", ["xhigh", "max"])
+def test_outline_worker_preserves_supported_configured_reasoning_effort(
     tmp_path, monkeypatch, configured_effort
 ):
     db_path = tmp_path / ".runtime" / "creative" / "creative.db"
@@ -2529,9 +2543,38 @@ def test_outline_worker_falls_back_to_high_reasoning_and_warns_for_invalid_setti
 
     asyncio.run(phase4_worker._run_with_repository(job, repository))
 
-    assert provider.reasoning_effort == "high"
-    warning = next(event for event in events if event["level"] == "warning")
-    assert "CREATIVE_OUTLINE_REASONING_EFFORT" in warning["message"]
+    assert provider.reasoning_effort == configured_effort
+    assert not [event for event in events if event["level"] == "warning"]
+
+
+def test_outline_worker_rejects_unsupported_configured_reasoning_effort(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = _prepare_outline_worker_project(repository)
+    provider = SequentialProvider([])
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    monkeypatch.setattr(
+        phase4_worker.config,
+        "CREATIVE_OUTLINE_REASONING_EFFORT",
+        "turbo",
+        raising=False,
+    )
+    job = CrawlJob(
+        job_id="creative-worker-outline-invalid-reasoning",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "outlines",
+            "project_id": project["id"],
+            "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(repository, project["id"]),
+        },
+    )
+
+    with pytest.raises(ValueError, match="不支持配置的推理档位 turbo"):
+        asyncio.run(phase4_worker._run_with_repository(job, repository))
 
 
 def test_non_outline_worker_action_keeps_provider_reasoning_effort(tmp_path, monkeypatch):

@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from analysis.llm import reasoning_efforts_for_model
 from analysis.llm_credentials import (
     LLMCredentialStore,
     LLMCredentialStoreError,
@@ -689,6 +690,7 @@ class LLMSettingsRepository:
                 continue
             display_name = str(row["display_name"] or row["model_id"])
             provider_name = str(row["provider_name"])
+            reasoning_efforts = reasoning_efforts_for_model(str(row["model_id"]))
             items.append(
                 {
                     "id": str(row["id"]),
@@ -698,6 +700,21 @@ class LLMSettingsRepository:
                     "display_name": display_name,
                     "label": f"{provider_name} / {display_name}",
                     "is_default": str(row["id"]) == str(default_model_id or ""),
+                    "supports_reasoning_effort": bool(reasoning_efforts),
+                    "reasoning_effort_options": [
+                        {
+                            "value": value,
+                            "label": {
+                                "none": "无",
+                                "low": "低",
+                                "medium": "中",
+                                "high": "高",
+                                "xhigh": "超高",
+                                "max": "最高",
+                            }[value],
+                        }
+                        for value in reasoning_efforts
+                    ],
                 }
             )
         available_ids = {item["id"] for item in items}

@@ -29,6 +29,7 @@ from openpyxl import Workbook
 from pydantic import BaseModel, Field
 
 import config
+from analysis.llm import reasoning_efforts_for_model
 from analysis.today_rank_service import TodayRankService
 
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
@@ -107,6 +108,7 @@ from creative.schema import (
     PromptTemplateRevisionRequest,
     ProjectCreateRequest,
     ProjectUpdateRequest,
+    ReasoningEffort,
     VideoParameterConfirmRequest,
     SeedUpdateRequest,
     SeedVersionRequest,
@@ -193,6 +195,7 @@ class BreakdownCreateRequest(BaseModel):
     force_regenerate: bool = False
     workflow_task_id: str | None = None
     llm_model_record_id: str | None = Field(None, min_length=1, max_length=64)
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class BreakdownUpdateRequest(BaseModel):
@@ -1861,8 +1864,9 @@ def build_creative_router(
             raise HTTPException(403, "没有创建此机器任务的权限")
         assert_project_generation_access(project_id, principal)
         workflow_task_id = str(extra.pop("workflow_task_id", "") or "") or None
+        reasoning_effort = str(extra.pop("reasoning_effort", "") or "").strip()
         llm_model_record_id = validate_llm_model(
-            extra.pop("llm_model_record_id", None)
+            extra.pop("llm_model_record_id", None), reasoning_effort
         )
         normalized_stage = {
             "blueprints": "brief",
@@ -1947,6 +1951,7 @@ def build_creative_router(
                 source_snapshot_id=source_snapshot_id,
                 source_snapshot=source_snapshot,
                 llm_model_record_id=llm_model_record_id,
+                reasoning_effort=reasoning_effort,
                 **job_observability,
                 **extra,
             )
@@ -1991,6 +1996,7 @@ def build_creative_router(
             "source_snapshot_id": getattr(payload, "source_snapshot_id", None),
             "source_snapshot": getattr(payload, "source_snapshot", None),
             "llm_model_record_id": getattr(payload, "llm_model_record_id", None),
+            "reasoning_effort": getattr(payload, "reasoning_effort", None),
             "prompt_template_key": getattr(payload, "prompt_template_key", None),
             "prompt_template_revision": getattr(
                 payload, "prompt_template_revision", None
@@ -3306,7 +3312,9 @@ def build_creative_router(
             })
         if job_manager is None:
             raise HTTPException(503, "creative job manager is unavailable")
-        llm_model_record_id = validate_llm_model(payload.llm_model_record_id)
+        llm_model_record_id = validate_llm_model(
+            payload.llm_model_record_id, payload.reasoning_effort
+        )
         coverage = sorted({
             *[int(item["episode_number"]) for item in episodes],
             *[int(item["episode_number"]) for item in video_assets],
@@ -3340,6 +3348,11 @@ def build_creative_router(
                 **(
                     {"llm_model_record_id": llm_model_record_id}
                     if llm_model_record_id
+                    else {}
+                ),
+                **(
+                    {"reasoning_effort": payload.reasoning_effort}
+                    if payload.reasoning_effort
                     else {}
                 ),
             },
@@ -4276,16 +4289,35 @@ def build_creative_router(
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    def validate_llm_model(model_record_id: str | None) -> str:
+    def validate_llm_model(
+        model_record_id: str | None, reasoning_effort: str | None = None
+    ) -> str:
         normalized = str(model_record_id or "").strip()
+        requested_effort = str(reasoning_effort or "").strip().lower()
         if not normalized:
+            if requested_effort:
+                raise HTTPException(409, "选择推理档位时必须同时指定模型")
             return ""
         if llm_model_resolver is None:
             raise HTTPException(503, "模型配置服务不可用")
         try:
-            llm_model_resolver(normalized)
+            resolved = llm_model_resolver(normalized)
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(409, str(exc)) from exc
+        if requested_effort:
+            model_id = str(
+                (resolved or {}).get("model")
+                or (resolved or {}).get("model_id")
+                or ""
+            ).strip()
+            if not model_id:
+                raise HTTPException(409, "所选模型缺少能力信息，不能设置推理档位")
+            supported = reasoning_efforts_for_model(model_id)
+            if requested_effort not in supported:
+                raise HTTPException(
+                    409,
+                    f"模型 {model_id} 不支持推理档位 {requested_effort}",
+                )
         return normalized
 
     def prompt_job_identity(snapshot: dict[str, Any] | None) -> dict[str, Any]:
@@ -4309,7 +4341,7 @@ def build_creative_router(
         if job_manager is None:
             raise HTTPException(503, "creative job manager is unavailable")
         llm_model_record_id = validate_llm_model(
-            payload.llm_model_record_id
+            payload.llm_model_record_id, payload.reasoning_effort
         )
         try:
             application_service.assert_stage_write_access(project_id, stage, principal)
@@ -4363,6 +4395,7 @@ def build_creative_router(
             "expected_head_revision": payload.expected_head_revision,
             "count": payload.count if stage == "brief" else 1,
             "llm_model_record_id": llm_model_record_id,
+            "reasoning_effort": payload.reasoning_effort or "",
             "prompt_content_hash": str(
                 (prompt_snapshot or {}).get("content_hash") or ""
             ),
@@ -4388,6 +4421,7 @@ def build_creative_router(
                     "expected_head_revision": payload.expected_head_revision,
                     "count": payload.count if stage == "brief" else 1,
                     "llm_model_record_id": llm_model_record_id,
+                    "reasoning_effort": payload.reasoning_effort or "",
                     **prompt_job_identity(prompt_snapshot),
                     "runtime_dir": str(Path(runtime_dir).resolve()),
                 },
@@ -4409,7 +4443,7 @@ def build_creative_router(
         if stage not in {"beats", "script"}:
             raise HTTPException(404, "unsupported creative stage")
         llm_model_record_id = validate_llm_model(
-            payload.llm_model_record_id
+            payload.llm_model_record_id, payload.reasoning_effort
         )
         context_refs = payload.context_refs.model_dump()
         if stage == "script" and context_refs.get("beats_id") is not None:
@@ -4496,6 +4530,7 @@ def build_creative_router(
             },
             "expected_head_revisions": expected_head_revisions,
             "llm_model_record_id": llm_model_record_id,
+            "reasoning_effort": payload.reasoning_effort or "",
         })
         state = job_manager.create_job(
             {
@@ -4526,6 +4561,7 @@ def build_creative_router(
                         for number, revision in expected_head_revisions.items()
                     },
                     "llm_model_record_id": llm_model_record_id,
+                    "reasoning_effort": payload.reasoning_effort or "",
                     **prompt_job_identity(
                         dict(next(iter(contexts.values()))["context_snapshot"]).get(
                             "prompt_snapshot"
@@ -5364,6 +5400,7 @@ def build_creative_router(
             source_snapshot_id=payload.source_snapshot_id,
             source_snapshot=payload.source_snapshot,
             llm_model_record_id=payload.llm_model_record_id,
+            reasoning_effort=payload.reasoning_effort,
             prompt_template_key=payload.prompt_template_key,
             prompt_template_revision=payload.prompt_template_revision,
             prompt_override=payload.prompt_override,

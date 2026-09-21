@@ -188,7 +188,7 @@
                 adoptionNoticeModal: null,
                 generatedContentPreview: {topic: null, project: null, stage: '', versions: [], selectedVersion: 0, selectedResourceId: '', snapshot: null, loading: false, error: ''},
                 breakdownEditor: {source: '', title: '', record: null, content: {}, fieldGuide: [], saving: false, error: ''},
-                breakdownGeneration: {topic: null, source: '', forceRegenerate: false, jobId: '', status: '', message: '', progress: {}, coverage: [], requiresTranscription: false, notifiedStatus: '', error: '', startedAt: 0, elapsedSeconds: 0, modelOptions: [], modelRecordId: '', modelsLoading: false},
+                breakdownGeneration: {topic: null, source: '', forceRegenerate: false, jobId: '', status: '', message: '', progress: {}, coverage: [], requiresTranscription: false, notifiedStatus: '', error: '', startedAt: 0, elapsedSeconds: 0, modelOptions: [], modelRecordId: '', defaultModelRecordId: '', reasoningEffortOptions: [], reasoningEffort: '', modelsLoading: false},
                 breakdownGenerationJobs: {},
                 breakdownJobStatuses: {},
                 dramaDownloadJobStatuses: {},
@@ -220,7 +220,7 @@
                     saveState: {}, notice: '', noticeType: 'success', noticeTimer: null,
                     moduleCapabilities: {},
                     sequentialGeneration: {
-                        modelOptions: [], modelRecordId: '', loading: false, error: '', pending: null
+                        modelOptions: [], modelRecordId: '', defaultModelRecordId: '', reasoningEffortOptions: [], reasoningEffort: '', loading: false, error: '', pending: null
                     },
                     promptLibrary: {
                         stage: '', loading: false, saving: false, deletingTemplateId: '', error: '',
@@ -259,7 +259,7 @@
                     },
                     freeGeneration: {
                         stage: '', series: false, instruction: '', contextOptions: {},
-                        modelOptions: [], modelRecordId: '',
+                        modelOptions: [], modelRecordId: '', defaultModelRecordId: '', reasoningEffortOptions: [], reasoningEffort: '',
                         contextRefs: {brief_id: null, character_batch_id: '', outline_batch_id: '', beats_id: null},
                         loading: false, submitting: false, error: '', requestSequence: 0
                     },

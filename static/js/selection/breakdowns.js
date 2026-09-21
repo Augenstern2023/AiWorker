@@ -109,9 +109,31 @@ window.aiworkerModules.push(() => ({
                 selectBreakdownGenerationModel(value) {
                     const selected = String(value || '');
                     this.breakdownGeneration.modelRecordId = selected;
+                    this.syncBreakdownGenerationReasoningEfforts();
                     try {
                         sessionStorage.setItem(this.breakdownModelStorageKey(), selected);
                     } catch (_) {}
+                },
+
+                syncBreakdownGenerationReasoningEfforts(defaultModelRecordId = null) {
+                    const state = this.breakdownGeneration;
+                    if (defaultModelRecordId !== null) {
+                        state.defaultModelRecordId = String(defaultModelRecordId || '');
+                    }
+                    const selectedId = String(
+                        state.modelRecordId || state.defaultModelRecordId || ''
+                    );
+                    const selected = (state.modelOptions || []).find(
+                        item => String(item.id) === selectedId
+                    );
+                    state.reasoningEffortOptions = Array.isArray(selected?.reasoning_effort_options)
+                        ? selected.reasoning_effort_options : [];
+                    const allowed = new Set(
+                        state.reasoningEffortOptions.map(item => String(item.value))
+                    );
+                    if (!allowed.has(String(state.reasoningEffort || ''))) {
+                        state.reasoningEffort = '';
+                    }
                 },
 
                 async loadBreakdownGenerationModels() {
@@ -130,9 +152,14 @@ window.aiworkerModules.push(() => ({
                         state.modelRecordId = saved !== null && (saved === '' || validIds.has(saved))
                             ? saved
                             : String(data.default_model_record_id || '');
+                        this.syncBreakdownGenerationReasoningEfforts(
+                            data.default_model_record_id
+                        );
                     } catch (error) {
                         state.modelOptions = [];
                         state.modelRecordId = '';
+                        state.reasoningEffortOptions = [];
+                        state.reasoningEffort = '';
                         state.error = `${error.message || '读取可用模型失败'}，可继续使用全局默认模型。`;
                     } finally {
                         state.modelsLoading = false;
@@ -162,6 +189,9 @@ window.aiworkerModules.push(() => ({
                         showLogs: false,
                         modelOptions: [],
                         modelRecordId: '',
+                        defaultModelRecordId: '',
+                        reasoningEffortOptions: [],
+                        reasoningEffort: '',
                         modelsLoading: true
                     };
                     this.breakdownGenerationProgressModal.show();
@@ -181,8 +211,12 @@ window.aiworkerModules.push(() => ({
                         topic_id: topic.id,
                         force_regenerate: Boolean(state.forceRegenerate)
                     };
-                    const modelRecordId = String(state.modelRecordId || '').trim();
+                    const reasoningEffort = String(state.reasoningEffort || '').trim();
+                    const modelRecordId = reasoningEffort
+                        ? String(state.modelRecordId || state.defaultModelRecordId || '').trim()
+                        : String(state.modelRecordId || '').trim();
                     if (modelRecordId) body.llm_model_record_id = modelRecordId;
+                    if (reasoningEffort) body.reasoning_effort = reasoningEffort;
                     try {
                         const res = await aiworkerApi.request('/api/creative/breakdowns', {
                             method: 'POST',

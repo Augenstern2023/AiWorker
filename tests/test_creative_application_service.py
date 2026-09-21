@@ -269,10 +269,12 @@ def test_application_service_generation_job_contains_selected_model(
         source_snapshot_id="snapshot-model",
         source_snapshot={"snapshot_id": "snapshot-model"},
         llm_model_record_id="model-record-2",
+        reasoning_effort="xhigh",
     )
 
     payload = creative_context.jobs.get_or_create_job.call_args.args[1]
     assert payload["extra"]["llm_model_record_id"] == "model-record-2"
+    assert payload["extra"]["reasoning_effort"] == "xhigh"
 
 
 def test_application_service_forwards_original_brief_context_to_job_and_hash(

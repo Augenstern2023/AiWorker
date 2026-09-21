@@ -16,7 +16,10 @@ from typing import Any
 
 import config
 
-from analysis.llm import create_llm_provider_from_config
+from analysis.llm import (
+    apply_reasoning_effort_override,
+    create_llm_provider_from_config,
+)
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.breakdown_service import generate_breakdown
@@ -39,7 +42,13 @@ def create_provider(model_record_id: str | None = None):
 
 def create_generation_provider(extra: dict[str, Any]):
     model_record_id = str(extra.get("llm_model_record_id") or "").strip()
-    return create_provider(model_record_id) if model_record_id else create_provider()
+    provider = (
+        create_provider(model_record_id) if model_record_id else create_provider()
+    )
+    apply_reasoning_effort_override(
+        provider, str(extra.get("reasoning_effort") or "")
+    )
+    return provider
 
 
 def emit(

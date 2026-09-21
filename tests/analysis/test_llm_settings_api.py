@@ -434,7 +434,7 @@ def test_available_models_route_allows_authenticated_creator_without_secrets(
         api_key_env_var="CATALOG_API_KEY",
     )
     model = repository.create_model(
-        provider["id"], model_id="creative-model", display_name="创作模型"
+        provider["id"], model_id="gpt-5.6-sol", display_name="创作模型"
     )
     repository.set_default_model(model["id"])
     app = FastAPI()
@@ -452,6 +452,15 @@ def test_available_models_route_allows_authenticated_creator_without_secrets(
     assert response.json()["items"][0]["label"] == (
         "Creative Provider / 创作模型"
     )
+    assert response.json()["items"][0]["supports_reasoning_effort"] is True
+    assert response.json()["items"][0]["reasoning_effort_options"] == [
+        {"value": "none", "label": "无"},
+        {"value": "low", "label": "低"},
+        {"value": "medium", "label": "中"},
+        {"value": "high", "label": "高"},
+        {"value": "xhigh", "label": "超高"},
+        {"value": "max", "label": "最高"},
+    ]
     assert "catalog-secret" not in response.text
     assert "creative.example.test" not in response.text
 

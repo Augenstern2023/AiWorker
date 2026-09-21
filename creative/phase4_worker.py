@@ -183,6 +183,9 @@ def _provider_generation_meta(
             or getattr(provider, "model", "")
             or ""
         ),
+        "reasoning_effort": str(
+            getattr(provider, "reasoning_effort", "") or ""
+        ),
     }
 
 
@@ -196,20 +199,27 @@ def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict
     )}
 
 
-def _resolve_outline_reasoning_effort(job: CrawlJob) -> str:
+def _resolve_outline_reasoning_effort(job: CrawlJob, provider: Any) -> str:
+    requested = str(
+        (job.extra or {}).get("reasoning_effort") or ""
+    ).strip().lower()
+    if requested:
+        apply_reasoning_effort_override(provider, requested)
+        return requested
+    supported = reasoning_efforts_for_model(
+        str(getattr(provider, "model", "") or "")
+    )
+    if not supported:
+        return ""
     configured = str(
         getattr(config, "CREATIVE_OUTLINE_REASONING_EFFORT", "high") or "high"
     ).strip().lower()
-    if configured == "high":
-        return "high"
-    emit(
-        job,
-        "log",
-        "CREATIVE_OUTLINE_REASONING_EFFORT 仅支持 high，已回退为 high",
-        "warning",
-        {"stage": "outlines", "configured_reasoning_effort": configured, "reasoning_effort": "high"},
+    if configured == "auto" or configured in supported:
+        return configured
+    raise ValueError(
+        f"模型 {getattr(provider, 'model', '') or '未知模型'} "
+        f"不支持配置的推理档位 {configured}"
     )
-    return "high"
 
 
 async def wait_if_paused(job: CrawlJob) -> None:
@@ -431,6 +441,7 @@ def _generation_meta(
         "llm_model_display_name": str(
             extra.get("llm_model_display_name") or ""
         ),
+        "reasoning_effort": str(extra.get("reasoning_effort") or ""),
         "prompt_source": "template" if isinstance(prompt_snapshot, dict) else "system",
         "prompt_ab_experiment_id": str(
             extra.get("prompt_ab_experiment_id") or ""
@@ -574,9 +585,9 @@ async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
             provider, str(extra.get("llm_model_record_id") or "")
         )
     )
-    outline_reasoning_effort = "high"
+    outline_reasoning_effort = ""
     if action == "outlines":
-        outline_reasoning_effort = _resolve_outline_reasoning_effort(job)
+        outline_reasoning_effort = _resolve_outline_reasoning_effort(job, provider)
         if hasattr(provider, "reasoning_effort"):
             provider.reasoning_effort = outline_reasoning_effort
     total_episodes = (

@@ -7,20 +7,38 @@
     if (!window.aiworkerApi) return;
     const expectedKind = window.location.pathname.endsWith('/beats') ? 'beats' : 'script';
 
-    function hideOriginalScriptWorkspace() {
-        if (expectedKind !== 'script' || !draftId || document.getElementById('optimization-draft-workspace-style')) return;
+    function prepareBeatsOptimizationLayout() {
+        if (expectedKind !== 'beats' || !draftId || document.getElementById('optimization-draft-layout')) return;
+        const main = document.querySelector('main');
+        const backLink = document.getElementById('optimization-draft-review-back-link');
+        if (!main || !backLink) return;
+        const layout = document.createElement('div');
+        layout.id = 'optimization-draft-layout';
+        const actions = document.createElement('div');
+        actions.id = 'optimization-draft-top-actions';
+        actions.className = 'd-flex justify-content-end mb-3';
+        const content = document.createElement('div');
+        content.id = 'optimization-draft-content';
+        actions.append(backLink);
+        layout.append(actions, content);
+        main.prepend(layout);
+    }
+
+    function hideOriginalWorkspace() {
+        if (!draftId || document.getElementById('optimization-draft-workspace-style')) return;
+        const workspaceId = expectedKind === 'beats' ? 'project-beats-workspace' : 'project-script-workspace';
+        const hiddenSelectors = [`#${workspaceId}`];
+        if (expectedKind === 'beats') {
+            hiddenSelectors.push(
+                '#writing-beats-page-header',
+                '#project-module-navigation',
+                '#project-generation-progress',
+            );
+        }
         const style = document.createElement('style');
         style.id = 'optimization-draft-workspace-style';
         // Alpine renders the original workspace after this script in some page loads.
-        style.textContent = '#project-script-workspace { display: none !important; }';
-        document.head.append(style);
-    }
-
-    function hideConflictingBeatsLocks() {
-        if (expectedKind !== 'beats' || !draftId || document.getElementById('optimization-draft-lock-style')) return;
-        const style = document.createElement('style');
-        style.id = 'optimization-draft-lock-style';
-        style.textContent = '[data-optimization-draft-conflicting-lock] { display: none !important; }';
+        style.textContent = `${hiddenSelectors.join(', ')} { display: none !important; }`;
         document.head.append(style);
     }
 
@@ -89,7 +107,8 @@
             before.parentElement.insertBefore(section, before);
             return;
         }
-        document.querySelector('main')?.prepend(section);
+        const content = document.getElementById('optimization-draft-content');
+        (content || document.querySelector('main'))?.prepend(section);
     }
 
     function draftLabel(draft) {
@@ -861,8 +880,8 @@
         mount(section);
     }
 
-    hideOriginalScriptWorkspace();
-    hideConflictingBeatsLocks();
+    prepareBeatsOptimizationLayout();
+    hideOriginalWorkspace();
     showReviewBackLink(reviewId || null);
     (draftId ? loadDraft() : loadDraftEntries()).catch(() => {});
 }());

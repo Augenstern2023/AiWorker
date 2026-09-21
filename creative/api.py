@@ -53,6 +53,14 @@ from creative.project_prompt_service import ProjectPromptService
 from creative.prompt_response import prompt_projection_route
 from creative.repository import CreativeRepository, TopicDecisionConflict, canonical_request_hash
 from creative.script_service import normalize_script_content, rewrite_outline_field, validate_script
+from creative.screenplay_export import (
+    build_export_document,
+    export_filename,
+    export_media_type,
+    get_template_spec,
+    list_template_specs,
+    render_export_document,
+)
 from creative.selection_stage_service import SelectionStageService
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from creative.workflow_identity import WorkflowIdentityResolver
@@ -1090,14 +1098,23 @@ def build_episode_selection_download(
     episode_numbers: list[int] | None,
     format: str,
     video_parameter_record: dict[str, Any] | None = None,
+    template_id: str = "classic",
 ) -> tuple[str, bytes, str]:
     """Build a writer-facing download for selected current episode resources."""
 
-    allowed_formats = {"script": {"txt", "json"}, "outline": {"md", "json"}, "beats": {"md", "json"}}
+    allowed_formats = {
+        "script": {"txt", "json", "md", "pdf", "docx"},
+        "outline": {"md", "json"},
+        "beats": {"md", "json"},
+    }
     if stage not in allowed_formats:
         raise ValueError("stage 必须是 outline、beats 或 script")
     if format not in allowed_formats[stage]:
         raise ValueError(f"{stage} 不支持 {format} 格式")
+    if stage == "script":
+        get_template_spec(template_id)
+        if format == "txt" and template_id != "classic":
+            raise ValueError("TXT 兼容导出仅支持经典模板")
     available = {
         int(item.get("episode_number") or 0): item
         for item in current_episode_download_items(project, stage)
@@ -1126,35 +1143,31 @@ def build_episode_selection_download(
             indent=2,
         ).encode("utf-8")
         media_type = "application/json"
+    elif stage == "script":
+        document = build_export_document(
+            project,
+            stage=stage,
+            episode_numbers=requested,
+            video_parameter_record=video_parameter_record,
+        )
+        body = render_export_document(
+            document,
+            template_id=template_id,
+            format=format,
+        )
+        media_type = export_media_type(format)
+        if format in {"md", "pdf", "docx"}:
+            return (
+                export_filename(document, template_id=template_id, format=format),
+                body,
+                media_type,
+            )
     elif stage == "outline":
         body = build_outline_markdown(project, items).encode("utf-8")
         media_type = "text/markdown; charset=utf-8"
     elif stage == "beats":
         body = build_beats_markdown(project, items).encode("utf-8")
         media_type = "text/markdown; charset=utf-8"
-    else:
-        sections = [
-            "\n".join(
-                [
-                    f"==================== 第 {number} 集 ====================",
-                    "",
-                    build_script_text(
-                        project, available[number].get("content") or {},
-                        episode_number=number,
-                    ).rstrip(),
-                ]
-            )
-            for number in requested
-        ]
-        text = "\n\n".join(sections).rstrip() + "\n"
-        recommendation_text = build_video_parameter_recommendation_text(
-            video_parameter_record
-        )
-        if recommendation_text:
-            text = f"{recommendation_text}\n{text}"
-        body = text.encode("utf-8")
-        media_type = "text/plain; charset=utf-8"
-
     project_name = str(project.get("topic_title") or project.get("name") or "项目").strip()
     safe_name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", project_name).strip(" .") or "项目"
     if len(requested) == 1:
@@ -1165,6 +1178,22 @@ def build_episode_selection_download(
         scope = "第" + "、".join(map(str, requested)) + "集"
     stage_label = {"outline": "分集大纲", "beats": "Beats", "script": "场次剧本"}[stage]
     return f"{safe_name}{scope}{stage_label}.{format}", body, media_type
+
+
+def parse_episode_export_selection(
+    project: dict[str, Any], raw_episodes: str
+) -> list[int] | None:
+    """Parse the shared all-or-comma-separated episode query contract."""
+
+    if raw_episodes == "all":
+        return None
+    if not re.fullmatch(r"\d+(?:,\d+)*", raw_episodes):
+        raise ValueError("episodes 必须是 all 或逗号分隔的集数")
+    episode_numbers = sorted({int(value) for value in raw_episodes.split(",")})
+    target_count = int(project.get("target_episode_count") or 0)
+    if any(number < 1 or number > target_count for number in episode_numbers):
+        raise ValueError("下载集数超出项目范围")
+    return episode_numbers
 
 
 def build_stage_export(project: dict[str, Any], stage: str) -> dict[str, Any]:
@@ -5019,6 +5048,62 @@ def build_creative_router(
             raise HTTPException(409, str(exc)) from exc
         return video_parameter_recommendation_view(project)
 
+    @router.get("/projects/{project_id}/episodes/export/templates")
+    async def list_project_screenplay_export_templates(
+        project_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_owner_preview_access(request, project_id, principal)
+        project_or_404(project_id)
+        return {
+            "items": [item.public_dict() for item in list_template_specs()],
+            "default_template_id": "classic",
+        }
+
+    @router.get("/projects/{project_id}/episodes/export/preview")
+    async def preview_project_episode_selection(
+        project_id: int,
+        request: Request,
+        stage: str = Query("script"),
+        episodes: str = Query("all", min_length=1),
+        template: str = Query("classic", min_length=1),
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_owner_preview_access(request, project_id, principal)
+        project = project_or_404(project_id)
+        if stage != "script":
+            raise HTTPException(422, "模板预览仅支持 script 阶段")
+        try:
+            get_template_spec(template)
+            episode_numbers = parse_episode_export_selection(project, episodes)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        try:
+            document = build_export_document(
+                project,
+                stage=stage,
+                episode_numbers=episode_numbers,
+            )
+            body = render_export_document(
+                document,
+                template_id=template,
+                format="html",
+            )
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return Response(
+            content=body,
+            media_type="text/html; charset=utf-8",
+            headers={
+                "Content-Security-Policy": (
+                    "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+                ),
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+            },
+        )
+
     @router.get("/projects/{project_id}/episodes/download")
     async def download_project_episode_selection(
         project_id: int,
@@ -5026,6 +5111,7 @@ def build_creative_router(
         stage: str = Query(...),
         episodes: str = Query("all", min_length=1),
         format: str = Query("md"),
+        template: str = Query("classic", min_length=1),
         video_parameters: str = Query("", max_length=10_000),
         principal: Principal = Depends(current_principal),
     ):
@@ -5034,22 +5120,20 @@ def build_creative_router(
         allowed_formats = {
             "outline": {"md", "json"},
             "beats": {"md", "json"},
-            "script": {"txt", "json"},
+            "script": {"txt", "json", "md", "pdf", "docx"},
         }
         if stage not in allowed_formats:
             raise HTTPException(422, "stage 必须是 outline、beats 或 script")
         if format not in allowed_formats[stage]:
             raise HTTPException(422, f"{stage} 不支持 {format} 格式")
-        episode_numbers: list[int] | None
-        if episodes == "all":
-            episode_numbers = None
-        elif re.fullmatch(r"\d+(?:,\d+)*", episodes):
-            episode_numbers = sorted({int(value) for value in episodes.split(",")})
-            target_count = int(project.get("target_episode_count") or 0)
-            if any(number < 1 or number > target_count for number in episode_numbers):
-                raise HTTPException(422, "下载集数超出项目范围")
-        else:
-            raise HTTPException(422, "episodes 必须是 all 或逗号分隔的集数")
+        try:
+            episode_numbers = parse_episode_export_selection(project, episodes)
+            if stage == "script":
+                get_template_spec(template)
+                if format == "txt" and template != "classic":
+                    raise ValueError("TXT 兼容导出仅支持经典模板")
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         try:
             export_video_parameters = None
             if stage == "script":
@@ -5059,12 +5143,14 @@ def build_creative_router(
                 export_video_parameters = video_parameter_export_record(
                     current_record, video_parameters
                 )
-            filename, body, media_type = build_episode_selection_download(
+            filename, body, media_type = await asyncio.to_thread(
+                build_episode_selection_download,
                 project,
                 stage,
                 episode_numbers,
                 format,
-                video_parameter_record=export_video_parameters,
+                export_video_parameters,
+                template,
             )
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc

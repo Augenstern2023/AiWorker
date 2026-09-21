@@ -18,8 +18,6 @@ import time
 from typing import Any, Awaitable, Callable
 
 import config
-import httpx
-
 from analysis.llm import (
     LLMOutputTruncatedError,
     LLMTimeoutError,
@@ -60,7 +58,9 @@ from creative.script_service import (
 )
 from creative.script_series import (
     SCRIPT_SERIES_MAX_CONCURRENCY,
+    is_read_timeout_exception,
     resolve_script_series_chunk_size,
+    run_bisecting_script_batch,
     run_ordered_script_windows,
 )
 from system_database import SystemDatabase, SystemDatabaseSettings
@@ -85,14 +85,23 @@ def _create_generation_provider(extra: dict[str, Any]) -> Any:
         create_provider(model_record_id) if model_record_id else create_provider()
     )
     requested_effort = str(extra.get("reasoning_effort") or "").strip().lower()
+    is_script_series = (
+        str(extra.get("action") or "") == "script" and bool(extra.get("series"))
+    )
     if not requested_effort and str(extra.get("action") or "") == "beats":
         if reasoning_efforts_for_model(str(getattr(provider, "model", "") or "")):
             requested_effort = str(
                 getattr(config, "CREATIVE_BEATS_REASONING_EFFORT", "xhigh")
                 or "xhigh"
             ).strip().lower()
+    if (
+        is_script_series
+        and not requested_effort
+        and reasoning_efforts_for_model(str(getattr(provider, "model", "") or ""))
+    ):
+        requested_effort = "high"
     apply_reasoning_effort_override(provider, requested_effort)
-    if str(extra.get("action") or "") == "beats":
+    if str(extra.get("action") or "") == "beats" or is_script_series:
         setattr(provider, "retry_read_timeouts", False)
     return provider
 
@@ -107,14 +116,7 @@ def _resolve_beats_series_chunk_size(extra: dict[str, Any]) -> int:
 
 
 def _is_read_timeout(exc: BaseException) -> bool:
-    current: BaseException | None = exc
-    visited: set[int] = set()
-    while current is not None and id(current) not in visited:
-        if isinstance(current, httpx.ReadTimeout):
-            return True
-        visited.add(id(current))
-        current = current.__cause__ or current.__context__
-    return False
+    return is_read_timeout_exception(exc)
 
 
 def _beats_split_reason(exc: BaseException) -> str | None:
@@ -1163,13 +1165,17 @@ async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
                     completed + 1, total_episodes + 1, series_chunk_size
                 )
             ]
+            script_request_semaphore = asyncio.Semaphore(
+                SCRIPT_SERIES_MAX_CONCURRENCY
+            )
+            script_serial_lock = asyncio.Lock()
+            script_serial_mode = False
 
-            async def generate_script_range(
-                script_range: tuple[int, int],
-            ) -> list[
-                tuple[int, int, list[tuple[int, dict[str, Any]]], dict[str, Any]]
-            ]:
-                range_start, range_end = script_range
+            async def request_script_episodes(
+                episode_numbers: list[int],
+            ) -> tuple[list[tuple[int, dict[str, Any]]], dict[str, Any]]:
+                range_start = episode_numbers[0]
+                range_end = episode_numbers[-1]
                 await wait_if_paused(job)
                 outlines = locked_outlines_for_range(range_start, range_end)
                 selected_beats = {
@@ -1188,55 +1194,104 @@ async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
                 }
                 request_provider = _create_generation_provider(extra)
                 setattr(request_provider, "retry_callback", report_retry)
-                try:
-                    checkpoint_items, meta = await generate_episode_script_chunk(
-                        request_provider,
-                        project,
-                        brief,
-                        outlines,
-                        characters,
-                        relationships,
-                        beats_by_episode,
-                        continuity_ledger=_continuity_ledger_through(
-                            project, range_start - 1, repository=repository
-                        ),
-                        prompt_snapshot=prompt_snapshot or None,
-                    )
-                except LLMOutputTruncatedError as exc:
-                    if range_start == range_end:
-                        raise LLMOutputTruncatedError(
-                            f"第 {range_start} 集场次剧本生成仍达到模型输出上限；"
-                            "请提高模型输出上限或减少单集正文长度",
-                            finish_reason=exc.finish_reason,
-                            returned_chars=exc.returned_chars,
-                        ) from exc
-                    midpoint = (range_start + range_end - 1) // 2
-                    emit(
-                        job,
-                        "progress",
-                        f"第 {range_start}-{range_end} 集场次剧本输出达到上限，"
-                        f"自动拆分为第 {range_start}-{midpoint} 集和"
-                        f"第 {midpoint + 1}-{range_end} 集",
-                        "warning",
-                        {
-                            "stage": action,
-                            "completed": range_start - 1,
-                            "total": total_episodes,
-                            "split_start": range_start,
-                            "split_end": range_end,
-                            "left_start": range_start,
-                            "left_end": midpoint,
-                            "right_start": midpoint + 1,
-                            "right_end": range_end,
-                            "finish_reason": exc.finish_reason,
-                            "returned_chars": exc.returned_chars,
+
+                async def generate_request() -> tuple[
+                    list[tuple[int, dict[str, Any]]], dict[str, Any]
+                ]:
+                    try:
+                        return await generate_episode_script_chunk(
+                            request_provider,
+                            project,
+                            brief,
+                            outlines,
+                            characters,
+                            relationships,
+                            beats_by_episode,
+                            continuity_ledger=_continuity_ledger_through(
+                                project, range_start - 1, repository=repository
+                            ),
+                            prompt_snapshot=prompt_snapshot or None,
+                        )
+                    except LLMOutputTruncatedError as exc:
+                        if range_start == range_end:
+                            raise LLMOutputTruncatedError(
+                                f"第 {range_start} 集场次剧本生成仍达到模型输出上限；"
+                                "请提高模型输出上限或减少单集正文长度",
+                                finish_reason=exc.finish_reason,
+                                returned_chars=exc.returned_chars,
+                            ) from exc
+                        raise
+                    except LLMTimeoutError as exc:
+                        if range_start == range_end and is_read_timeout_exception(exc):
+                            raise LLMTimeoutError(
+                                f"第 {range_start} 集场次剧本生成读取响应超时；"
+                                "该请求未在 provider 层原样重试"
+                            ) from exc
+                        raise
+
+                if script_serial_mode:
+                    async with script_serial_lock:
+                        async with script_request_semaphore:
+                            return await generate_request()
+                async with script_request_semaphore:
+                    return await generate_request()
+
+            async def report_script_split(payload: dict[str, object]) -> None:
+                split_items = list(payload["split_items"])
+                left_items = list(payload["left_items"])
+                right_items = list(payload["right_items"])
+                reason_text = (
+                    "输出达到上限"
+                    if payload["split_reason"] == "output_truncated"
+                    else "读取模型响应超时"
+                )
+                emit(
+                    job,
+                    "progress",
+                    f"第 {split_items[0]}-{split_items[-1]} 集场次剧本"
+                    f"{reason_text}，自动拆分为第 {left_items[0]}-{left_items[-1]} 集和"
+                    f"第 {right_items[0]}-{right_items[-1]} 集",
+                    "warning",
+                    {
+                        "stage": action,
+                        "completed": int(split_items[0]) - 1,
+                        "total": total_episodes,
+                        "split_start": split_items[0],
+                        "split_end": split_items[-1],
+                        "left_start": left_items[0],
+                        "left_end": left_items[-1],
+                        "right_start": right_items[0],
+                        "right_end": right_items[-1],
+                        **{
+                            key: value
+                            for key, value in payload.items()
+                            if key
+                            not in {"split_items", "left_items", "right_items"}
                         },
+                    },
+                )
+
+            async def generate_script_range(
+                script_range: tuple[int, int],
+            ) -> list[
+                tuple[int, int, list[tuple[int, dict[str, Any]]], dict[str, Any]]
+            ]:
+                range_start, range_end = script_range
+                checkpoints = await run_bisecting_script_batch(
+                    list(range(range_start, range_end + 1)),
+                    generate=request_script_episodes,
+                    on_split=report_script_split,
+                    parallel_splits=lambda: not script_serial_mode,
+                )
+                return [
+                    (
+                        checkpoint_numbers[0],
+                        checkpoint_numbers[-1],
+                        checkpoint_items,
+                        meta,
                     )
-                    return [
-                        *await generate_script_range((range_start, midpoint)),
-                        *await generate_script_range((midpoint + 1, range_end)),
-                    ]
-                return [(range_start, range_end, checkpoint_items, meta)]
+                    for checkpoint_numbers, (checkpoint_items, meta) in checkpoints
+                ]
 
             async def persist_script_range(
                 _script_range: tuple[int, int],
@@ -1257,10 +1312,12 @@ async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
                     retry_completed = range_end
 
             def report_parallel_downgrade(exc: Exception) -> None:
+                nonlocal script_serial_mode
+                script_serial_mode = True
                 emit(
                     job,
                     "progress",
-                    "并行生成遇到模型限流或网络波动，已自动降为串行续跑",
+                    "并行生成遇到模型限流，已自动降为串行续跑",
                     "warning",
                     {
                         "stage": action,

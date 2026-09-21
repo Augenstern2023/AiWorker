@@ -197,8 +197,12 @@
                     projects: [], eligibleTopics: [], lockedBreakdowns: [], project: null, loading: false, error: '', step: 'blueprints', deletingProjectId: null,
                     create: {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, workflow_mode: 'sequential', creation_request_id: ''},
                     originalCreate: {seed_text: '', name: '', genre: '', target_platform: '', target_audience: '', target_episode_count: 20, episode_duration_seconds: 120, cost_level: '', content_boundaries: [], reference_refs: [], workflow_mode: 'sequential', creation_request_id: '', saving: false, error: ''},
-                    directionCount: 3, selectedSeedId: null, preservedBlueprintIds: [], variantInstruction: '', selectedBlueprintId: null, selectedCharacterBriefId: null, selectedOutlineBriefId: null, selectedOutlineCharacterBatchId: null, selectedEpisode: creativeEpisodeView(document.body.dataset.workspacePage || ''),
-                    episodeDownload: {stage: '', selectedEpisodes: [], allEpisodes: true, format: 'md'},
+                    directionCount: 3, selectedSeedId: null, preservedBlueprintIds: [], variantInstruction: '', selectedBlueprintId: null, selectedCharacterBriefId: null, selectedOutlineBriefId: null, selectedOutlineCharacterBatchId: null, selectedEpisode: creativeEpisodeView(document.body.dataset.workspacePage || ''), selectedScriptVersionId: '',
+                    episodeDownload: {
+                        stage: '', selectedEpisodes: [], allEpisodes: true, format: 'md',
+                        templateId: 'classic', templateOptions: [], templatesLoading: false,
+                        templatesError: '', previewUrl: '', previewLoading: false, previewError: ''
+                    },
                     jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '', paused: false, notifiedStatus: '', retrying: false,
                     jobLogs: [], jobLogCount: 0, showJobLogs: false,
                     jobStartedAt: 0, jobElapsedSeconds: 0,
@@ -228,6 +232,7 @@
                         deleteReplacementTemplateId: '',
                         settings: {enabled: false}, templates: [], effective: null,
                         selectedTemplateKey: '', selectedTemplateRevision: 1,
+                        previewStage: '',
                         customRequirements: '', scope: 'stage', runSelections: {},
                         recommendations: [], recommendationLoading: false,
                         editing: false, editContent: {},

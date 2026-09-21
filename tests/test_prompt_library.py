@@ -90,6 +90,63 @@ def test_catalog_seeds_four_selectable_system_templates(prompt_store):
     assert all(len(item["content"]["dimensions"]) == 7 for item in catalog)
 
 
+def test_catalog_hides_legacy_alias_of_canonical_system_template(prompt_store):
+    repository, store = prompt_store
+    project_id = _project(repository, name="旧模板别名项目")
+    content = builtin_template("generic-vertical-short")
+    legacy_id = "legacy-system-template-alias"
+    legacy_key = "legacy:source01:generic-vertical-short"
+    now = time.time()
+    with repository._connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO creative_prompt_templates (
+                id, template_key, title, description, owner_scope, visibility,
+                status, governance_status, approved_revision, catalog_visible,
+                created_at, updated_at
+            ) VALUES (?, ?, '通用竖屏短剧', '', 'system', 'system',
+                      'active', 'approved', 1, TRUE, ?, ?)
+            """,
+            (legacy_id, legacy_key, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO creative_prompt_template_revisions (
+                template_id, revision, content_json, content_hash,
+                created_by, created_at
+            ) VALUES (?, 1, ?, ?, 'legacy-import', ?)
+            """,
+            (
+                legacy_id,
+                json.dumps(content, ensure_ascii=False),
+                content_hash(content),
+                now,
+            ),
+        )
+    store.set_binding(
+        project_id=project_id,
+        stage="script",
+        episode_number=0,
+        template_id=legacy_id,
+        template_revision=1,
+        override={"custom_requirements": "保留旧项目绑定"},
+        actor_user_id="owner-1",
+    )
+
+    refreshed_store = PromptStore(repository)
+    catalog = refreshed_store.list_catalog(
+        project_id=project_id, actor_user_id="owner-1"
+    )
+
+    assert [
+        item["template_key"]
+        for item in catalog
+        if item["title"] == "通用竖屏短剧"
+    ] == ["generic-vertical-short"]
+    assert refreshed_store.get_template(legacy_id)["catalog_visible"] is False
+    assert refreshed_store.binding(project_id, "script", 0)["template_id"] == legacy_id
+
+
 def test_personal_template_delete_preserves_history_and_blocks_active_bindings(
     prompt_store,
 ):

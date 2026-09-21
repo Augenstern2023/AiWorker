@@ -143,6 +143,7 @@ def test_prompt_library_ui_keeps_contract_locked_and_supports_all_mvp_scopes():
 
 def test_prompt_picker_clicks_full_card_and_shows_selected_template_details():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
+    script = _read("static/js/common/creative.js")
 
     assert '@click="selectPromptTemplate(template)"' in modal
     assert '@keydown.enter.prevent="selectPromptTemplate(template)"' in modal
@@ -154,7 +155,20 @@ def test_prompt_picker_clicks_full_card_and_shows_selected_template_details():
     assert "所选模板详情" in modal
     assert "七维风格" in modal
     assert "共享作品 DNA" in modal
-    assert "查看全部阶段规则、参数和示例" in modal
+    assert "阶段规则预览" in modal
+    assert 'role="tablist"' in modal
+    assert "promptPreviewStages()" in modal
+    assert "selectPromptPreviewStage(stage)" in modal
+    assert "查看模板参数和示例" in modal
+    assert "promptParameterEntries()" in modal
+    assert "该模板没有额外参数" in modal
+    assert "高级：查看原始参数" in modal
+    assert "prompt-parameter-json" in modal
+    assert '<pre class="small bg-body-tertiary' not in modal
+    assert "节拍数量上限" in script
+    assert "强化结尾钩子" in script
+    assert "value ? '开启' : '关闭'" in script
+    assert "Object.entries(selectedPromptTemplate().content?.stage_rules || {})" not in modal
     assert "example.include_in_context ? '参与生成' : '仅作说明'" in modal
     assert "查看模板说明" not in modal
 
@@ -231,6 +245,10 @@ def test_prompt_library_ui_exposes_moderated_cross_project_marketplace():
     assert "模板市场" in modal
     assert "官方模板" in modal
     assert "官方内置" in modal
+    assert modal.count("查看模板与阶段预览") == 2
+    assert "promptMarketplaceDefaultPreviewStage(item)" in modal
+    assert "official-preview-tab-${item.id}-${stage}" in modal
+    assert "community-preview-tab-${item.id}-${stage}" in modal
     assert "立即使用" in modal
     assert "不复制、不安装、不修改默认设置" in modal
     assert "项目模板不能直接发布" in modal

@@ -360,6 +360,7 @@ window.aiworkerModules.push(() => ({
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '读取项目失败');
                         this.creativeWorkspace.project = data;
+                        this.creativeWorkspace.selectedScriptVersionId = '';
                         await this.loadCreativeModuleCapabilities(data.id);
                         this.creativeWorkspace.selectedSeedId = data.seed?.id || null;
                         this.creativeWorkspace.preservedBlueprintIds = [];
@@ -463,6 +464,41 @@ window.aiworkerModules.push(() => ({
                     return this.creativeWorkspace.project?.workflow_mode === 'free';
                 },
 
+                sequentialGenerationPreferenceStorageKey() {
+                    return 'aiworker.creative.sequential-generation-preference';
+                },
+
+                loadSequentialGenerationPreference() {
+                    try {
+                        const raw = window.localStorage?.getItem(
+                            this.sequentialGenerationPreferenceStorageKey()
+                        );
+                        const value = raw ? JSON.parse(raw) : {};
+                        if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+                        return {
+                            modelRecordId: String(value.modelRecordId || ''),
+                            reasoningEffort: String(value.reasoningEffort || ''),
+                        };
+                    } catch (_) {
+                        return {};
+                    }
+                },
+
+                persistSequentialGenerationPreference() {
+                    const state = this.creativeWorkspace.sequentialGeneration;
+                    try {
+                        window.localStorage?.setItem(
+                            this.sequentialGenerationPreferenceStorageKey(),
+                            JSON.stringify({
+                                modelRecordId: String(state.modelRecordId || ''),
+                                reasoningEffort: String(state.reasoningEffort || ''),
+                            })
+                        );
+                    } catch (_) {
+                        // Storage can be unavailable in private or restricted browser contexts.
+                    }
+                },
+
                 syncGenerationReasoningEfforts(state, defaultModelRecordId = null) {
                     if (defaultModelRecordId !== null) {
                         state.defaultModelRecordId = String(defaultModelRecordId || '');
@@ -498,10 +534,22 @@ window.aiworkerModules.push(() => ({
                         const data = await response.json();
                         if (!response.ok) throw new Error(data.detail || '读取可用模型失败');
                         state.modelOptions = Array.isArray(data.items) ? data.items : [];
+                        const availableModelIds = new Set(
+                            state.modelOptions.map(item => String(item.id))
+                        );
+                        if (state.modelRecordId && !availableModelIds.has(String(state.modelRecordId))) {
+                            state.modelRecordId = '';
+                            state.reasoningEffort = '';
+                        }
                         this.syncGenerationReasoningEfforts(
                             state, data.default_model_record_id
                         );
+                        this.persistSequentialGenerationPreference();
                     } catch (error) {
+                        state.modelRecordId = '';
+                        state.defaultModelRecordId = '';
+                        state.reasoningEffort = '';
+                        state.reasoningEffortOptions = [];
                         state.error = `${error.message || '读取可用模型失败'}；可继续使用全局默认模型`;
                     } finally {
                         state.loading = false;
@@ -510,9 +558,12 @@ window.aiworkerModules.push(() => ({
 
                 async openSequentialGenerationModel(url, body, action, options) {
                     const state = this.creativeWorkspace.sequentialGeneration;
+                    const preference = this.loadSequentialGenerationPreference();
                     Object.assign(state, {
-                        pending: {url, body, action, options}, modelRecordId: '',
-                        defaultModelRecordId: '', modelOptions: [], reasoningEffort: '',
+                        pending: {url, body, action, options},
+                        modelRecordId: preference.modelRecordId || '',
+                        defaultModelRecordId: '', modelOptions: [],
+                        reasoningEffort: preference.reasoningEffort || '',
                         reasoningEffortOptions: [], error: '', loading: true,
                     });
                     this.sequentialGenerationModelModal?.show();
@@ -531,6 +582,7 @@ window.aiworkerModules.push(() => ({
                         state.error = '选择推理档位前必须先选择一个可用模型';
                         return;
                     }
+                    this.persistSequentialGenerationPreference();
                     state.pending = null;
                     this.sequentialGenerationModelModal?.hide();
                     const body = modelRecordId
@@ -1169,8 +1221,61 @@ window.aiworkerModules.push(() => ({
                         && this.batchLockableProjectEpisodes(stage).length > 0;
                 },
 
+                projectEpisodeScriptVersions(episodeNumber) {
+                    return (this.creativeWorkspace.project?.episodes || [])
+                        .filter(item => item.stage === 'script'
+                            && Number(item.episode_number) === Number(episodeNumber))
+                        .sort((a, b) => Number(b.version) - Number(a.version)
+                            || Number(b.id) - Number(a.id));
+                },
+
+                projectEpisodeHistoricalScripts(episodeNumber) {
+                    const current = this.projectEpisodeScript(episodeNumber);
+                    return this.projectEpisodeScriptVersions(episodeNumber)
+                        .filter(item => !current || String(item.id) !== String(current.id));
+                },
+
+                projectScriptVersionOptionLabel(item) {
+                    const beatsVersion = item?.upstream_refs?.beats_version;
+                    const beatsLabel = beatsVersion ? `Beats v${beatsVersion}` : 'Beats 版本未知';
+                    return `历史 · v${item?.version || 1} · ${beatsLabel} · ${this.creativeWorkflowStatusLabel(item?.status)}`;
+                },
+
+                projectScriptEpisodeLabel(episodeNumber) {
+                    const current = this.projectEpisodeScript(episodeNumber);
+                    if (current) return `第 ${episodeNumber} 集 · 当前 v${current.version}`;
+                    if (this.projectEpisodeScriptVersions(episodeNumber).length) {
+                        return `第 ${episodeNumber} 集 · 有历史版本`;
+                    }
+                    return `第 ${episodeNumber} 集 · 未生成`;
+                },
+
+                resetProjectScriptVersionSelection() {
+                    this.creativeWorkspace.selectedScriptVersionId = '';
+                },
+
                 selectedProjectScript() {
-                    return this.projectEpisodeScript(this.creativeWorkspace.selectedEpisode);
+                    const episodeNumber = this.creativeWorkspace.selectedEpisode;
+                    const selectedId = String(this.creativeWorkspace.selectedScriptVersionId || '');
+                    if (selectedId) {
+                        const selected = this.projectEpisodeScriptVersions(episodeNumber)
+                            .find(item => String(item.id) === selectedId);
+                        if (selected) return selected;
+                    }
+                    return this.projectEpisodeScript(episodeNumber);
+                },
+
+                selectedProjectScriptIsHistorical() {
+                    const selected = this.selectedProjectScript();
+                    const current = this.projectEpisodeScript(this.creativeWorkspace.selectedEpisode);
+                    return Boolean(selected && (!current || String(selected.id) !== String(current.id)));
+                },
+
+                selectedProjectScriptEditable() {
+                    const selected = this.selectedProjectScript();
+                    return Boolean(selected
+                        && !this.selectedProjectScriptIsHistorical()
+                        && this.creativeResourceEditable(selected));
                 },
 
                 videoParameterModelKeys() {
@@ -1526,7 +1631,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 videoParameterExportDefaults() {
-                    const record = this.creativeWorkspace.videoParameters.record;
+                    const record = this.creativeWorkspace.videoParameters?.record;
                     if (!record?.recommendation?.models) return [];
                     return this.videoParameterModelKeys().map(modelKey => {
                         const model = record.recommendation.models[modelKey];
@@ -1547,6 +1652,9 @@ window.aiworkerModules.push(() => ({
                 },
 
                 openEpisodeDownload(stage, {forceAll = false} = {}) {
+                    if (this.creativeWorkspace.episodeDownload?.previewUrl) {
+                        this.clearScreenplayExportPreview();
+                    }
                     const available = this.projectStageEpisodeItems(stage)
                         .map(item => Number(item.episode_number))
                         .filter(number => number > 0);
@@ -1560,10 +1668,109 @@ window.aiworkerModules.push(() => ({
                         stage,
                         selectedEpisodes: initial,
                         allEpisodes: initial.length === available.length,
-                        format: stage === 'script' ? 'txt' : 'md',
+                        format: stage === 'script' ? 'docx' : 'md',
+                        templateId: 'classic',
+                        templateOptions: [],
+                        templatesLoading: false,
+                        templatesError: '',
+                        previewUrl: '',
+                        previewLoading: false,
+                        previewError: '',
                         videoModels: stage === 'script' ? this.videoParameterExportDefaults() : [],
                     };
                     this.modal('creativeEpisodeDownloadModal')?.show();
+                    if (stage === 'script') void this.loadScreenplayExportTemplates();
+                },
+
+                async loadScreenplayExportTemplates() {
+                    const state = this.creativeWorkspace.episodeDownload;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || state.stage !== 'script' || !window.aiworkerApi?.request) return;
+                    state.templatesLoading = true;
+                    state.templatesError = '';
+                    try {
+                        const response = await window.aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/episodes/export/templates`
+                        );
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok) throw new Error(payload.detail || '读取剧本模板失败');
+                        const items = Array.isArray(payload) ? payload : (payload.items || []);
+                        state.templateOptions = items.filter(item => item?.previewable);
+                        const availableIds = new Set(state.templateOptions.map(item => String(item.id)));
+                        const defaultId = String(payload.default_template_id || 'classic');
+                        if (!availableIds.has(String(state.templateId || ''))) {
+                            state.templateId = availableIds.has(defaultId)
+                                ? defaultId : String(state.templateOptions[0]?.id || '');
+                        }
+                        if (!state.templateOptions.length) throw new Error('当前没有可用的剧本导出模板');
+                    } catch (error) {
+                        if (window.aiworkerApi?.isAbortError?.(error)) return;
+                        state.templatesError = error.message || '读取剧本模板失败';
+                    } finally {
+                        state.templatesLoading = false;
+                    }
+                },
+
+                clearScreenplayExportPreview() {
+                    const state = this.creativeWorkspace.episodeDownload;
+                    if (String(state.previewUrl || '').startsWith('blob:')) {
+                        URL.revokeObjectURL(state.previewUrl);
+                    }
+                    state.previewUrl = '';
+                    state.previewError = '';
+                    state.previewLoading = false;
+                },
+
+                selectScreenplayExportTemplate(templateId) {
+                    const normalized = String(templateId || '');
+                    if (normalized === this.creativeWorkspace.episodeDownload.templateId) return;
+                    this.clearScreenplayExportPreview();
+                    this.creativeWorkspace.episodeDownload.templateId = normalized;
+                },
+
+                episodeExportSelectionParams({includeFormat = false} = {}) {
+                    const state = this.creativeWorkspace.episodeDownload;
+                    const selected = [...new Set((state.selectedEpisodes || []).map(Number))]
+                        .filter(number => number > 0)
+                        .sort((left, right) => left - right);
+                    const params = new URLSearchParams({
+                        stage: state.stage,
+                        episodes: state.allEpisodes ? 'all' : selected.join(','),
+                    });
+                    if (state.stage === 'script') {
+                        state.templateId = String(state.templateId || 'classic');
+                        params.set('template', state.templateId);
+                    }
+                    if (includeFormat) params.set('format', state.format);
+                    return params;
+                },
+
+                async previewSelectedEpisodes() {
+                    const state = this.creativeWorkspace.episodeDownload;
+                    if (state.stage !== 'script' || !state.templateId || !state.selectedEpisodes.length) return;
+                    this.clearScreenplayExportPreview();
+                    state.previewLoading = true;
+                    const params = this.episodeExportSelectionParams();
+                    const previewEndpoint = `/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/export/preview?${params.toString()}`;
+                    try {
+                        const response = await window.aiworkerApi.request(previewEndpoint);
+                        if (!response.ok) {
+                            const payload = await response.json().catch(() => ({}));
+                            throw new Error(payload.detail || payload.message || '预览失败，请稍后重试');
+                        }
+                        const html = await response.text();
+                        state.previewUrl = URL.createObjectURL(
+                            new Blob([html], {type: 'text/html;charset=utf-8'})
+                        );
+                    } catch (error) {
+                        if (window.aiworkerApi?.isAbortError?.(error)) {
+                            state.previewError = '预览请求已取消，请重试';
+                        } else {
+                            state.previewError = error.message || '预览失败，请稍后重试';
+                        }
+                    } finally {
+                        state.previewLoading = false;
+                    }
                 },
 
                 episodeDownloadAvailableNumbers() {
@@ -1578,6 +1785,7 @@ window.aiworkerModules.push(() => ({
                     state.selectedEpisodes = state.allEpisodes
                         ? [...this.episodeDownloadAvailableNumbers()]
                         : [];
+                    this.clearScreenplayExportPreview();
                 },
 
                 syncEpisodeDownloadAll() {
@@ -1585,6 +1793,7 @@ window.aiworkerModules.push(() => ({
                     const available = this.episodeDownloadAvailableNumbers();
                     const selected = new Set((state.selectedEpisodes || []).map(Number));
                     state.allEpisodes = available.length > 0 && available.every(number => selected.has(number));
+                    this.clearScreenplayExportPreview();
                 },
 
                 episodeDownloadActionLabel() {
@@ -1599,11 +1808,7 @@ window.aiworkerModules.push(() => ({
                         .filter(number => number > 0)
                         .sort((left, right) => left - right);
                     if (!state.stage || !selected.length) return;
-                    const params = new URLSearchParams({
-                        stage: state.stage,
-                        episodes: state.allEpisodes ? 'all' : selected.join(','),
-                        format: state.format,
-                    });
+                    const params = this.episodeExportSelectionParams({includeFormat: true});
                     if (state.stage === 'script' && (state.videoModels || []).length) {
                         params.set('video_parameters', JSON.stringify({
                             models: state.videoModels
@@ -1647,6 +1852,7 @@ window.aiworkerModules.push(() => ({
                     } catch (error) {
                         if (window.aiworkerApi?.isAbortError?.(error)) return;
                         this.showCreativeNotice(error.message || '下载失败，请稍后重试', 'error');
+                        this.modal('creativeEpisodeDownloadModal')?.show();
                     }
                 },
 
@@ -1678,7 +1884,7 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.notifiedStatus = '';
                     this.creativeWorkspace.jobLogs = [];
                     this.creativeWorkspace.jobLogCount = 0;
-                    this.creativeWorkspace.showJobLogs = false;
+                    this.creativeWorkspace.showJobLogs = true;
                     this.creativeWorkspace.activeAction = action;
                     this.creativeWorkspace.activeSeriesGeneration = Boolean(options.series);
                     this.creativeWorkspace.activeBatchId = String(options.batchId || '');
@@ -1709,6 +1915,7 @@ window.aiworkerModules.push(() => ({
                         if (Number(data.job.started_at || 0) > 0) {
                             this.creativeWorkspace.jobStartedAt = Number(data.job.started_at) * 1000;
                         }
+                        await this.syncCreativeJobLogs();
                         await this.fetchJobs();
                     } catch (e) {
                         if (window.aiworkerApi?.isAbortError(e)) return;
@@ -1905,10 +2112,39 @@ window.aiworkerModules.push(() => ({
                     return (state.templates || []).find(item => item.template_key === state.selectedTemplateKey) || null;
                 },
 
+                promptPreviewStages(template = null) {
+                    const stageRules = (template || this.selectedPromptTemplate())?.content?.stage_rules || {};
+                    const stages = Object.keys(stageRules).filter(stage => {
+                        const rules = stageRules[stage];
+                        return rules && typeof rules === 'object' && Object.values(rules).some(Boolean);
+                    });
+                    const order = ['brief', 'characters', 'outline', 'beats', 'script', 'review', 'optimization'];
+                    return stages.sort((left, right) => {
+                        const leftIndex = order.indexOf(left);
+                        const rightIndex = order.indexOf(right);
+                        if (leftIndex === -1 && rightIndex === -1) return left.localeCompare(right, 'zh-CN');
+                        if (leftIndex === -1) return 1;
+                        if (rightIndex === -1) return -1;
+                        return leftIndex - rightIndex;
+                    });
+                },
+
+                resetPromptPreviewStage(template = null) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const stages = this.promptPreviewStages(template);
+                    state.previewStage = stages.includes(state.stage) ? state.stage : (stages[0] || '');
+                },
+
+                selectPromptPreviewStage(stage) {
+                    if (!this.promptPreviewStages().includes(stage)) return;
+                    this.creativeWorkspace.promptLibrary.previewStage = stage;
+                },
+
                 selectPromptTemplate(template) {
                     const state = this.creativeWorkspace.promptLibrary;
                     state.selectedTemplateKey = String(template?.template_key || '');
                     state.selectedTemplateRevision = Number(template?.revision || 1);
+                    this.resetPromptPreviewStage(template);
                     state.editing = false;
                     state.editContent = {};
                 },
@@ -1919,6 +2155,51 @@ window.aiworkerModules.push(() => ({
                         story_engine: '故事引擎', emotion: '情绪体验',
                         pacing: '节奏', expression: '表达风格'
                     }[key] || key;
+                },
+
+                promptParameterEntries(template = null) {
+                    const parameters = (template || this.selectedPromptTemplate())?.content?.parameters;
+                    if (!parameters || Array.isArray(parameters) || typeof parameters !== 'object') return [];
+                    const metadata = {
+                        max_beats: {
+                            label: '节拍数量上限',
+                            description: '单集最多生成多少个剧情节拍',
+                            order: 10,
+                        },
+                        strong_ending_hook: {
+                            label: '强化结尾钩子',
+                            description: '让每集结尾保留明确的追看点',
+                            order: 20,
+                        },
+                    };
+                    const displayValue = value => {
+                        if (typeof value === 'boolean') return value ? '开启' : '关闭';
+                        if (value === null || value === undefined || value === '') return '未设置';
+                        if (Array.isArray(value)) return value.length
+                            ? value.map(item => String(item)).join('、') : '无';
+                        if (typeof value === 'object') {
+                            const count = Object.keys(value).length;
+                            return count ? `已配置 ${count} 项` : '无';
+                        }
+                        return String(value);
+                    };
+                    return Object.entries(parameters).map(([key, value]) => {
+                        const item = metadata[key];
+                        const readableKey = String(key)
+                            .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+                            .replace(/[_-]+/g, ' ')
+                            .trim();
+                        return {
+                            key,
+                            label: item?.label || `自定义设置：${readableKey || '未命名'}`,
+                            description: item?.description || '模板作者提供的额外生成设置',
+                            displayValue: displayValue(value),
+                            isBoolean: typeof value === 'boolean',
+                            enabled: value === true,
+                            order: item?.order ?? 100,
+                        };
+                    }).sort((left, right) => left.order - right.order
+                        || left.label.localeCompare(right.label, 'zh-CN'));
                 },
 
                 selectedPromptTemplateEditable() {
@@ -1977,6 +2258,7 @@ window.aiworkerModules.push(() => ({
                         const selected = state.templates.find(item => item.template_key === selectedKey) || state.templates[0];
                         state.selectedTemplateKey = String(selected?.template_key || selectedKey);
                         state.selectedTemplateRevision = Number(selected?.revision || data.effective?.revision || 1);
+                        this.resetPromptPreviewStage(selected);
                         const activeBinding = episode > 0 && data.episode_binding
                             ? data.episode_binding : data.stage_binding;
                         state.customRequirements = String(activeBinding?.override?.custom_requirements || '');
@@ -2132,6 +2414,13 @@ window.aiworkerModules.push(() => ({
                     const detail = data?.detail;
                     if (typeof detail === 'string') return detail;
                     return detail?.message || fallback;
+                },
+
+                promptMarketplaceDefaultPreviewStage(item) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const stages = this.promptPreviewStages(item);
+                    return [state.marketplaceStage, state.stage]
+                        .find(stage => stages.includes(stage)) || stages[0] || '';
                 },
 
                 async loadPromptMarketplace() {
@@ -3892,8 +4181,9 @@ window.aiworkerModules.push(() => ({
                         this.creativeWorkspace.notifiedStatus = '';
                         this.creativeWorkspace.jobLogs = [];
                         this.creativeWorkspace.jobLogCount = Number(data.job.log_count || 0);
-                        this.creativeWorkspace.showJobLogs = false;
+                        this.creativeWorkspace.showJobLogs = true;
                         this.creativeGenerationProgressModal.show();
+                        await this.syncCreativeJobLogs();
                         await this.fetchJobs();
                     } catch (error) {
                         this.creativeWorkspace.error = error.message || '重试失败';
@@ -4008,6 +4298,13 @@ window.aiworkerModules.push(() => ({
                     await this.saveCreativeItem(url, item, '人物关系已保存', `relationship-${item.id}`);
                 },
                 async saveProjectEpisode(item) {
+                    if (item?.stage === 'script') {
+                        const current = this.projectEpisodeScript(item.episode_number);
+                        if (!current || String(current.id) !== String(item.id)) {
+                            this.showCreativeNotice('历史版本仅供查看，不能保存', 'error');
+                            return false;
+                        }
+                    }
                     const url = this.isFreeCreativeProject()
                         ? `/api/creative/projects/${this.creativeWorkspace.project.id}/free/items/episode/${item.id}`
                         : `/api/creative/episodes/${item.id}`;
@@ -4016,6 +4313,7 @@ window.aiworkerModules.push(() => ({
                         await this.selectCreativeProject(this.creativeWorkspace.project.id);
                         await this.refreshCreativeTopicLibrary();
                     }
+                    return saved;
                 },
                 async saveCreativeItem(url, item, successMessage, saveKey) {
                     this.creativeWorkspace.error = '';
@@ -4077,6 +4375,10 @@ window.aiworkerModules.push(() => ({
                 async completeProjectScript() {
                     const item = this.selectedProjectScript();
                     if (!item) return;
+                    if (this.selectedProjectScriptIsHistorical()) {
+                        this.showCreativeNotice('历史版本仅供查看，不能完成并锁定', 'error');
+                        return;
+                    }
                     try {
                         if (this.isFreeCreativeProject()) {
                             await this.lockFreeCreativeResource(

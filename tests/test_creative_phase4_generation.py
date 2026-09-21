@@ -76,6 +76,38 @@ def test_phase4_worker_creates_provider_with_selected_model(monkeypatch) -> None
     assert resolved.reasoning_effort == "xhigh"
 
 
+def test_phase4_script_series_provider_uses_safe_defaults_and_keeps_override(
+    monkeypatch,
+) -> None:
+    providers = [
+        SimpleNamespace(
+            model="gpt-5.6-luna",
+            reasoning_effort="auto",
+            retry_read_timeouts=True,
+        ),
+        SimpleNamespace(
+            model="gpt-5.6-luna",
+            reasoning_effort="auto",
+            retry_read_timeouts=True,
+        ),
+    ]
+    monkeypatch.setattr(
+        phase4_worker, "create_provider", lambda _model_record_id=None: providers.pop(0)
+    )
+
+    defaulted = phase4_worker._create_generation_provider(
+        {"action": "script", "series": True}
+    )
+    overridden = phase4_worker._create_generation_provider(
+        {"action": "script", "series": True, "reasoning_effort": "max"}
+    )
+
+    assert defaulted.reasoning_effort == "high"
+    assert defaulted.retry_read_timeouts is False
+    assert overridden.reasoning_effort == "max"
+    assert overridden.retry_read_timeouts is False
+
+
 def test_outline_worker_prefers_per_request_reasoning_effort() -> None:
     job = CrawlJob(
         job_id="outline-reasoning-override",
@@ -2361,6 +2393,113 @@ def test_phase4_worker_saves_series_scripts_after_all_current_beats_are_locked(t
     assert len({item["batch_id"] for item in scripts}) == 1
     assert len(provider.calls) == 6
     assert "locked_beats" in provider.calls[0][1]["content"]
+
+
+def test_phase4_script_series_splits_read_timeout_into_concurrent_singles(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository, episode_count=2)
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"], [outline_episode(1), outline_episode(2)], "全剧弧线"
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    for episode_number in (1, 2):
+        beats = repository.create_episode_beats(
+            project["id"], episode_number, valid_beat_content()
+        )
+        repository.lock_episode_beats(beats["id"])
+
+    class TimeoutThenConcurrentSinglesProvider(SequentialProvider):
+        reasoning_effort = "auto"
+        retry_read_timeouts = True
+
+        def __init__(self):
+            super().__init__([])
+            self.single_active = 0
+            self.max_single_active = 0
+            self.release_singles = asyncio.Event()
+
+        async def complete_json(self, messages):
+            self.calls.append(messages)
+            requested = [
+                int(item["episode_number"])
+                for item in json.loads(messages[1]["content"])["locked_outlines"]
+            ]
+            if requested == [1, 2]:
+                request = httpx.Request(
+                    "POST", "https://example.test/v1/responses"
+                )
+                try:
+                    raise httpx.ReadTimeout("timed out", request=request)
+                except httpx.ReadTimeout as exc:
+                    raise LLMTimeoutError("模型响应超时") from exc
+            self.single_active += 1
+            self.max_single_active = max(
+                self.max_single_active, self.single_active
+            )
+            try:
+                if self.single_active == 2:
+                    self.release_singles.set()
+                await asyncio.wait_for(self.release_singles.wait(), timeout=1)
+                number = requested[0]
+                return {
+                    "episodes": [
+                        {"episode": number, **valid_script_content(number)}
+                    ]
+                }
+            finally:
+                self.single_active -= 1
+
+    provider = TimeoutThenConcurrentSinglesProvider()
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    job = CrawlJob(
+        job_id="creative-worker-script-timeout-split",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "script",
+            "series": True,
+            "project_id": project["id"],
+            "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(
+                repository, project["id"], "script-timeout-split"
+            ),
+        },
+    )
+
+    asyncio.run(
+        asyncio.wait_for(
+            phase4_worker._run_with_repository(job, repository), timeout=2
+        )
+    )
+
+    requested_ranges = [
+        [
+            int(item["episode_number"])
+            for item in json.loads(call[1]["content"])["locked_outlines"]
+        ]
+        for call in provider.calls
+    ]
+    scripts = [
+        item
+        for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "script"
+    ]
+    assert requested_ranges == [[1, 2], [1], [2]]
+    assert provider.max_single_active == 2
+    assert provider.reasoning_effort == "high"
+    assert provider.retry_read_timeouts is False
+    assert [item["episode_number"] for item in scripts] == [1, 2]
 
 
 def test_phase4_worker_surfaces_provider_retry_progress(tmp_path, monkeypatch):

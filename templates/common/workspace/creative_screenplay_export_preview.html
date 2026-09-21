@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>{{ title }}</title>
+    <style>{{ css }}</style>
+</head>
+<body data-screenplay-template="{{ template_id }}">
+    <main class="screenplay-page">
+        <h1>{{ title }}</h1>
+        {% if synopsis %}
+        <section class="front-matter synopsis">
+            <h2 class="front-heading">简介</h2>
+            <p>{{ synopsis }}</p>
+        </section>
+        {% endif %}
+        {% if character_bios %}
+        <section class="front-matter character-bios">
+            <h2 class="front-heading">人物小传</h2>
+            {% for character in character_bios %}
+            <p class="character-bio"><strong>{{ character.name }}</strong>{% if character.description %}：{{ character.description }}{% endif %}</p>
+            {% endfor %}
+        </section>
+        {% endif %}
+        {% if series_overview %}
+        <section class="front-matter series-overview">
+            <h2 class="front-heading">全集概览</h2>
+            {% for label, value in series_overview %}<p><strong>{{ label }}</strong>：{{ value }}</p>{% endfor %}
+        </section>
+        {% endif %}
+        {% if show_script_heading %}<h2 class="front-heading">剧本</h2>{% endif %}
+        {% for episode in episodes %}
+        <section class="episode" data-episode-number="{{ episode.number }}">
+            <h2>{{ episode.header }}</h2>
+            {% for scene in episode.scenes %}
+            <section class="scene">
+                <h3>{{ scene.header }}</h3>
+                {% if scene.metadata %}<p class="metadata">{{ scene.metadata }}</p>{% endif %}
+                {% for block in scene.blocks %}<p class="script-block {{ block.type }}">{{ block.text }}</p>{% endfor %}
+            </section>
+            {% endfor %}
+        </section>
+        {% endfor %}
+        {% if appendix %}
+        <section class="front-matter">
+            <h2 class="front-heading">AI 视频规格建议</h2>
+            <div class="appendix">{{ appendix }}</div>
+        </section>
+        {% endif %}
+    </main>
+</body>
+</html>

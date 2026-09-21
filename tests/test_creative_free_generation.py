@@ -8,11 +8,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
+from analysis.llm import LLMTimeoutError
 from core.job import CrawlJob
 from creative import free_phase4_worker
 from creative.free_mode_service import FreeCreativeModeService
@@ -27,6 +30,40 @@ def test_generation_request_rejects_unknown_reasoning_effort() -> None:
             operation_id="invalid-reasoning-effort",
             reasoning_effort="turbo",
         )
+
+
+def test_free_script_series_provider_uses_safe_defaults_and_keeps_override(
+    monkeypatch,
+) -> None:
+    providers = [
+        SimpleNamespace(
+            model="gpt-5.6-sol",
+            reasoning_effort="auto",
+            retry_read_timeouts=True,
+        ),
+        SimpleNamespace(
+            model="gpt-5.6-sol",
+            reasoning_effort="auto",
+            retry_read_timeouts=True,
+        ),
+    ]
+    monkeypatch.setattr(
+        free_phase4_worker,
+        "create_llm_provider_from_config",
+        lambda _config, *, model_record_id=None: providers.pop(0),
+    )
+
+    defaulted = free_phase4_worker._create_generation_provider(
+        {"action": "script", "series": True}
+    )
+    overridden = free_phase4_worker._create_generation_provider(
+        {"action": "script", "series": True, "reasoning_effort": "max"}
+    )
+
+    assert defaulted.reasoning_effort == "high"
+    assert defaulted.retry_read_timeouts is False
+    assert overridden.reasoning_effort == "max"
+    assert overridden.retry_read_timeouts is False
 
 
 def _free_project(repository: CreativeRepositoryBase) -> dict[str, Any]:
@@ -806,3 +843,115 @@ async def test_free_script_series_generates_every_episode_and_updates_each_head(
     assert events[-1][0] == "job_finished"
     assert events[-1][1]["action"] == "script"
     assert events[-1][1]["episode_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_free_script_series_splits_read_timeout_into_concurrent_singles(
+    postgres_creative,
+    monkeypatch,
+) -> None:
+    repository = postgres_creative
+    project = _free_project(repository)
+    repository.update_project(project["id"], {"target_episode_count": 2})
+    service = FreeCreativeModeService(repository)
+    contexts = {
+        episode_number: service.create_generation_context(
+            context_id=f"script-timeout-context-{episode_number}",
+            project_id=project["id"],
+            stage="script",
+            episode_number=episode_number,
+            instruction="统一强化结尾悬念",
+            context_refs={},
+            actor_user_id="owner-1",
+        )
+        for episode_number in (1, 2)
+    }
+    provider = SimpleNamespace(
+        model="gpt-5.6-sol",
+        reasoning_effort="auto",
+        retry_read_timeouts=True,
+    )
+    calls: list[list[int]] = []
+    singles_started: set[int] = set()
+    both_singles_started = asyncio.Event()
+    release_singles = asyncio.Event()
+
+    async def generate_script_chunk(
+        request_provider,
+        _project,
+        _brief,
+        outlines,
+        _characters,
+        _relationships,
+        _beats_by_episode,
+        **_kwargs,
+    ):
+        episode_numbers = [int(item["episode_number"]) for item in outlines]
+        calls.append(episode_numbers)
+        assert request_provider.reasoning_effort == "high"
+        assert request_provider.retry_read_timeouts is False
+        if episode_numbers == [1, 2]:
+            request = httpx.Request(
+                "POST", "https://example.test/v1/responses"
+            )
+            try:
+                raise httpx.ReadTimeout("timed out", request=request)
+            except httpx.ReadTimeout as exc:
+                raise LLMTimeoutError("模型响应超时") from exc
+        singles_started.add(episode_numbers[0])
+        if len(singles_started) == 2:
+            both_singles_started.set()
+        await release_singles.wait()
+        number = episode_numbers[0]
+        return [
+            (number, {"episode_title": f"第 {number} 集", "scenes": []})
+        ], {"model": "fake"}
+
+    monkeypatch.setattr(
+        free_phase4_worker,
+        "create_llm_provider_from_config",
+        lambda _config, **_kwargs: provider,
+    )
+    monkeypatch.setattr(
+        free_phase4_worker,
+        "generate_episode_script_chunk",
+        generate_script_chunk,
+    )
+    job = CrawlJob(
+        job_id="free-script-timeout-split",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "script",
+            "normalized_stage": "script",
+            "workflow_mode": "free",
+            "project_id": project["id"],
+            "created_by_user_id": "owner-1",
+            "operation_id": "operation-script-timeout-split",
+            "series": True,
+            "episode_start": 1,
+            "episode_end": 2,
+            "free_context_ids": {
+                str(number): context["id"] for number, context in contexts.items()
+            },
+            "expected_head_revisions": {"1": 0, "2": 0},
+        },
+    )
+    task = asyncio.create_task(
+        free_phase4_worker.run_free_generation(
+            job, repository, lambda *_args, **_kwargs: None
+        )
+    )
+    try:
+        await asyncio.wait_for(both_singles_started.wait(), timeout=1)
+    finally:
+        release_singles.set()
+    await task
+
+    assert calls == [[1, 2], [1], [2]]
+    scripts = [
+        item
+        for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "script"
+    ]
+    assert [item["episode_number"] for item in scripts] == [1, 2]

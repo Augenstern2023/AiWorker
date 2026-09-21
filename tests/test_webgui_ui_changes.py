@@ -613,9 +613,20 @@ def test_writing_episode_workspaces_can_show_and_download_selected_or_all_episod
     assert "多集/全集下载" in beats
     assert "多集/全集下载" in scripts
     assert "selectedEpisodes" in modal
+    assert "templateOptions" in modal
+    assert "在线预览" in modal
+    assert 'value="md"' in modal
+    assert 'value="pdf"' in modal
+    assert 'value="docx"' in modal
+    assert 'aria-live="polite"' in modal
     assert "downloadSelectedEpisodes()" in creative
+    assert "loadScreenplayExportTemplates" in creative
+    assert "previewSelectedEpisodes" in creative
+    assert "params.set('template', state.templateId)" in creative
     assert "episodeView === 'all'" in tasks
     assert '"/projects/{project_id}/episodes/download"' in api
+    assert '"/projects/{project_id}/episodes/export/templates"' in api
+    assert '"/projects/{project_id}/episodes/export/preview"' in api
 
 
 def test_brief_and_characters_navigation_hide_episode_selector():
@@ -1141,7 +1152,7 @@ def test_draft_breakdowns_are_visible_but_not_project_eligible():
     breakdowns = _source("static/js/selection/breakdowns.js")
     assert "topicProjectEligible(topic)" in breakdowns
     assert "return !!topic?.locked_breakdown_id;" in breakdowns
-    assert "aiworkerApi.request('/api/creative/topics?status=adopted&limit=500')" in html
+    assert "aiworkerApi.request('/api/creative/topics?status=adopted&limit=500&include_lifecycle=false')" in html
     assert ':disabled="!topic.locked_breakdown_id"' in html
     assert 'x-text="creativeTopicOptionLabel(topic)"' in html
 
@@ -1466,12 +1477,14 @@ def test_outline_page_exposes_beats_and_script_update_records_per_episode():
     assert "查看 Beats 与剧本更新记录" in outline
 
 
-def test_scene_script_workspace_distinguishes_merged_and_single_episode_downloads():
+def test_scene_script_workspace_routes_all_download_scopes_through_template_picker():
     scripts = _source("templates/common/workspace/project_scripts.html")
 
-    assert "mergedScriptDownloadUrl()" in scripts
-    assert "剧本下载" in scripts
+    assert "mergedScriptDownloadUrl()" not in scripts
+    assert "generated-content/download" not in scripts
+    assert "openEpisodeDownload('script', {forceAll: true})" in scripts
     assert "本集下载" in scripts
+    assert "全集下载" in scripts
 
 
 def test_scene_script_page_uses_the_writing_workspace_layout():
@@ -1594,14 +1607,28 @@ def test_scene_script_actions_stop_before_navigation_without_locked_beats():
     assert '@click="openProjectScriptWorkspace"' in beats
 
 
-def test_scene_script_workspace_hides_scripts_tied_to_superseded_beats():
+def test_scene_script_workspace_keeps_superseded_scripts_out_of_current_version():
     creative = _source("static/js/common/creative.js")
     scripts = _source("templates/common/workspace/project_scripts.html")
 
-    assert "return this.projectEpisodeScript(this.creativeWorkspace.selectedEpisode);" in creative
+    assert "return this.projectEpisodeScript(episodeNumber);" in creative
     assert "scriptWorkspaceEmptyMessage()" in creative
     assert "当前仅有基于 Beats v${olderScriptBeatsVersion || '未知'} 的旧场次剧本；当前 Beats 为 v${currentBeats.version}" in creative
     assert 'x-text="scriptWorkspaceEmptyMessage()"' in scripts
+
+
+def test_scene_script_workspace_can_preview_superseded_versions_read_only():
+    creative = _source("static/js/common/creative.js")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "projectEpisodeScriptVersions(episodeNumber)" in creative
+    assert "projectEpisodeHistoricalScripts(episodeNumber)" in creative
+    assert "projectScriptEpisodeLabel(episodeNumber)" in creative
+    assert "selectedProjectScriptIsHistorical()" in creative
+    assert "selectedProjectScriptEditable()" in creative
+    assert 'x-model="creativeWorkspace.selectedScriptVersionId"' in scripts
+    assert "历史版本仅供查看" in scripts
+    assert "creativeGeneratedDownloadUrl('script', 'txt')" in scripts
 
 
 def test_scene_script_workspace_calls_generation_a_regeneration_when_locked_beats_changed():
@@ -1627,7 +1654,8 @@ def test_scene_script_workspace_locks_standard_and_free_mode_versions():
     assert "/scripts/lock`" in creative
     assert '@click="completeProjectScriptsBatch"' in scripts
     assert "批量完成并锁定" in scripts
-    assert 'x-show="!isFreeCreativeProject()" :href="mergedScriptDownloadUrl()"' in scripts
+    assert 'x-show="!isFreeCreativeProject()" :href="mergedScriptDownloadUrl()"' not in scripts
+    assert "openEpisodeDownload('script', {forceAll: true})" in scripts
     assert "selectedProjectScript().version" in scripts
 
 
@@ -1724,6 +1752,82 @@ Object.assign(component, {
     result = subprocess.run(
         [node, "-e", script, "static/js/common/creative.js"],
         capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_standard_generation_reuses_last_model_and_reasoning_selection():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+const storage = new Map();
+global.window = {
+  aiworkerModules: [],
+  localStorage: {
+    getItem: key => storage.has(key) ? storage.get(key) : null,
+    setItem: (key, value) => storage.set(key, value),
+  },
+};
+global.aiworkerApi = {request: async () => ({
+  ok: true,
+  json: async () => ({
+    default_model_record_id: 'model-a',
+    items: [
+      {id: 'model-a', reasoning_effort_options: [{value: 'high', label: '高'}]},
+      {id: 'model-b', reasoning_effort_options: [{value: 'high', label: '高'}]},
+    ],
+  }),
+})};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+
+const createComponent = () => {
+  const component = window.aiworkerModules[0]();
+  Object.assign(component, {
+    creativeWorkspace: {
+      sequentialGeneration: {
+        modelOptions: [], modelRecordId: '', defaultModelRecordId: '',
+        reasoningEffortOptions: [], reasoningEffort: '', loading: false,
+        error: '', pending: null,
+      },
+    },
+    sequentialGenerationModelModal: {show: () => {}},
+  });
+  return component;
+};
+
+(async () => {
+  const first = createComponent();
+  await first.openSequentialGenerationModel('/generate', {}, 'script', {});
+  first.creativeWorkspace.sequentialGeneration.modelRecordId = 'model-b';
+  first.syncGenerationReasoningEfforts(first.creativeWorkspace.sequentialGeneration);
+  first.creativeWorkspace.sequentialGeneration.reasoningEffort = 'high';
+  first.persistSequentialGenerationPreference();
+
+  const afterReload = createComponent();
+  await afterReload.openSequentialGenerationModel('/generate', {}, 'script', {});
+  assert.equal(afterReload.creativeWorkspace.sequentialGeneration.modelRecordId, 'model-b');
+  assert.equal(afterReload.creativeWorkspace.sequentialGeneration.reasoningEffort, 'high');
+
+  storage.set(
+    afterReload.sequentialGenerationPreferenceStorageKey(),
+    JSON.stringify({modelRecordId: 'retired-model', reasoningEffort: 'high'})
+  );
+  const withRetiredModel = createComponent();
+  await withRetiredModel.openSequentialGenerationModel('/generate', {}, 'script', {});
+  assert.equal(withRetiredModel.creativeWorkspace.sequentialGeneration.modelRecordId, '');
+  assert.equal(withRetiredModel.creativeWorkspace.sequentialGeneration.reasoningEffort, '');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
     )
     assert result.returncode == 0, result.stderr
 
@@ -2283,6 +2387,86 @@ def test_creative_generation_task_log_opens_inside_the_progress_modal():
     assert "aiworkerApi.request(`/api/jobs/${jobId}/logs`)" in script
     assert "/tasks?job_id=" not in modal
     assert "/tasks?job_id=" not in progress
+
+
+def test_standard_and_free_generation_show_and_fetch_logs_as_soon_as_job_starts():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+const requests = [];
+global.window = {
+  aiworkerModules: [],
+  aiworkerUi: {requestKey: async (_key, request) => request(undefined)},
+};
+global.aiworkerApi = {
+  request: async (url) => {
+    requests.push(url);
+    if (url.endsWith('/beats/generate')) {
+      const mode = url.includes('/free/') ? 'free' : 'sequential';
+      return {
+        ok: true,
+        json: async () => ({
+          job: {
+            job_id: `creative-beats-${mode}`, status: 'running',
+            progress: {completed: 0, total: 1}, log_count: 1,
+          },
+        }),
+      };
+    }
+    if (url.startsWith('/api/jobs/creative-beats-') && url.endsWith('/logs')) {
+      return {ok: true, json: async () => ({logs: ['[INFO] Beats generation started']})};
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  },
+  isAbortError: () => false,
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+
+const createComponent = workflowMode => {
+  const component = window.aiworkerModules[0]();
+  Object.assign(component, {
+    creativeWorkspace: {
+      project: {id: 7, workflow_mode: workflowMode}, selectedEpisode: 1,
+      jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '',
+      jobLogs: [], jobLogCount: 0, showJobLogs: false,
+    },
+    creativeGenerationProgressModal: {show: () => {}},
+    fetchJobs: async () => {},
+    showCreativeNotice: () => {},
+  });
+  return component;
+};
+
+(async () => {
+  for (const mode of ['sequential', 'free']) {
+    const component = createComponent(mode);
+    const segment = mode === 'free' ? '/free' : '';
+    await component.startCreativeGeneration(
+      `/api/creative/projects/7${segment}/beats/generate`, {}, 'beats',
+      mode === 'sequential' ? {modelConfirmed: true} : {}
+    );
+    assert.equal(component.creativeWorkspace.showJobLogs, true, mode);
+    assert.deepEqual(
+      component.creativeWorkspace.jobLogs,
+      ['[INFO] Beats generation started'],
+      mode
+    );
+    assert.ok(requests.includes(`/api/jobs/creative-beats-${mode}/logs`), mode);
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_creative_generation_progress_shows_current_batch_and_slow_request_warning():

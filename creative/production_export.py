@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from collections.abc import Iterable
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -118,6 +119,9 @@ def _row(raw: Mapping[str, Any]) -> dict[str, Any]:
             if value.tzinfo is None:
                 value = value.replace(tzinfo=timezone.utc)
             result[key] = value.timestamp()
+            value = result[key]
+        elif isinstance(value, uuid.UUID):
+            result[key] = str(value)
             value = result[key]
         if key.endswith("_json"):
             try:

@@ -30,9 +30,9 @@
     let hasFailure = false;
 
     // 请求 1：候选选题/选题库/已采纳的统计（使用 limit=50 而非 500）
-    await aiworkerUi.requestKey(overviewKey, async (signal) => {
+    const overviewRequest = aiworkerUi.requestKey(overviewKey, async (signal) => {
         try {
-            const res = await aiworkerApi.request('/api/creative/topics?limit=50', {signal});
+            const res = await aiworkerApi.request('/api/creative/topics?limit=50&include_lifecycle=false', {signal});
             if (!res.ok) {
                 const detail = await aiworkerApi.parseErrorDetail(res);
                 throw new Error(detail);
@@ -53,8 +53,9 @@
     });
 
     // 请求 2：分析统计（独立，不受选题区失败影响）
+    let analyticsRequest = Promise.resolve();
     if (canReadAnalytics) {
-        await aiworkerUi.requestKey(analyticsKey, async (signal) => {
+        analyticsRequest = aiworkerUi.requestKey(analyticsKey, async (signal) => {
             try {
                 const res = await aiworkerApi.request('/api/analytics/overview', {signal});
                 if (!res.ok) {
@@ -76,6 +77,8 @@
         ['stat-drama-count', 'stat-comment-count', 'stat-transcript-count', 'stat-task-count']
             .forEach(id => setStat(id, '—'));
     }
+
+    await Promise.all([overviewRequest, analyticsRequest]);
 
     if (hasFailure) {
         showError('部分数据加载失败，已显示可用数据。请刷新重试。');

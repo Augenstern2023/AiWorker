@@ -382,6 +382,7 @@
                     this.planningAssignmentModal = this.modal('planningAssignmentModal');
                     this.adoptionNoticeModal = this.modal('adoptionNoticeModal');
 
+                    let initialJobsRequest = null;
                     if (['tasks', 'review-tasks'].includes(this.page)) {
                         await this.fetchWorkflowTasks();
                         document.getElementById('refresh-review-tasks')?.addEventListener(
@@ -390,7 +391,6 @@
                         );
                     }
 
-                    if (this.pageNeedsJobPolling()) await this.fetchJobs();
                     if (this.page === 'selection-ranks') {
                         this.parseTodayRankHash(false);
                         window.addEventListener('hashchange', () => this.parseTodayRankHash(true));
@@ -474,6 +474,10 @@
                         const jobId = new URLSearchParams(window.location.search).get('job_id');
                         if (jobId) await this.selectJob(jobId);
                     }
+                    if (this.pageNeedsJobPolling()) {
+                        initialJobsRequest = this.fetchJobs();
+                    }
+                    if (initialJobsRequest) await initialJobsRequest;
                     this.initTooltips();
                     if (this.page === 'admin-jobs') setInterval(() => this.fetchLogs(), 1000);
                     if (this.pageNeedsJobPolling()) setInterval(() => this.fetchJobs(), this.JOB_POLL_INTERVAL_MS);

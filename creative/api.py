@@ -1328,6 +1328,7 @@ def build_creative_router(
         captured_date: str = "",
         has_locked_breakdown: bool | None = None,
         lifecycle_status: str = "",
+        include_lifecycle: bool = True,
         limit: int | None = None,
     ) -> list[dict]:
         approved_context_only = (
@@ -1347,13 +1348,14 @@ def build_creative_router(
             has_locked_breakdown=has_locked_breakdown,
             limit=limit,
         )
-        items = lifecycle_service.enrich_topics(topics)
-        for item in items:
-            if item.get("latest_breakdown_id"):
+        if not include_lifecycle and not lifecycle_status:
+            return topics
+        for topic in topics:
+            if topic.get("latest_breakdown_id"):
                 workflow_adapter.reconcile_resource(
-                    "breakdown", str(item["latest_breakdown_id"])
+                    "breakdown", str(topic["latest_breakdown_id"])
                 )
-        if any(item.get("latest_breakdown_id") for item in items):
+        if any(topic.get("latest_breakdown_id") for topic in topics):
             topics = repository.list_topics(
                 platform=platform,
                 status=status,
@@ -1365,7 +1367,7 @@ def build_creative_router(
                 has_locked_breakdown=has_locked_breakdown,
                 limit=limit,
             )
-            items = lifecycle_service.enrich_topics(topics)
+        items = lifecycle_service.enrich_topics(topics)
         if lifecycle_status:
             items = [item for item in items if item.get("lifecycle_status") == lifecycle_status]
         return items
@@ -2806,6 +2808,7 @@ def build_creative_router(
         captured_date: str = "",
         has_locked_breakdown: bool | None = None,
         lifecycle_status: str = "",
+        include_lifecycle: bool = True,
         all: bool = False,
         limit: int = Query(50, ge=1, le=500),
     ):
@@ -2815,7 +2818,8 @@ def build_creative_router(
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
         repository_limit = None if all else (500 if lifecycle_status else limit)
-        items = topic_library_items(
+        items = await asyncio.to_thread(
+            topic_library_items,
             principal=principal,
             platform=platform,
             status=status,
@@ -2826,9 +2830,10 @@ def build_creative_router(
             captured_date=captured_date,
             has_locked_breakdown=has_locked_breakdown,
             lifecycle_status=lifecycle_status,
+            include_lifecycle=include_lifecycle,
             limit=repository_limit,
         )
-        add_topic_project_access(request, principal, items)
+        await asyncio.to_thread(add_topic_project_access, request, principal, items)
         return {"items": items if all else items[:limit]}
 
     @router.get("/topics/export")
@@ -3707,7 +3712,7 @@ def build_creative_router(
         participating_only: bool = False,
         principal: Principal = Depends(current_principal),
     ):
-        items = repository.list_projects(topic_id=topic_id)
+        items = await asyncio.to_thread(repository.list_projects, topic_id=topic_id)
         for item in items:
             task_id = str(item.get("creation_workflow_task_id") or "")
             if not task_id:

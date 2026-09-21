@@ -11,7 +11,7 @@
     {% if workspace_runtime %}<script defer src="/static/js/alpine.min.js"></script>{% endif %}
     {% block styles %}{% endblock %}
 </head>
-<body{% if workspace_page %}{% if workspace_runtime %} x-data="appData()" x-init="init()"{% endif %} data-workspace-page="{{ workspace_page }}"{% else %} class="bg-body-tertiary"{% endif %}>
+<body{% if workspace_page %}{% if workspace_runtime %} x-data="appData()"{% endif %} data-workspace-page="{{ workspace_page }}"{% else %} class="bg-body-tertiary"{% endif %}>
     {% if principal %}
     <header class="mobile-topbar" id="mobile-topbar">
         <button type="button" class="btn btn-outline-light btn-sm sidebar-toggle" id="sidebar-toggle"

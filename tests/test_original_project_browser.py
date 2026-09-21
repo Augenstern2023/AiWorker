@@ -345,7 +345,7 @@ def test_project_list_requests_the_page_visibility_scope(
         browser.close()
 
     assert urls[0] == expected_project_url
-    assert urls[1] == "/api/creative/topics?status=adopted&limit=500"
+    assert urls[1] == "/api/creative/topics?status=adopted&limit=500&include_lifecycle=false"
 
 
 def test_original_brief_uses_mode_templates_and_original_fields() -> None:

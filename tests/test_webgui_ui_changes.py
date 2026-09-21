@@ -3224,10 +3224,29 @@ def test_jobs_polling_is_scoped_to_pages_that_consume_job_state():
     assert "if (this.pageNeedsJobPolling())" in tasks
 
 
+def test_initial_job_scan_does_not_block_page_data_loading():
+    tasks = _source("static/js/common/tasks.js")
+    api = _source("WebGUI.py")
+    assert "initialJobsRequest = this.fetchJobs()" in tasks
+    assert "if (this.pageNeedsJobPolling()) await this.fetchJobs();" not in tasks
+    assert "await asyncio.to_thread(job_manager.list_jobs)" in api
+
+
+def test_project_list_does_not_block_other_page_requests():
+    api = _source("creative/api.py")
+    assert "await asyncio.to_thread(repository.list_projects" in api
+
+
+def test_workspace_initialization_runs_only_once():
+    base = _source("templates/layouts/base.html")
+    assert 'x-data="appData()"' in base
+    assert 'x-init="init()"' not in base
+
+
 def test_dashboard_no_longer_uses_limit_500():
     dashboard = _source("static/js/selection/dashboard.js")
     assert "limit=500" not in dashboard
-    assert "limit=50" in dashboard
+    assert "limit=50&include_lifecycle=false" in dashboard
     assert "requestKey" in dashboard
 
 
@@ -3236,6 +3255,7 @@ def test_dashboard_uses_independent_requests():
     assert "overviewKey" in dashboard
     assert "analyticsKey" in dashboard
     assert "isAbortError" in dashboard
+    assert "Promise.all" in dashboard
 
 
 def test_dashboard_template_has_skeleton():

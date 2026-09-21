@@ -189,7 +189,7 @@ window.aiworkerModules.push(() => ({
                             : '/api/creative/projects';
                         const [projectsResponse, topicsResponse] = await Promise.all([
                             aiworkerApi.request(projectsUrl),
-                            aiworkerApi.request('/api/creative/topics?status=adopted&limit=500')
+                            aiworkerApi.request('/api/creative/topics?status=adopted&limit=500&include_lifecycle=false')
                         ]);
                         const projectsData = await projectsResponse.json();
                         const topicsData = await topicsResponse.json();
@@ -837,7 +837,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async resolveSelectionTopicByTitle(title) {
-                    const topicsResponse = await aiworkerApi.request('/api/creative/topics?limit=500');
+                    const topicsResponse = await aiworkerApi.request('/api/creative/topics?limit=500&include_lifecycle=false');
                     const payload = await topicsResponse.json();
                     if (!topicsResponse.ok) throw new Error(payload.detail || '读取选题库失败');
                     const titleKey = value => String(value || '').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '');

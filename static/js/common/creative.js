@@ -463,6 +463,41 @@ window.aiworkerModules.push(() => ({
                     return this.creativeWorkspace.project?.workflow_mode === 'free';
                 },
 
+                sequentialGenerationPreferenceStorageKey() {
+                    return 'aiworker.creative.sequential-generation-preference';
+                },
+
+                loadSequentialGenerationPreference() {
+                    try {
+                        const raw = window.localStorage?.getItem(
+                            this.sequentialGenerationPreferenceStorageKey()
+                        );
+                        const value = raw ? JSON.parse(raw) : {};
+                        if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+                        return {
+                            modelRecordId: String(value.modelRecordId || ''),
+                            reasoningEffort: String(value.reasoningEffort || ''),
+                        };
+                    } catch (_) {
+                        return {};
+                    }
+                },
+
+                persistSequentialGenerationPreference() {
+                    const state = this.creativeWorkspace.sequentialGeneration;
+                    try {
+                        window.localStorage?.setItem(
+                            this.sequentialGenerationPreferenceStorageKey(),
+                            JSON.stringify({
+                                modelRecordId: String(state.modelRecordId || ''),
+                                reasoningEffort: String(state.reasoningEffort || ''),
+                            })
+                        );
+                    } catch (_) {
+                        // Storage can be unavailable in private or restricted browser contexts.
+                    }
+                },
+
                 syncGenerationReasoningEfforts(state, defaultModelRecordId = null) {
                     if (defaultModelRecordId !== null) {
                         state.defaultModelRecordId = String(defaultModelRecordId || '');
@@ -498,10 +533,22 @@ window.aiworkerModules.push(() => ({
                         const data = await response.json();
                         if (!response.ok) throw new Error(data.detail || '读取可用模型失败');
                         state.modelOptions = Array.isArray(data.items) ? data.items : [];
+                        const availableModelIds = new Set(
+                            state.modelOptions.map(item => String(item.id))
+                        );
+                        if (state.modelRecordId && !availableModelIds.has(String(state.modelRecordId))) {
+                            state.modelRecordId = '';
+                            state.reasoningEffort = '';
+                        }
                         this.syncGenerationReasoningEfforts(
                             state, data.default_model_record_id
                         );
+                        this.persistSequentialGenerationPreference();
                     } catch (error) {
+                        state.modelRecordId = '';
+                        state.defaultModelRecordId = '';
+                        state.reasoningEffort = '';
+                        state.reasoningEffortOptions = [];
                         state.error = `${error.message || '读取可用模型失败'}；可继续使用全局默认模型`;
                     } finally {
                         state.loading = false;
@@ -510,9 +557,12 @@ window.aiworkerModules.push(() => ({
 
                 async openSequentialGenerationModel(url, body, action, options) {
                     const state = this.creativeWorkspace.sequentialGeneration;
+                    const preference = this.loadSequentialGenerationPreference();
                     Object.assign(state, {
-                        pending: {url, body, action, options}, modelRecordId: '',
-                        defaultModelRecordId: '', modelOptions: [], reasoningEffort: '',
+                        pending: {url, body, action, options},
+                        modelRecordId: preference.modelRecordId || '',
+                        defaultModelRecordId: '', modelOptions: [],
+                        reasoningEffort: preference.reasoningEffort || '',
                         reasoningEffortOptions: [], error: '', loading: true,
                     });
                     this.sequentialGenerationModelModal?.show();
@@ -531,6 +581,7 @@ window.aiworkerModules.push(() => ({
                         state.error = '选择推理档位前必须先选择一个可用模型';
                         return;
                     }
+                    this.persistSequentialGenerationPreference();
                     state.pending = null;
                     this.sequentialGenerationModelModal?.hide();
                     const body = modelRecordId

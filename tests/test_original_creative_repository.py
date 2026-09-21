@@ -11,7 +11,7 @@ import sqlite3
 
 import pytest
 
-from creative.repository import CreativeRepository
+from creative.legacy_sqlite_repository import CreativeRepository
 
 
 def create_legacy_creative_database(db_path):

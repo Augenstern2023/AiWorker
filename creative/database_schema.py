@@ -50,7 +50,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION, JSONB
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION, JSONB, UUID
 
 
 CREATIVE_METADATA = MetaData()
@@ -179,6 +179,12 @@ creative_projects = Table(
     "creative_projects",
     CREATIVE_METADATA,
     _bigint_pk(),
+    Column(
+        "project_uid",
+        UUID(as_uuid=True),
+        nullable=False,
+        server_default=text("gen_random_uuid()"),
+    ),
     Column("topic_id", BigInteger, ForeignKey("creative_topics.id", name="fk_creative_projects_topic_id")),
     Column(
         "breakdown_id",
@@ -1375,6 +1381,11 @@ Index(
     creative_deliveries.c.submission_id,
     creative_deliveries.c.format,
     creative_deliveries.c.is_formal,
+    unique=True,
+)
+Index(
+    "uq_creative_projects_project_uid",
+    creative_projects.c.project_uid,
     unique=True,
 )
 Index(

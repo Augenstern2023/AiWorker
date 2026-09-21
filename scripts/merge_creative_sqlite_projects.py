@@ -65,6 +65,15 @@ SYSTEM_PROJECT_REFERENCES: tuple[tuple[str, str], ...] = (
     ("workflow_project_member_events", "project_id"),
     ("workflow_tasks", "project_id"),
 )
+SYSTEM_PROJECT_UID_TABLES = frozenset(
+    {
+        "project_members",
+        "workflow_instances",
+        "workflow_project_deletions",
+        "workflow_project_member_events",
+        "workflow_tasks",
+    }
+)
 SPEC_BY_NAME = {spec.name: spec for spec in BUSINESS_TABLE_SPECS}
 JSON_ID_KEYS: Mapping[str, str] = {
     "project_id": "creative_projects",
@@ -443,6 +452,46 @@ def _system_reference_counts(
     return counts
 
 
+def _system_project_memberships(
+    connection: Connection, identities: Mapping[str, str]
+) -> dict[str, list[dict[str, Any]]]:
+    memberships: dict[str, list[dict[str, Any]]] = {}
+    for old_identity in identities:
+        rows = connection.execute(
+            text(
+                "SELECT user_id, project_role, status FROM project_members "
+                "WHERE project_id = :project_id ORDER BY user_id, project_role"
+            ),
+            {"project_id": old_identity},
+        ).mappings().all()
+        memberships[old_identity] = [dict(row) for row in rows]
+    return memberships
+
+
+def _validate_project_ownership(
+    project_rows: Mapping[int, Mapping[str, Any]],
+    memberships: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> None:
+    """Require one active creator whose identity matches source ``created_by``."""
+
+    for old_identity, project_memberships in memberships.items():
+        source_id = int(old_identity.rsplit(":", 1)[-1])
+        project = project_rows[source_id]
+        expected_creator = str(project.get("created_by") or "").strip()
+        active_creators = sorted(
+            str(member.get("user_id") or "").strip()
+            for member in project_memberships
+            if member.get("project_role") == "project_creator"
+            and member.get("status") == "active"
+        )
+        if not expected_creator or active_creators != [expected_creator]:
+            raise CreativeImportError(
+                "ambiguous project ownership for "
+                f"{old_identity}: created_by={expected_creator!r}, "
+                f"active_project_creators={active_creators!r}"
+            )
+
+
 def _plan(
     connection: Connection,
     source: Path,
@@ -479,6 +528,8 @@ def _plan(
     project_rows = {
         int(row["id"]): row for row in selected["creative_projects"]
     }
+    memberships = _system_project_memberships(connection, identities)
+    _validate_project_ownership(project_rows, memberships)
     project_summary = [
         {
             "source_id": old_id,
@@ -635,13 +686,32 @@ def main(
                 inserted[spec.name] = len(payload)
 
             for old_identity, new_identity in identities.items():
+                old_id = int(old_identity.rsplit(":", 1)[-1])
+                new_id = maps["creative_projects"][old_id]
+                project_uid = connection.execute(
+                    select(
+                        CREATIVE_METADATA.tables["creative_projects"].c.project_uid
+                    ).where(
+                        CREATIVE_METADATA.tables["creative_projects"].c.id == new_id
+                    )
+                ).scalar_one()
                 for table_name, column_name in SYSTEM_PROJECT_REFERENCES:
+                    uid_assignment = (
+                        ', "project_uid" = :project_uid'
+                        if table_name in SYSTEM_PROJECT_UID_TABLES
+                        else ""
+                    )
                     connection.execute(
                         text(
-                            f'UPDATE "{table_name}" SET "{column_name}" = :new '
+                            f'UPDATE "{table_name}" SET "{column_name}" = :new'
+                            f'{uid_assignment} '
                             f'WHERE "{column_name}" = :old'
                         ),
-                        {"old": old_identity, "new": new_identity},
+                        {
+                            "old": old_identity,
+                            "new": new_identity,
+                            "project_uid": project_uid,
+                        },
                     )
 
             _reset_identity_sequences(connection, BUSINESS_TABLE_SPECS)

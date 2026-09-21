@@ -13,10 +13,21 @@ from typing import Any
 
 import pytest
 
+from analysis.llm import LLMOutputTruncatedError
 from core.job import CrawlJob
 from creative import free_phase4_worker
 from creative.free_mode_service import FreeCreativeModeService
 from creative.repositories.base import CreativeRepositoryBase
+
+
+def test_generation_request_rejects_unknown_reasoning_effort() -> None:
+    from creative.schema import FreeCreativeGenerateRequest
+
+    with pytest.raises(ValueError):
+        FreeCreativeGenerateRequest(
+            operation_id="invalid-reasoning-effort",
+            reasoning_effort="turbo",
+        )
 
 
 def _free_project(repository: CreativeRepositoryBase) -> dict[str, Any]:
@@ -94,6 +105,7 @@ async def test_free_generation_works_without_upstream_resources_and_updates_head
         }, {"model": "fake"}
 
     async def generate_outline(*_args, **kwargs):
+        assert kwargs.get("reasoning_effort") == ""
         progress = kwargs.get("on_progress")
         if progress:
             progress(3, 3)
@@ -195,7 +207,7 @@ async def test_free_generation_uses_selected_model_and_persists_attribution(
         provider_name="openai",
         provider_display_name="OpenAI 主账号",
         model_record_id="model-1",
-        model="gpt-screenwriter",
+        model="gpt-5.6-sol",
         model_display_name="GPT Screenwriter",
     )
 
@@ -226,6 +238,7 @@ async def test_free_generation_uses_selected_model_and_persists_attribution(
             "free_context_id": context["id"],
             "expected_head_revision": 0,
             "llm_model_record_id": "model-1",
+            "reasoning_effort": "high",
         },
     )
 
@@ -235,11 +248,12 @@ async def test_free_generation_uses_selected_model_and_persists_attribution(
 
     resource = repository.get_project(project["id"])["blueprints"][0]
     assert selected_calls == ["model-1"]
+    assert provider.reasoning_effort == "high"
     expected_meta = {
         "llm_provider_id": "provider-1",
         "llm_provider_name": "OpenAI 主账号",
         "llm_model_record_id": "model-1",
-        "llm_model_id": "gpt-screenwriter",
+        "llm_model_id": "gpt-5.6-sol",
         "llm_model_display_name": "GPT Screenwriter",
     }
     assert {
@@ -375,6 +389,7 @@ async def test_free_brief_api_forwards_direction_count(tmp_path, postgres_creati
 
 @pytest.mark.asyncio
 async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path, postgres_creative):
+    from fastapi import HTTPException
     from unittest.mock import Mock
     from creative.api import build_creative_router
     from creative.schema import FreeCreativeGenerateRequest
@@ -390,7 +405,14 @@ async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path,
 
     def resolve_model(model_record_id):
         resolved.append(model_record_id)
-        return {"model_record_id": model_record_id}
+        return {
+            "model_record_id": model_record_id,
+            "model": (
+                "gemini-3.5-flash"
+                if model_record_id == "gemini-model"
+                else "gpt-5.6-sol"
+            ),
+        }
 
     router = build_creative_router(
         root=tmp_path,
@@ -413,6 +435,7 @@ async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path,
             payload=FreeCreativeGenerateRequest(
                 operation_id="model-api-operation",
                 llm_model_record_id=model_record_id,
+                reasoning_effort="xhigh",
             ),
             principal=SimpleNamespace(user_id="owner-1"),
         )
@@ -421,9 +444,24 @@ async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path,
     assert [job["extra"]["llm_model_record_id"] for job in jobs] == [
         "model-a", "model-b"
     ]
+    assert all(job["extra"]["reasoning_effort"] == "xhigh" for job in jobs)
     assert jobs[0]["extra"]["generation_request_hash"] != (
         jobs[1]["extra"]["generation_request_hash"]
     )
+    with pytest.raises(HTTPException, match="不支持推理档位 high") as caught:
+        await endpoint(
+            project_id=project["id"],
+            stage="briefs",
+            episode_number=None,
+            payload=FreeCreativeGenerateRequest(
+                operation_id="unsupported-model-effort",
+                llm_model_record_id="gemini-model",
+                reasoning_effort="high",
+            ),
+            principal=SimpleNamespace(user_id="owner-1"),
+        )
+    assert caught.value.status_code == 409
+    assert len(jobs) == 2
 
 
 @pytest.mark.asyncio
@@ -448,7 +486,8 @@ async def test_free_series_api_forwards_one_selected_model_to_all_episodes(tmp_p
         application_service=Mock(assert_stage_write_access=Mock()),
         job_manager=SimpleNamespace(create_job=create_job),
         llm_model_resolver=lambda model_record_id: {
-            "model_record_id": model_record_id
+            "model_record_id": model_record_id,
+            "model": "gpt-5.6-sol",
         },
     )
     endpoint = next(
@@ -462,11 +501,13 @@ async def test_free_series_api_forwards_one_selected_model_to_all_episodes(tmp_p
             operation_id="series-model-operation",
             expected_head_revisions={1: 0, 2: 0, 3: 0},
             llm_model_record_id="model-series",
+            reasoning_effort="max",
         ),
         principal=SimpleNamespace(user_id="owner-1"),
     )
 
     assert jobs[0]["extra"]["llm_model_record_id"] == "model-series"
+    assert jobs[0]["extra"]["reasoning_effort"] == "max"
     assert len(jobs[0]["extra"]["free_context_ids"]) == 3
 
 
@@ -670,6 +711,75 @@ async def test_free_beats_series_rejects_stale_episode_head_before_generation(
 
 
 @pytest.mark.asyncio
+async def test_free_beats_series_keeps_partial_text_when_one_episode_is_truncated(
+    postgres_creative,
+    monkeypatch,
+) -> None:
+    repository = postgres_creative
+    project = _free_project(repository)
+    repository.update_project(project["id"], {"target_episode_count": 1})
+    service = FreeCreativeModeService(repository)
+    context = service.create_generation_context(
+        context_id="single-truncated-series-context",
+        project_id=project["id"],
+        stage="beats",
+        episode_number=1,
+        instruction="保留诊断片段",
+        context_refs={},
+        actor_user_id="owner-1",
+    )
+
+    async def generate_beats_chunk(*_args, **_kwargs):
+        raise LLMOutputTruncatedError(
+            "single truncated",
+            finish_reason="max_output_tokens",
+            returned_chars=8,
+            partial_text='{"beats"',
+        )
+
+    monkeypatch.setattr(
+        free_phase4_worker,
+        "create_llm_provider_from_config",
+        lambda _config: object(),
+    )
+    monkeypatch.setattr(
+        free_phase4_worker,
+        "generate_episode_beats_chunk",
+        generate_beats_chunk,
+    )
+    job = CrawlJob(
+        job_id="free-beats-series-single-truncated",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "beats",
+            "normalized_stage": "beats",
+            "workflow_mode": "free",
+            "project_id": project["id"],
+            "episode_number": None,
+            "created_by_user_id": "owner-1",
+            "operation_id": "operation-beats-series-single-truncated",
+            "series": True,
+            "episode_start": 1,
+            "episode_end": 1,
+            "free_context_ids": {"1": context["id"]},
+            "expected_head_revisions": {"1": 0},
+        },
+    )
+
+    with pytest.raises(LLMOutputTruncatedError) as caught:
+        await free_phase4_worker.run_free_generation(
+            job,
+            repository,
+            lambda *_args, **_kwargs: None,
+        )
+
+    assert caught.value.finish_reason == "max_output_tokens"
+    assert caught.value.returned_chars == 8
+    assert caught.value.partial_text == '{"beats"'
+
+
+@pytest.mark.asyncio
 async def test_free_script_series_generates_every_episode_and_updates_each_head(
     postgres_creative,
     monkeypatch,
@@ -691,20 +801,30 @@ async def test_free_script_series_generates_every_episode_and_updates_each_head(
     }
     generated_episodes: list[int] = []
 
-    async def generate_script(
+    async def generate_script_chunk(
         _provider,
         _project,
-        _outline,
+        _brief,
+        outlines,
         _characters,
-        _beats,
-        episode_number,
+        _relationships,
+        _beats_by_episode,
         **_kwargs,
     ):
-        generated_episodes.append(episode_number)
-        return {
-            "episode_title": f"第 {episode_number} 集",
-            "scenes": [],
-        }, {"model": "fake"}
+        rows = []
+        for outline in outlines:
+            episode_number = int(outline["episode_number"])
+            generated_episodes.append(episode_number)
+            rows.append(
+                (
+                    episode_number,
+                    {
+                        "episode_title": f"第 {episode_number} 集",
+                        "scenes": [],
+                    },
+                )
+            )
+        return rows, {"model": "fake"}
 
     monkeypatch.setattr(
         free_phase4_worker,
@@ -712,7 +832,9 @@ async def test_free_script_series_generates_every_episode_and_updates_each_head(
         lambda _config: object(),
     )
     monkeypatch.setattr(
-        free_phase4_worker, "generate_episode_script", generate_script
+        free_phase4_worker,
+        "generate_episode_script_chunk",
+        generate_script_chunk,
     )
     job = CrawlJob(
         job_id="free-script-series",

@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from creative.repository import CreativeRepository
+from creative.legacy_sqlite_repository import CreativeRepository
 
 
 def seed_reference_material(tmp_path):

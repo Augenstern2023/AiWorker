@@ -13,7 +13,7 @@ import uuid
 
 import pytest
 
-from creative.repository import CreativeRepository
+from creative.legacy_sqlite_repository import CreativeRepository
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from creative.workflow_identity import WorkflowIdentityResolver
 from identity.repository import IdentityRepository

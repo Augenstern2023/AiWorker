@@ -182,7 +182,11 @@ class OriginalProjectService:
         # membership and the first three tasks committed behind it.
         with self.workflow_transaction(connection) as active:
             self.workflow_repository.ensure_project_creator(
-                scoped_project_id, actor.user_id, actor, connection=active
+                scoped_project_id,
+                actor.user_id,
+                actor,
+                project_uid=str(project.get("project_uid") or "") or None,
+                connection=active,
             )
             if project.get("workflow_mode") == "free":
                 return
@@ -193,6 +197,7 @@ class OriginalProjectService:
                     task_type=task_type,
                     role_code=role_code,
                     actor=actor,
+                    project_uid=str(project.get("project_uid") or "") or None,
                     connection=active,
                 )
                 if task_type == "brief":

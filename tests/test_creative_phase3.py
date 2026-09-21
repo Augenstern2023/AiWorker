@@ -8,7 +8,7 @@
 #
 
 from creative.hit_breakdown import breakdown_field_guide, build_breakdown
-from creative.repository import CreativeRepository
+from creative.legacy_sqlite_repository import CreativeRepository
 from creative.topic_service import TopicService
 
 

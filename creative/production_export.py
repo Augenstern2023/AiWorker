@@ -42,6 +42,7 @@ from collections.abc import Iterable
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -114,6 +115,9 @@ def _digest(value: Any) -> str:
 def _row(raw: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(raw)
     for key, value in tuple(result.items()):
+        if isinstance(value, UUID):
+            result[key] = str(value)
+            value = result[key]
         if isinstance(value, datetime):
             if value.tzinfo is None:
                 value = value.replace(tzinfo=timezone.utc)

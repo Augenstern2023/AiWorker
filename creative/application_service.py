@@ -476,6 +476,7 @@ class CreativeApplicationService:
             task_type=stage,
             role_code=role_code,
             actor=actor,
+            project_uid=str(project.get("project_uid") or "") or None,
             writer_operation_id=operation_id,
         )
         if task["status"] not in {"pool", "assigned", "in_progress", "returned"}:
@@ -1033,6 +1034,7 @@ class CreativeApplicationService:
         blocked_terms: list[str] | None = None,
         reference_snapshot: list[dict[str, Any]] | None = None,
         llm_model_record_id: str | None = None,
+        reasoning_effort: str | None = None,
         expected_context: dict[str, Any] | None = None,
         retry_failed_operation: bool = False,
     ) -> dict[str, Any]:
@@ -1055,7 +1057,14 @@ class CreativeApplicationService:
             blocked_terms=blocked_terms,
             reference_snapshot=reference_snapshot,
             llm_model_record_id=llm_model_record_id,
-            chunk_size=2 if stage == "script" and series else 10,
+            reasoning_effort=reasoning_effort,
+            chunk_size=(
+                2
+                if stage == "script" and series
+                else 1
+                if stage == "beats" and series
+                else 10
+            ),
             expected_context=expected_context,
             retry_failed_operation=retry_failed_operation,
         )

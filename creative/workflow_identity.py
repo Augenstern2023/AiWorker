@@ -41,6 +41,18 @@ class WorkflowIdentityResolver:
             creator_user_id=evidence["created_by"],
         )
 
+    def project_reference(self, local_project_id: int | str) -> tuple[str, str]:
+        """Return the canonical workflow key and permanent UUID for one project."""
+
+        local_id = int(local_project_id)
+        project = self.creative_repository.get_project(local_id)
+        if project is None:
+            raise KeyError(local_id)
+        project_uid = str(project.get("project_uid") or "").strip()
+        if not project_uid:
+            raise RuntimeError("creative project has no permanent identity")
+        return self.creative_repository.workflow_project_id(local_id), project_uid
+
     def project_candidates(self, local_project_id: int | str) -> tuple[str, ...]:
         local_id = int(local_project_id)
         scoped_id = self.creative_repository.workflow_project_id(local_id)

@@ -78,6 +78,7 @@ def test_archive_is_deterministic_complete_and_writer_readable(
     postgres_creative, archive_project,
 ):
     package = export_production_package(postgres_creative, archive_project)
+    assert isinstance(package["project"]["project_uid"], str)
 
     first = build_production_archive(package)
     second = build_production_archive(package)

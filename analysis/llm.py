@@ -22,6 +22,8 @@ import os
 import json
 import logging
 import re
+import time
+import uuid
 from typing import Any, Callable, Dict, List
 from urllib.parse import urlsplit
 
@@ -50,9 +52,50 @@ def _default_llm_settings_repository() -> Any | None:
     return runtime_settings_repository()
 
 
-SUPPORTED_REASONING_EFFORTS = frozenset(
-    {"none", "low", "medium", "high", "xhigh", "max"}
+REASONING_EFFORT_CHOICES = (
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
 )
+SUPPORTED_REASONING_EFFORTS = frozenset(REASONING_EFFORT_CHOICES)
+_MODEL_REASONING_EFFORTS = (
+    (
+        re.compile(r"^gpt-5\.6-sol(?:-\d{4}-\d{2}-\d{2})?$"),
+        REASONING_EFFORT_CHOICES,
+    ),
+    (
+        re.compile(r"^gpt-5\.6-luna(?:-\d{4}-\d{2}-\d{2})?$"),
+        REASONING_EFFORT_CHOICES,
+    ),
+)
+
+
+def reasoning_efforts_for_model(model: str) -> tuple[str, ...]:
+    """Return only reasoning efforts explicitly supported by a known model.
+
+    Unknown and non-reasoning models deliberately return an empty tuple so
+    callers omit the parameter instead of guessing or silently downgrading.
+    """
+    normalized = str(model or "").strip().lower().rsplit("/", 1)[-1]
+    for pattern, efforts in _MODEL_REASONING_EFFORTS:
+        if pattern.fullmatch(normalized):
+            return efforts
+    return ()
+
+
+def apply_reasoning_effort_override(provider: Any, requested: str) -> None:
+    """Apply one explicit per-request effort without coercion or fallback."""
+    normalized = str(requested or "").strip().lower()
+    if not normalized:
+        return
+    supported = reasoning_efforts_for_model(str(getattr(provider, "model", "")))
+    if normalized not in supported:
+        model = str(getattr(provider, "model", "") or "未知模型")
+        raise LLMError(f"模型 {model} 不支持推理档位 {normalized}")
+    provider.reasoning_effort = normalized
 LOW_REASONING_MARKERS = (
     "提取",
     "抽取",
@@ -238,6 +281,15 @@ class OpenAICompatibleLLMProvider(LLMProvider):
     def usage_snapshot(self) -> dict[str, Any]:
         return get_llm_usage_snapshot(self)
 
+    def _http_timeout(self) -> httpx.Timeout:
+        read_seconds = max(1.0, float(self.timeout))
+        return httpx.Timeout(
+            connect=min(10.0, read_seconds),
+            write=min(30.0, read_seconds),
+            read=read_seconds,
+            pool=min(10.0, read_seconds),
+        )
+
     def _record_usage(self, payload: Any, *, responses: bool) -> None:
         usage = payload.get("usage") if isinstance(payload, dict) else None
         if not isinstance(usage, dict):
@@ -332,6 +384,17 @@ class OpenAICompatibleLLMProvider(LLMProvider):
     def _effective_max_output_tokens(self) -> int | None:
         return 0 if self.max_output_tokens_rejected else self.max_output_tokens
 
+    def _reasoning_effort_for_request(
+        self, model: str, messages: List[Dict[str, str]]
+    ) -> str:
+        supported = reasoning_efforts_for_model(model)
+        if not supported:
+            return ""
+        resolved = resolve_reasoning_effort(self.reasoning_effort, messages)
+        if resolved not in supported:
+            raise LLMError(f"模型 {model} 不支持推理档位 {resolved}")
+        return resolved
+
     async def _complete_text_with_model(self, model: str, messages: List[Dict[str, str]], json_mode: bool, api_key: str, json_schema: Dict[str, Any] | None = None) -> str:
         schema = self._effective_json_schema(json_schema)
         max_output_tokens = self._effective_max_output_tokens()
@@ -385,8 +448,8 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             model or self.model,
             messages,
             json_mode=json_mode,
-            reasoning_effort=resolve_reasoning_effort(
-                self.reasoning_effort, messages
+            reasoning_effort=self._reasoning_effort_for_request(
+                model, messages
             ),
             max_output_tokens=max_output_tokens,
             json_schema=json_schema,
@@ -413,8 +476,8 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             model or self.model,
             messages,
             json_mode=json_mode,
-            reasoning_effort=resolve_reasoning_effort(
-                self.reasoning_effort, messages
+            reasoning_effort=self._reasoning_effort_for_request(
+                model, messages
             ),
             max_output_tokens=max_output_tokens,
             json_schema=json_schema,
@@ -433,14 +496,47 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         request_body: Dict[str, Any],
     ) -> httpx.Response:
         async with httpx.AsyncClient(
-            timeout=self.timeout,
+            timeout=self._http_timeout(),
             transport=self.transport,
             trust_env=False,
         ) as client:
             for attempt in range(self.max_retries + 1):
+                request_prefix = re.sub(
+                    r"[^A-Za-z0-9._:-]+",
+                    "-",
+                    str(getattr(self, "request_id_prefix", "") or "llm"),
+                ).strip("-")[:120] or "llm"
+                client_request_id = f"{request_prefix}-{uuid.uuid4().hex}"
+                attempt_headers = {**headers, "X-Request-ID": client_request_id}
+                attempt_started_at = time.monotonic()
+                self.last_request_summary.update(
+                    {
+                        "client_request_id": client_request_id,
+                        "gateway_request_id": "",
+                        "request_attempt": attempt + 1,
+                        "request_elapsed_seconds": 0.0,
+                        "timeout_phase": "",
+                        "exception_type": "",
+                    }
+                )
                 try:
                     self._usage["call_count"] += 1
-                    response = await client.post(endpoint, headers=headers, json=request_body)
+                    response = await client.post(
+                        endpoint, headers=attempt_headers, json=request_body
+                    )
+                    self.last_request_summary.update(
+                        {
+                            "gateway_request_id": str(
+                                response.headers.get("x-request-id")
+                                or response.headers.get("request-id")
+                                or response.headers.get("x-trace-id")
+                                or ""
+                            ),
+                            "request_elapsed_seconds": round(
+                                time.monotonic() - attempt_started_at, 3
+                            ),
+                        }
+                    )
                     # Account for the supplier response before content parsing,
                     # truncation checks, or HTTP errors can leave this attempt.
                     try:
@@ -451,6 +547,26 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                     response.raise_for_status()
                     return response
                 except Exception as exc:
+                    timeout_phase = (
+                        "read"
+                        if isinstance(exc, httpx.ReadTimeout)
+                        else "connect"
+                        if isinstance(exc, httpx.ConnectTimeout)
+                        else "write"
+                        if isinstance(exc, httpx.WriteTimeout)
+                        else "pool"
+                        if isinstance(exc, httpx.PoolTimeout)
+                        else ""
+                    )
+                    self.last_request_summary.update(
+                        {
+                            "request_elapsed_seconds": round(
+                                time.monotonic() - attempt_started_at, 3
+                            ),
+                            "exception_type": type(exc).__name__,
+                            "timeout_phase": timeout_phase,
+                        }
+                    )
                     reason = (
                         f"模型响应超时（{self.timeout} 秒）"
                         if isinstance(exc, httpx.TimeoutException)
@@ -462,7 +578,11 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                     )
                     if not retryable or attempt >= self.max_retries:
                         if isinstance(exc, httpx.TimeoutException):
-                            raise LLMTimeoutError(reason) from exc
+                            timeout_error = LLMTimeoutError(reason)
+                            timeout_error.request_summary = dict(
+                                self.last_request_summary
+                            )
+                            raise timeout_error from exc
                         raise
                     retry_number = attempt + 1
                     if self.retry_callback:
@@ -584,7 +704,9 @@ def resolve_reasoning_effort(
     normalized = str(configured or "auto").strip().lower()
     if normalized in SUPPORTED_REASONING_EFFORTS:
         return normalized
-    return select_reasoning_effort(messages)
+    if normalized == "auto":
+        return select_reasoning_effort(messages)
+    raise LLMError(f"不支持的推理档位 {normalized}")
 
 
 def provider_defaults(provider: str) -> Dict[str, str]:
@@ -861,6 +983,23 @@ def create_llm_provider_from_config(
     if selected_settings is not None:
         settings.update(selected_settings)
         settings["max_output_tokens"] = resolved_max_output_tokens
+    model_reasoning_efforts = reasoning_efforts_for_model(
+        str(settings.get("model") or "")
+    )
+    configured_reasoning_effort = str(
+        settings.get("reasoning_effort") or ""
+    ).strip().lower()
+    if not model_reasoning_efforts:
+        settings["reasoning_effort"] = ""
+    elif (
+        configured_reasoning_effort
+        and configured_reasoning_effort != "auto"
+        and configured_reasoning_effort not in model_reasoning_efforts
+    ):
+        raise LLMError(
+            f"模型 {settings.get('model')} 不支持配置的推理档位 "
+            f"{configured_reasoning_effort}"
+        )
     provider_id = str(settings.get("provider_id") or "")
     api_key_resolver = None
     if settings_repository is not None and provider_id:

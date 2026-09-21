@@ -548,6 +548,8 @@ def test_free_workspace_uses_shared_per_request_model_selector():
     assert "payload.llm_model_record_id" in creative
     assert "modelOptions: []" in tasks
     assert 'x-model="creativeWorkspace.freeGeneration.modelRecordId"' in modal
+    assert 'x-model="creativeWorkspace.freeGeneration.reasoningEffort"' in modal
+    assert "payload.reasoning_effort" in creative
     assert "本次切换无需重新输入" in modal
     assert "item.model_label" in navigation
 
@@ -1622,6 +1624,7 @@ def test_sequential_workflow_selects_model_only_when_starting_generation():
     assert 'id="sequential-generation-model"' not in navigation
     assert 'id="sequentialGenerationModelModal"' in modal
     assert 'x-model="creativeWorkspace.sequentialGeneration.modelRecordId"' in modal
+    assert 'x-model="creativeWorkspace.sequentialGeneration.reasoningEffort"' in modal
     assert "openSequentialGenerationModel" in creative
     assert "submitSequentialGeneration" in creative
     assert "llm_model_record_id: modelRecordId" in creative
@@ -1643,7 +1646,7 @@ const calls = [];
 Object.assign(component, {
   creativeWorkspace: {
     project: {id: 4, workflow_mode: 'sequential'},
-    sequentialGeneration: {modelOptions: [], modelRecordId: '', loading: false, error: '', pending: null},
+    sequentialGeneration: {modelOptions: [], modelRecordId: '', reasoningEffort: '', loading: false, error: '', pending: null},
   },
   sequentialGenerationModelModal: {show: () => calls.push('show'), hide: () => calls.push('hide')},
   loadSequentialGenerationModels: async () => {
@@ -1656,20 +1659,32 @@ Object.assign(component, {
   assert.deepEqual(calls, ['show', 'load']);
   assert.equal(component.creativeWorkspace.sequentialGeneration.pending.body.count, 3);
   component.creativeWorkspace.sequentialGeneration.modelRecordId = 'chosen-model';
+  component.creativeWorkspace.sequentialGeneration.reasoningEffort = 'xhigh';
   component.startCreativeGeneration = async (...args) => calls.push(args);
   await component.submitSequentialGeneration();
   assert.equal(calls[2], 'hide');
   assert.equal(calls[3][1].llm_model_record_id, 'chosen-model');
+  assert.equal(calls[3][1].reasoning_effort, 'xhigh');
   assert.equal(calls[3][3].modelConfirmed, true);
   assert.equal(component.creativeWorkspace.sequentialGeneration.pending, null);
   component.creativeWorkspace.sequentialGeneration.pending = {
     url: '/api/creative/projects/4/characters/generate', body: {}, action: 'characters', options: {},
   };
   component.creativeWorkspace.sequentialGeneration.modelRecordId = '';
+  component.creativeWorkspace.sequentialGeneration.reasoningEffort = '';
   component.creativeWorkspace.sequentialGeneration.error = '模型列表暂时不可用';
   await component.submitSequentialGeneration();
   assert.equal(calls[5][1].llm_model_record_id, undefined);
+  assert.equal(calls[5][1].reasoning_effort, undefined);
   assert.equal(calls[5][3].modelConfirmed, true);
+  component.creativeWorkspace.sequentialGeneration.pending = {
+    url: '/api/creative/projects/4/outlines/generate', body: {}, action: 'outlines', options: {},
+  };
+  component.creativeWorkspace.sequentialGeneration.defaultModelRecordId = 'default-model';
+  component.creativeWorkspace.sequentialGeneration.reasoningEffort = 'high';
+  await component.submitSequentialGeneration();
+  assert.equal(calls[7][1].llm_model_record_id, 'default-model');
+  assert.equal(calls[7][1].reasoning_effort, 'high');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
     result = subprocess.run(
@@ -1756,10 +1771,12 @@ Object.assign(component, {
   await component.generateProjectBlueprints();
   assert.equal(component.creativeWorkspace.freeGeneration.count, 3);
   component.creativeWorkspace.freeGeneration.modelRecordId = 'model-selected';
+  component.creativeWorkspace.freeGeneration.reasoningEffort = 'max';
   await component.submitFreeCreativeGeneration();
   assert.equal(requests[0].url, '/api/creative/projects/4/free/briefs/generate');
   assert.equal(requests[0].payload.count, 3);
   assert.equal(requests[0].payload.llm_model_record_id, 'model-selected');
+  assert.equal(requests[0].payload.reasoning_effort, 'max');
   component.creativeWorkspace.freeGeneration.count = 5;
   await component.submitFreeCreativeGeneration();
   assert.equal(requests[1].payload.count, 5);

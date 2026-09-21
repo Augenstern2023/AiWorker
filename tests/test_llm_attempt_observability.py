@@ -11,9 +11,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
+
+from analysis.llm import LLMTimeoutError
+from creative import llm_observability
 from creative.llm_observability import (
     active_attempt_reporter,
     build_attempt_reporter,
+    dump_terminal_error,
     format_request_summary,
     set_attempt_reporter,
     summarize_payload_shape,
@@ -221,3 +226,42 @@ def test_set_attempt_reporter_returns_the_previous_reporter():
         assert active_attempt_reporter() is None
     finally:
         set_attempt_reporter(previous)
+
+
+def test_terminal_timeout_diagnostic_keeps_safe_request_correlation(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(llm_observability, "LLM_DEBUG_BASE_DIR", tmp_path)
+    request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+    try:
+        raise httpx.ReadTimeout("timed out", request=request)
+    except httpx.ReadTimeout as cause:
+        try:
+            raise LLMTimeoutError("模型响应超时（600 秒）") from cause
+        except LLMTimeoutError as exc:
+            exc.request_summary = {
+                "client_request_id": "job-7-beats-1-1-attempt",
+                "gateway_request_id": "",
+                "request_attempt": 1,
+                "request_elapsed_seconds": 600.0,
+                "timeout_phase": "read",
+                "exception_type": "ReadTimeout",
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "xhigh",
+                "input_chars": 12000,
+            }
+            path = dump_terminal_error("job-7", exc)
+
+    diagnostic = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert diagnostic["cause_type"] == "ReadTimeout"
+    assert diagnostic["request"] == {
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "xhigh",
+        "client_request_id": "job-7-beats-1-1-attempt",
+        "gateway_request_id": "",
+        "exception_type": "ReadTimeout",
+        "timeout_phase": "read",
+        "input_chars": 12000,
+        "request_attempt": 1,
+        "request_elapsed_seconds": 600.0,
+    }

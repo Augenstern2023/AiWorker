@@ -146,9 +146,10 @@ def test_episode_workspace_all_view_and_multi_download_modal(
               window.appData = () => Object.assign({}, methods, {
                 creativeWorkspace: {
                   project: {id: 9, target_episode_count: 2, workflow_mode: 'free'},
-                  selectedEpisode: 0,
-                  episodeDownload: {stage: '', selectedEpisodes: [], allEpisodes: true, format: 'md'},
-                  startingAction: '', activeAction: ''
+                      selectedEpisode: 0,
+                      episodeDownload: {stage: '', selectedEpisodes: [], allEpisodes: true, format: 'md'},
+                      videoParameters: {record: null},
+                      startingAction: '', activeAction: ''
                 },
                 stageItems: items,
                 projectStageEpisodeItems(value) { return value === stage ? this.stageItems : []; },

@@ -15,14 +15,18 @@ import json
 from pathlib import Path
 import threading
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import config
+import httpx
 
 from analysis.llm import (
     LLMOutputTruncatedError,
+    LLMTimeoutError,
+    apply_reasoning_effort_override,
     create_llm_provider_from_config,
     get_llm_usage_snapshot,
+    reasoning_efforts_for_model,
 )
 from core.events import emit_event
 from core.job import CrawlJob
@@ -63,7 +67,8 @@ from system_database import SystemDatabase, SystemDatabaseSettings
 
 
 MAX_INLINE_SOURCE_SNAPSHOT_BYTES = 2 * 1024 * 1024
-BEATS_SERIES_CHUNK_SIZE = 10
+DEFAULT_BEATS_SERIES_CHUNK_SIZE = 1
+MAX_BEATS_SERIES_CHUNK_SIZE = 2
 
 
 def create_provider(model_record_id: str | None = None):
@@ -76,9 +81,87 @@ def create_provider(model_record_id: str | None = None):
 
 def _create_generation_provider(extra: dict[str, Any]) -> Any:
     model_record_id = str(extra.get("llm_model_record_id") or "").strip()
-    if model_record_id:
-        return create_provider(model_record_id)
-    return create_provider()
+    provider = (
+        create_provider(model_record_id) if model_record_id else create_provider()
+    )
+    requested_effort = str(extra.get("reasoning_effort") or "").strip().lower()
+    if not requested_effort and str(extra.get("action") or "") == "beats":
+        if reasoning_efforts_for_model(str(getattr(provider, "model", "") or "")):
+            requested_effort = str(
+                getattr(config, "CREATIVE_BEATS_REASONING_EFFORT", "xhigh")
+                or "xhigh"
+            ).strip().lower()
+    apply_reasoning_effort_override(provider, requested_effort)
+    if str(extra.get("action") or "") == "beats":
+        setattr(provider, "retry_read_timeouts", False)
+    return provider
+
+
+def _resolve_beats_series_chunk_size(extra: dict[str, Any]) -> int:
+    raw = extra.get("chunk_size", DEFAULT_BEATS_SERIES_CHUNK_SIZE)
+    try:
+        requested = int(raw)
+    except (TypeError, ValueError):
+        requested = DEFAULT_BEATS_SERIES_CHUNK_SIZE
+    return max(1, min(MAX_BEATS_SERIES_CHUNK_SIZE, requested))
+
+
+def _is_read_timeout(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        if isinstance(current, httpx.ReadTimeout):
+            return True
+        visited.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _beats_split_reason(exc: BaseException) -> str | None:
+    if isinstance(exc, LLMOutputTruncatedError):
+        return "output_truncated"
+    if isinstance(exc, LLMTimeoutError) and _is_read_timeout(exc):
+        return "read_timeout"
+    return None
+
+
+async def _run_bisecting_beats_range(
+    range_start: int,
+    range_end: int,
+    run_range: Callable[[int, int], Awaitable[None]],
+    on_split: Callable[[dict[str, object]], Awaitable[None]],
+) -> None:
+    try:
+        await run_range(range_start, range_end)
+        return
+    except Exception as exc:
+        split_reason = _beats_split_reason(exc)
+        if split_reason is None or range_start == range_end:
+            raise
+        midpoint = (range_start + range_end - 1) // 2
+        split_payload: dict[str, object] = {
+            "split_reason": split_reason,
+            "split_start": range_start,
+            "split_end": range_end,
+            "left_start": range_start,
+            "left_end": midpoint,
+            "right_start": midpoint + 1,
+            "right_end": range_end,
+            "exception_type": type(exc).__name__,
+            "cause_type": type(exc.__cause__).__name__ if exc.__cause__ else "",
+        }
+        if isinstance(exc, LLMOutputTruncatedError):
+            split_payload.update(
+                finish_reason=exc.finish_reason,
+                returned_chars=exc.returned_chars,
+            )
+        await on_split(split_payload)
+        await _run_bisecting_beats_range(
+            range_start, midpoint, run_range, on_split
+        )
+        await _run_bisecting_beats_range(
+            midpoint + 1, range_end, run_range, on_split
+        )
 
 
 def _provider_generation_meta(
@@ -100,6 +183,9 @@ def _provider_generation_meta(
             or getattr(provider, "model", "")
             or ""
         ),
+        "reasoning_effort": str(
+            getattr(provider, "reasoning_effort", "") or ""
+        ),
     }
 
 
@@ -113,20 +199,27 @@ def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict
     )}
 
 
-def _resolve_outline_reasoning_effort(job: CrawlJob) -> str:
+def _resolve_outline_reasoning_effort(job: CrawlJob, provider: Any) -> str:
+    requested = str(
+        (job.extra or {}).get("reasoning_effort") or ""
+    ).strip().lower()
+    if requested:
+        apply_reasoning_effort_override(provider, requested)
+        return requested
+    supported = reasoning_efforts_for_model(
+        str(getattr(provider, "model", "") or "")
+    )
+    if not supported:
+        return ""
     configured = str(
         getattr(config, "CREATIVE_OUTLINE_REASONING_EFFORT", "high") or "high"
     ).strip().lower()
-    if configured == "high":
-        return "high"
-    emit(
-        job,
-        "log",
-        "CREATIVE_OUTLINE_REASONING_EFFORT 仅支持 high，已回退为 high",
-        "warning",
-        {"stage": "outlines", "configured_reasoning_effort": configured, "reasoning_effort": "high"},
+    if configured == "auto" or configured in supported:
+        return configured
+    raise ValueError(
+        f"模型 {getattr(provider, 'model', '') or '未知模型'} "
+        f"不支持配置的推理档位 {configured}"
     )
-    return "high"
 
 
 async def wait_if_paused(job: CrawlJob) -> None:
@@ -326,13 +419,9 @@ def _generation_context(
     extra: dict[str, Any], source_snapshot: dict[str, Any] | None
 ) -> dict[str, Any] | None:
     instruction = str(extra.get("generation_instruction") or "").strip()
-    if source_snapshot is None and not instruction:
+    if not instruction:
         return None
-    return {
-        "generation_instruction": instruction,
-        "source_snapshot_id": str(extra.get("source_snapshot_id") or ""),
-        "source_snapshot": source_snapshot or {},
-    }
+    return {"generation_instruction": instruction}
 
 
 def _generation_meta(
@@ -352,6 +441,7 @@ def _generation_meta(
         "llm_model_display_name": str(
             extra.get("llm_model_display_name") or ""
         ),
+        "reasoning_effort": str(extra.get("reasoning_effort") or ""),
         "prompt_source": "template" if isinstance(prompt_snapshot, dict) else "system",
         "prompt_ab_experiment_id": str(
             extra.get("prompt_ab_experiment_id") or ""
@@ -446,18 +536,18 @@ async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
         ):
             raise ValueError("server prompt snapshot does not match generation task")
         extra["prompt_snapshot"] = prompt_snapshot
-    context = _generation_context(extra, source_snapshot)
     project = dict(inputs["project"])
+    authority = source_snapshot.get("project") if source_snapshot else None
+    if isinstance(authority, dict):
+        if int(authority.get("id") or project_id) != project_id:
+            raise ValueError("source snapshot project mismatch")
+        if (
+            authority.get("revision") is not None
+            and int(authority["revision"]) != int(project.get("revision") or 0)
+        ):
+            raise ValueError("source snapshot project revision changed")
+    context = _generation_context(extra, source_snapshot)
     if context is not None:
-        authority = source_snapshot.get("project") if source_snapshot else None
-        if isinstance(authority, dict):
-            if int(authority.get("id") or project_id) != project_id:
-                raise ValueError("source snapshot project mismatch")
-            if (
-                authority.get("revision") is not None
-                and int(authority["revision"]) != int(project.get("revision") or 0)
-            ):
-                raise ValueError("source snapshot project revision changed")
         project["generation_context"] = context
     series_generation = bool(extra.get("series")) and action in {"beats", "script"}
     generation_reservation: dict[str, Any] | None = None
@@ -488,17 +578,18 @@ async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
             )
             return
     provider = _create_generation_provider(extra)
+    setattr(provider, "request_id_prefix", f"{job.job_id}-{action}")
     job._llm_usage_providers.append(provider)
+    outline_reasoning_effort = ""
+    if action == "outlines":
+        outline_reasoning_effort = _resolve_outline_reasoning_effort(job, provider)
+        if hasattr(provider, "reasoning_effort"):
+            provider.reasoning_effort = outline_reasoning_effort
     extra.update(
         _provider_generation_meta(
             provider, str(extra.get("llm_model_record_id") or "")
         )
     )
-    outline_reasoning_effort = "high"
-    if action == "outlines":
-        outline_reasoning_effort = _resolve_outline_reasoning_effort(job)
-        if hasattr(provider, "reasoning_effort"):
-            provider.reasoning_effort = outline_reasoning_effort
     total_episodes = (
         int(project.get("target_episode_count") or 0)
         if action == "outlines" or series_generation
@@ -858,7 +949,7 @@ async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
         series_chunk_size = (
             resolve_script_series_chunk_size(provider)
             if action == "script"
-            else BEATS_SERIES_CHUNK_SIZE
+            else _resolve_beats_series_chunk_size(extra)
         )
 
         async def save_series_checkpoint(
@@ -934,12 +1025,17 @@ async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
                 )
             return selected
 
-        async def generate_and_save_beats_range(
+        async def run_and_save_beats_range(
             range_start: int, range_end: int
         ) -> None:
             nonlocal retry_completed
             retry_completed = range_start - 1
             await wait_if_paused(job)
+            setattr(
+                provider,
+                "request_id_prefix",
+                f"{job.job_id}-beats-{range_start}-{range_end}",
+            )
             outlines = locked_outlines_for_range(range_start, range_end)
             prior = repository.compatible_locked_beats(
                 project, range(1, range_start)
@@ -955,6 +1051,23 @@ async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
                     continuity_ledger=build_continuity_ledger(prior),
                     prompt_snapshot=prompt_snapshot or None,
                 )
+                request_summary = dict(
+                    getattr(provider, "last_request_summary", None) or {}
+                )
+                meta.update(
+                    {
+                        "client_request_id": str(
+                            request_summary.get("client_request_id") or ""
+                        ),
+                        "gateway_request_id": str(
+                            request_summary.get("gateway_request_id") or ""
+                        ),
+                        "input_chars": int(request_summary.get("input_chars") or 0),
+                        "request_elapsed_seconds": float(
+                            request_summary.get("request_elapsed_seconds") or 0.0
+                        ),
+                    }
+                )
             except LLMOutputTruncatedError as exc:
                 if range_start == range_end:
                     raise LLMOutputTruncatedError(
@@ -962,34 +1075,80 @@ async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
                         "请提高模型输出上限或减少单集字段内容",
                         finish_reason=exc.finish_reason,
                         returned_chars=exc.returned_chars,
+                        partial_text=exc.partial_text,
                     ) from exc
-                midpoint = (range_start + range_end - 1) // 2
-                emit(
-                    job,
-                    "progress",
-                    f"第 {range_start}-{range_end} 集 Beats 输出达到上限，"
-                    f"自动拆分为第 {range_start}-{midpoint} 集和"
-                    f"第 {midpoint + 1}-{range_end} 集",
-                    "warning",
-                    {
-                        "stage": action,
-                        "completed": range_start - 1,
-                        "total": total_episodes,
-                        "split_start": range_start,
-                        "split_end": range_end,
-                        "left_start": range_start,
-                        "left_end": midpoint,
-                        "right_start": midpoint + 1,
-                        "right_end": range_end,
-                        "finish_reason": exc.finish_reason,
-                        "returned_chars": exc.returned_chars,
-                    },
-                )
-                await generate_and_save_beats_range(range_start, midpoint)
-                await generate_and_save_beats_range(midpoint + 1, range_end)
-                return
+                raise
+            except LLMTimeoutError as exc:
+                if range_start == range_end and _is_read_timeout(exc):
+                    timeout_error = LLMTimeoutError(
+                        f"第 {range_start} 集 Beats 生成读取响应超时；"
+                        "该请求未在 provider 层原样重试"
+                    )
+                    timeout_error.request_summary = dict(
+                        getattr(exc, "request_summary", None)
+                        or getattr(provider, "last_request_summary", None)
+                        or {}
+                    )
+                    raise timeout_error from exc
+                raise
             await save_series_checkpoint(
                 range_start, range_end, checkpoint_items, meta
+            )
+
+        async def report_beats_split(payload: dict[str, object]) -> None:
+            split_reason = str(payload["split_reason"])
+            split_start = int(payload["split_start"])
+            split_end = int(payload["split_end"])
+            left_start = int(payload["left_start"])
+            left_end = int(payload["left_end"])
+            right_start = int(payload["right_start"])
+            right_end = int(payload["right_end"])
+            reason_text = (
+                "输出达到上限"
+                if split_reason == "output_truncated"
+                else "读取模型响应超时"
+            )
+            emit(
+                job,
+                "progress",
+                f"第 {split_start}-{split_end} 集 Beats {reason_text}，"
+                f"自动拆分为第 {left_start}-{left_end} 集和"
+                f"第 {right_start}-{right_end} 集",
+                "warning",
+                {
+                    "stage": action,
+                    "completed": split_start - 1,
+                    "total": total_episodes,
+                    "request": {
+                        key: value
+                        for key, value in dict(
+                            getattr(provider, "last_request_summary", None) or {}
+                        ).items()
+                        if key
+                        in {
+                            "client_request_id",
+                            "gateway_request_id",
+                            "request_attempt",
+                            "request_elapsed_seconds",
+                            "input_chars",
+                            "model",
+                            "reasoning_effort",
+                            "timeout_phase",
+                            "exception_type",
+                        }
+                    },
+                    **payload,
+                },
+            )
+
+        async def generate_and_save_beats_range(
+            range_start: int, range_end: int
+        ) -> None:
+            await _run_bisecting_beats_range(
+                range_start,
+                range_end,
+                run_and_save_beats_range,
+                report_beats_split,
             )
 
         if action == "beats":

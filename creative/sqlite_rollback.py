@@ -404,6 +404,8 @@ def sqlite_value(column: str, value: Any, spec: CreativeTableSpec) -> Any:
     if column in spec.boolean_columns:
         flag = coerce_boolean(value)
         return None if flag is None else int(flag)
+    if isinstance(value, uuid.UUID):
+        return str(value)
     return value
 
 

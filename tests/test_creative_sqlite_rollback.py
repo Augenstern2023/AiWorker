@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -302,12 +303,22 @@ def test_rollback_round_trip_is_lossless_per_table(
         assert _identities(destination, table) == _identities(
             legacy_creative_db, table
         ), table
-        assert table_digest(exported_rows, spec) == table_digest(
+        source_columns = set().union(*(row.keys() for row in source_rows))
+        legacy_exported_rows = [
+            {key: value for key, value in row.items() if key in source_columns}
+            for row in exported_rows
+        ]
+        assert table_digest(legacy_exported_rows, spec) == table_digest(
             source_rows, spec
         ), table
         # ...and the digest is the one the forward importer computed.
-        assert table_digest(exported_rows, spec) == source_inspection.digests[table]
-        assert report.digests[table] == source_inspection.digests[table]
+        assert (
+            table_digest(legacy_exported_rows, spec)
+            == source_inspection.digests[table]
+        )
+
+    exported_project = _sqlite_rows(destination, "creative_projects")[0]
+    uuid.UUID(exported_project["project_uid"])
 
     assert _store_id(destination) == _store_id(legacy_creative_db) == STORE_ID
     # The frozen legacy DDL still lacks the breakdown snapshot reference; the

@@ -44,6 +44,7 @@ from analysis.llm import (
     parse_chat_completion_json,
     parse_json_object,
     parse_responses_text,
+    reasoning_efforts_for_model,
     resolve_reasoning_effort,
     resolve_llm_settings,
     select_reasoning_effort,
@@ -332,10 +333,11 @@ def test_resolve_reasoning_effort_preserves_explicit_override(configured):
     assert resolve_reasoning_effort(configured, messages) == configured
 
 
-def test_resolve_reasoning_effort_treats_invalid_configuration_as_auto():
+def test_resolve_reasoning_effort_rejects_invalid_configuration():
     messages = [{"role": "user", "content": "请提取标题并分类"}]
 
-    assert resolve_reasoning_effort("turbo", messages) == "low"
+    with pytest.raises(LLMError, match="不支持的推理档位 turbo"):
+        resolve_reasoning_effort("turbo", messages)
 
 
 def test_parse_responses_text_reads_output_text():
@@ -611,7 +613,10 @@ def test_chat_completions_retries_transient_gateway_errors_before_succeeding():
     assert all("502" in reason for _, _, reason in retries)
 
 
-def test_chat_completions_passes_reasoning_effort_to_compatible_gateway():
+@pytest.mark.parametrize(
+    "selected_effort", ["none", "low", "medium", "high", "xhigh", "max"]
+)
+def test_chat_completions_passes_exact_selected_reasoning_effort(selected_effort):
     request_body = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -625,13 +630,89 @@ def test_chat_completions_passes_reasoning_effort_to_compatible_gateway():
     provider = OpenAICompatibleLLMProvider(
         base_url="https://example.test/v1",
         api_key="key",
-        model="deepseek-v4-pro",
-        reasoning_effort="max",
+        model="gpt-5.6-sol",
+        reasoning_effort=selected_effort,
         transport=httpx.MockTransport(handler),
     )
 
     assert asyncio.run(provider.complete_text([{"role": "user", "content": "test"}], json_mode=True)) == '{"ok": true}'
-    assert request_body["reasoning_effort"] == "max"
+    assert request_body["reasoning_effort"] == selected_effort
+
+
+@pytest.mark.parametrize(
+    "model", ["gemini-3.5-flash", "claude-sonnet-5", "deepseek-v4-pro", "MiniMax-M3"]
+)
+def test_provider_omits_reasoning_effort_for_models_without_capability(model):
+    request_body = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_body.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+        )
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model=model,
+        reasoning_effort="max",
+        transport=httpx.MockTransport(handler),
+    )
+
+    asyncio.run(
+        provider.complete_text([{"role": "user", "content": "test"}], json_mode=True)
+    )
+
+    assert "reasoning_effort" not in request_body
+    assert "reasoning" not in request_body
+
+
+def test_reasoning_effort_capabilities_are_model_specific():
+    assert reasoning_efforts_for_model("gpt-5.6-sol") == (
+        "none", "low", "medium", "high", "xhigh", "max"
+    )
+    assert reasoning_efforts_for_model("openai/gpt-5.6-sol") == (
+        "none", "low", "medium", "high", "xhigh", "max"
+    )
+    assert reasoning_efforts_for_model("gpt-5.6-luna") == (
+        "none", "low", "medium", "high", "xhigh", "max"
+    )
+    assert reasoning_efforts_for_model("gpt-5.5") == ()
+    assert reasoning_efforts_for_model("gemini-3.5-flash") == ()
+
+
+def test_provider_sends_and_records_a_safe_client_request_id():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["client_request_id"] = request.headers.get("x-request-id")
+        return httpx.Response(
+            200,
+            request=request,
+            headers={"x-request-id": "gateway-request-7"},
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+        )
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="gpt-5.6-sol",
+        reasoning_effort="none",
+        transport=httpx.MockTransport(handler),
+    )
+    provider.request_id_prefix = "job-7-beats-1-1"
+
+    asyncio.run(
+        provider.complete_text([{"role": "user", "content": "test"}], json_mode=True)
+    )
+
+    assert captured["client_request_id"].startswith("job-7-beats-1-1-")
+    assert provider.last_request_summary["client_request_id"] == captured["client_request_id"]
+    assert provider.last_request_summary["gateway_request_id"] == "gateway-request-7"
+    assert provider.last_request_summary["request_attempt"] == 1
+    assert provider.last_request_summary["request_elapsed_seconds"] >= 0
 
 
 def test_chat_completions_falls_back_to_configured_model_when_primary_is_unavailable():
@@ -810,6 +891,11 @@ def test_provider_uses_configured_request_timeout_for_long_generation():
     assert provider.timeout == 600
     assert provider.max_retries == 4
     assert provider.retry_base_delay == 2
+    timeout = provider._http_timeout()
+    assert timeout.connect == 10
+    assert timeout.write == 30
+    assert timeout.read == 600
+    assert timeout.pool == 10
 
 
 def test_prefixed_llm_profile_can_disable_global_retries():
@@ -921,10 +1007,38 @@ def test_chat_completions_reports_the_configured_timeout_after_retries():
         retry_callback=lambda number, total, reason: retries.append((number, total, reason)),
     )
 
-    with pytest.raises(LLMError, match="模型响应超时（600 秒）"):
+    with pytest.raises(LLMError, match="模型响应超时（600 秒）") as caught:
         asyncio.run(provider.complete_text([{"role": "user", "content": "test"}]))
 
     assert retries == [(1, 1, "模型响应超时（600 秒）")]
+    assert provider.last_request_summary["timeout_phase"] == "read"
+    assert caught.value.request_summary["client_request_id"]
+    assert caught.value.request_summary["timeout_phase"] == "read"
+
+
+def test_read_timeout_is_not_retried_when_disabled():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("", request=request)
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="gpt-5.6-sol",
+        timeout=600,
+        max_retries=4,
+        retry_base_delay=0,
+        retry_read_timeouts=False,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(LLMTimeoutError):
+        asyncio.run(provider.complete_text([{"role": "user", "content": "test"}]))
+
+    assert calls == 1
 
 
 def test_rag_llm_inherits_the_global_text_model_settings():
@@ -1150,6 +1264,7 @@ def test_provider_factory_does_not_decrypt_unrelated_default_for_explicit_model(
     assert provider.provider_id == "burncloud-provider"
     assert provider.model == "gemini-3.5-flash"
     assert provider.api_key == "burncloud-key"
+    assert provider.reasoning_effort == ""
 
 
 def _ok_chat_handler(request: httpx.Request) -> httpx.Response:

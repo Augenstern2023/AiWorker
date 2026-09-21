@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from creative.repository import CreativeRepository
+from creative.legacy_sqlite_repository import CreativeRepository
 
 
 def valid_original_brief(title: str) -> dict[str, Any]:

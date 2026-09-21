@@ -49,8 +49,13 @@ def test_breakdown_generation_selects_and_submits_model_record() -> None:
                         return {
                           default_model_record_id: 'model-1',
                           items: [
-                            {id: 'model-1', label: '默认模型', is_default: true},
-                            {id: 'model-2', label: '拆解专用模型', is_default: false}
+                            {id: 'model-1', label: '默认模型', is_default: true,
+                             reasoning_effort_options: []},
+                            {id: 'model-2', label: '拆解专用模型', is_default: false,
+                             reasoning_effort_options: [
+                               {value: 'low', label: '低'},
+                               {value: 'high', label: '高'}
+                             ]}
                           ]
                         };
                       }
@@ -93,7 +98,9 @@ def test_breakdown_generation_selects_and_submits_model_record() -> None:
                   message: '', progress: {}, coverage: [], requiresTranscription: false,
                   notifiedStatus: '', error: '', startedAt: 0, elapsedSeconds: 0,
                   logs: [], logCount: 0, showLogs: false, modelOptions: [],
-                  modelRecordId: '', modelsLoading: false
+                  modelRecordId: '', defaultModelRecordId: '',
+                  reasoningEffortOptions: [], reasoningEffort: '',
+                  modelsLoading: false
                 },
                 breakdownGenerationJobs: {},
                 breakdownJobStatuses: {},
@@ -128,6 +135,8 @@ def test_breakdown_generation_selects_and_submits_model_record() -> None:
             "document.querySelectorAll('#breakdown-generation-model option').length === 3"
         )
         selector.select_option("model-2")
+        effort_selector = page.locator("#breakdown-generation-reasoning-effort")
+        effort_selector.select_option("high")
         page.get_by_role("button", name="开始生成").click()
         page.wait_for_function(
             "window.__breakdownRequests.some(item => item.url === '/api/creative/breakdowns')"
@@ -144,7 +153,9 @@ def test_breakdown_generation_selects_and_submits_model_record() -> None:
             "topic_id": 7,
             "force_regenerate": False,
             "llm_model_record_id": "model-2",
+            "reasoning_effort": "high",
         }
         assert selector.is_disabled()
+        assert effort_selector.is_disabled()
         assert not errors
         browser.close()

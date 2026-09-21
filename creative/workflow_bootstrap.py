@@ -45,6 +45,12 @@ class WorkflowBootstrapService:
         if topic is None:
             raise KeyError(topic_id)
         self._assert_authorized(actor, project_id)
+        project = (
+            self.creative_repository.get_project(int(project_id))
+            if project_id is not None
+            else None
+        )
+        project_uid = str((project or {}).get("project_uid") or "") or None
         task = self.workflow_repository.ensure_topic_task(
             topic_id,
             task_type="topic_decision",
@@ -55,6 +61,7 @@ class WorkflowBootstrapService:
                 if project_id is not None
                 else None
             ),
+            project_uid=project_uid,
             workflow_scope=self.creative_repository.workflow_topic_id(topic_id),
         )
         if self.audit_service is not None:
@@ -82,6 +89,9 @@ class WorkflowBootstrapService:
                 "project.manage permission is required to bootstrap workflow"
             )
         if project_id is not None and not live_actor["is_system_admin"]:
+            project = self.creative_repository.get_project(int(project_id)) or {}
             self.workflow_repository.assert_can_manage_project(
-                self.creative_repository.workflow_project_id(project_id), actor
+                self.creative_repository.workflow_project_id(project_id),
+                actor,
+                project_uid=str(project.get("project_uid") or "") or None,
             )

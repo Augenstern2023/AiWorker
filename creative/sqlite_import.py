@@ -1228,9 +1228,17 @@ def _verify_sequence_headroom(
 
 
 def _read_target_state(
-    connection: Connection, specs: Sequence[CreativeTableSpec]
+    connection: Connection,
+    specs: Sequence[CreativeTableSpec],
+    source_columns: Mapping[str, frozenset[str]],
 ) -> tuple[dict[str, str], dict[str, int], dict[str, Any]]:
-    """Digest, count and range every target table using the same canonical form."""
+    """Digest, count and range target rows using the legacy source shape.
+
+    PostgreSQL may add generated target-only columns after the SQLite store was
+    retired. Those values cannot be byte-identical to a source that never had
+    them, so verification projects target rows onto the columns actually
+    present in each legacy table before canonicalising them.
+    """
 
     digests: dict[str, str] = {}
     counts: dict[str, int] = {}
@@ -1239,8 +1247,13 @@ def _read_target_state(
         table = CREATIVE_METADATA.tables[spec.name]
         rows = [dict(row) for row in connection.execute(select(table)).mappings().all()]
         rows.sort(key=lambda row: _sort_key(row, spec))
+        legacy_columns = source_columns.get(spec.name)
         hasher = hashlib.sha256()
         for index, row in enumerate(rows):
+            if legacy_columns is not None:
+                row = {
+                    key: value for key, value in row.items() if key in legacy_columns
+                }
             hasher.update(canonical_row(row, spec, index=index))
             hasher.update(b"\n")
         digests[spec.name] = hasher.hexdigest()
@@ -1348,6 +1361,11 @@ def import_sqlite_creative(
     with open_read_only(source) as source_connection:
         schema_fingerprint = source_schema_fingerprint(source_connection)
         present = set(_source_tables(source_connection))
+        source_columns = {
+            spec.name: frozenset(_source_columns(source_connection, spec.name))
+            for spec in BUSINESS_TABLE_SPECS
+            if spec.name in present
+        }
         source_rows = {
             spec.name: [dict(row) for row in _fetch_rows(source_connection, spec.name)]
             for spec in BUSINESS_TABLE_SPECS
@@ -1386,7 +1404,7 @@ def import_sqlite_creative(
                 connection, BUSINESS_TABLE_SPECS, maximums
             )
             digests, target_counts, ranges = _read_target_state(
-                connection, BUSINESS_TABLE_SPECS
+                connection, BUSINESS_TABLE_SPECS, source_columns
             )
     except Exception as exc:  # noqa: BLE001 - every failure must be recorded
         _record_import_run(
@@ -1590,10 +1608,16 @@ def verify_creative_import(
 
     with open_read_only(source) as source_connection:
         schema_fingerprint = source_schema_fingerprint(source_connection)
+        present = set(_source_tables(source_connection))
+        source_columns = {
+            spec.name: frozenset(_source_columns(source_connection, spec.name))
+            for spec in BUSINESS_TABLE_SPECS
+            if spec.name in present
+        }
 
     with database.connection() as connection:
         digests, target_counts, ranges = _read_target_state(
-            connection, BUSINESS_TABLE_SPECS
+            connection, BUSINESS_TABLE_SPECS, source_columns
         )
         # Only identity-backed tables have a sequence to reason about; a TEXT
         # primary key such as selection_stage_snapshots.id has none.

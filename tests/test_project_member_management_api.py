@@ -30,6 +30,7 @@ from identity.session_service import SessionService
 from system_database import SystemDatabase, SystemDatabaseSettings
 from workflow.api import build_workflow_router
 from workflow.repository import WorkflowRepository
+from workflow import SYSTEM_ACTOR
 
 
 def _postgres_identity(
@@ -56,6 +57,73 @@ def _role_user(identity: IdentityRepository, role_code: str, label: str) -> dict
     )
     identity.replace_user_roles(user["id"], [role["id"]])
     return user
+
+
+def test_member_route_resolves_local_project_id_before_repository_calls() -> None:
+    calls: list[tuple[str, str, str | None]] = []
+
+    class RecordingIdentityRepository:
+        @staticmethod
+        def get_user(user_id: str) -> dict[str, str]:
+            return {
+                "id": user_id,
+                "username": "creator",
+                "display_name": "项目创建人",
+            }
+
+    class RecordingWorkflowRepository:
+        identity_repository = RecordingIdentityRepository()
+
+        @staticmethod
+        def assert_can_manage_project(
+            project_id: str,
+            principal: object,
+            *,
+            project_uid: str | None = None,
+        ) -> None:
+            del principal
+            calls.append(("assert", project_id, project_uid))
+
+        @staticmethod
+        def list_project_members(
+            project_id: str,
+            *,
+            project_uid: str | None = None,
+        ) -> list[dict[str, str]]:
+            calls.append(("list", project_id, project_uid))
+            return [
+                {
+                    "id": "membership-8",
+                    "project_id": project_id,
+                    "project_uid": project_uid or "",
+                    "user_id": "creator-8",
+                    "project_role": "project_creator",
+                    "status": "active",
+                }
+            ]
+
+    resolved_uid = "3f1d2c4b-5a69-4e78-9b01-2c3d4e5f6a7b"
+    router = build_workflow_router(
+        RecordingWorkflowRepository(),  # type: ignore[arg-type]
+        project_identity_resolver=lambda local_id: (
+            f"creative:store:project:{local_id}",
+            resolved_uid,
+        ),
+    )
+    endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/api/workflow/projects/{project_id}/members"
+        and "GET" in route.methods
+    )
+
+    result = endpoint("8", SYSTEM_ACTOR)
+
+    assert calls == [
+        ("assert", "creative:store:project:8", resolved_uid),
+        ("list", "creative:store:project:8", resolved_uid),
+    ]
+    assert result[0]["project_uid"] == resolved_uid
 
 
 def test_project_creator_can_edit_but_cannot_manage_members(

@@ -135,8 +135,10 @@ def test_breakdown_generation_selects_and_submits_model_record() -> None:
             "document.querySelectorAll('#breakdown-generation-model option').length === 3"
         )
         selector.select_option("model-2")
-        effort_selector = page.locator("#breakdown-generation-reasoning-effort")
-        effort_selector.select_option("high")
+        effort_selector = page.locator(
+            'input[name="breakdown-generation-reasoning-effort"][value="high"]'
+        )
+        effort_selector.check()
         page.get_by_role("button", name="开始生成").click()
         page.wait_for_function(
             "window.__breakdownRequests.some(item => item.url === '/api/creative/breakdowns')"

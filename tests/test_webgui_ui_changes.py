@@ -549,6 +549,8 @@ def test_free_workspace_uses_shared_per_request_model_selector():
     assert "modelOptions: []" in tasks
     assert 'x-model="creativeWorkspace.freeGeneration.modelRecordId"' in modal
     assert 'x-model="creativeWorkspace.freeGeneration.reasoningEffort"' in modal
+    assert 'type="radio" name="free-generation-reasoning-effort"' in modal
+    assert "本次推理档位（单选）" in modal
     assert "payload.reasoning_effort" in creative
     assert "本次切换无需重新输入" in modal
     assert "item.model_label" in navigation
@@ -1642,6 +1644,7 @@ def test_sequential_workflow_selects_model_only_when_starting_generation():
     assert 'id="sequentialGenerationModelModal"' in modal
     assert 'x-model="creativeWorkspace.sequentialGeneration.modelRecordId"' in modal
     assert 'x-model="creativeWorkspace.sequentialGeneration.reasoningEffort"' in modal
+    assert 'type="radio" name="sequential-generation-reasoning-effort"' in modal
     assert "openSequentialGenerationModel" in creative
     assert "submitSequentialGeneration" in creative
     assert "llm_model_record_id: modelRecordId" in creative

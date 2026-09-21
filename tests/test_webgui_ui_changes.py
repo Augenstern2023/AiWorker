@@ -832,8 +832,23 @@ def test_writing_pages_load_optimization_draft_comparison():
     assert ".optimization-diff-line.diff-added" in _source("static/css/workspaces.css")
 
     beats_workspace = _source("templates/common/workspace/project_beats.html")
-    assert beats_workspace.count("data-optimization-draft-conflicting-lock") == 2
-    assert "hideConflictingBeatsLocks" in script
+    module_navigation = _source("templates/common/workspace/project_module_navigation.html")
+    project_progress = _source("templates/common/workspace/project_progress.html")
+    assert 'id="project-beats-workspace"' in beats_workspace
+    assert 'id="writing-beats-page-header"' in beats_template
+    assert 'id="project-module-navigation"' in module_navigation
+    assert 'id="project-generation-progress"' in project_progress
+    assert "function prepareBeatsOptimizationLayout()" in script
+    assert "'optimization-draft-top-actions'" in script
+    assert "actions.append(backLink)" in script
+    assert "prepareBeatsOptimizationLayout();" in script
+    assert "function hideOriginalWorkspace()" in script
+    assert "'project-beats-workspace'" in script
+    assert "'#writing-beats-page-header'" in script
+    assert "'#project-module-navigation'" in script
+    assert "'#project-generation-progress'" in script
+    assert "hideOriginalWorkspace();" in script
+    assert "hideConflictingBeatsLocks" not in script
 
     review_script = _source("static/js/review/scripts.js")
     assert "review_id" in review_script

@@ -1,4 +1,4 @@
-<div class="border-bottom pb-3 mb-3" x-show="creativeWorkspace.startingAction || creativeWorkspace.jobId" x-cloak role="status" aria-live="polite">
+<div id="project-generation-progress" class="border-bottom pb-3 mb-3" x-show="creativeWorkspace.startingAction || creativeWorkspace.jobId" x-cloak role="status" aria-live="polite">
                     <div class="d-flex justify-content-between align-items-center mb-1"><span class="small fw-semibold" x-text="creativeWorkspace.jobMessage || '后台生成中'"></span><span class="small text-muted" x-text="creativeProgressText()"></span></div>
                     <div class="small text-muted mb-2" x-text="creativeProgressElapsedText()"></div>
                     <div class="progress mb-2" style="height:8px" role="progressbar" :aria-valuenow="creativeProgressIndeterminate() ? null : creativeProgressPercent()"><div class="progress-bar" :class="{'progress-bar-striped progress-bar-animated': creativeProgressIndeterminate(), 'bg-danger': creativeWorkspace.jobStatus === 'failed'}" :style="`width:${creativeProgressIndeterminate() ? 100 : creativeProgressPercent()}%`"></div></div>

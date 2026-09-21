@@ -1,7 +1,7 @@
 {% extends "layouts/base.html" %}
 
 {% block page_header %}
-<div class="d-flex justify-content-between align-items-start gap-3 mb-3">
+<div id="writing-beats-page-header" class="d-flex justify-content-between align-items-start gap-3 mb-3">
     <div>
         <h3 class="mb-1">单集节拍表</h3>
         <div class="small text-muted" x-text="creativeWorkspace.selectedEpisode === 0 ? '项目 {{ project_id }} · 全集 · 场景目标、阻力、情绪变化与转折' : `项目 {{ project_id }} · 第 ${creativeWorkspace.selectedEpisode} 集 · 场景目标、阻力、情绪变化与转折`">项目 {{ project_id }} · 第 {{ episode_number }} 集 · 场景目标、阻力、情绪变化与转折</div>

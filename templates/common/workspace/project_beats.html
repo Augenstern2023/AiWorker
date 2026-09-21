@@ -1,4 +1,4 @@
-<div>
+<div id="project-beats-workspace">
     <div class="d-flex justify-content-between align-items-end mb-3">
         <div>
             <h5 class="mb-1">单集 Beats</h5>
@@ -19,7 +19,7 @@
             <button class="btn btn-primary btn-sm" @click="generateProjectBeats" :disabled="creativeWorkspace.selectedEpisode === 0 || creativeActionDisabled('beats') || (isFreeCreativeProject() && !freeStageCan('beats', 'can_generate'))"><span class="spinner-border spinner-border-sm me-1" x-show="creativeActionRunning('beats')"></span><i class="bi bi-arrow-clockwise me-1" x-show="!creativeActionRunning('beats') && selectedProjectBeats()"></i><i class="bi bi-magic me-1" x-show="!creativeActionRunning('beats') && !selectedProjectBeats()"></i><span x-text="creativeActionRunning('beats') ? '生成中' : projectBeatGenerationActionLabel()"></span></button>
             <button class="btn btn-outline-light btn-sm" x-show="isFreeCreativeProject()" @click="createFreeBlankResource('beats')" :disabled="creativeWorkspace.selectedEpisode === 0 || !freeStageCan('beats', 'can_create_blank')"><i class="bi bi-plus-lg me-1"></i>空白版本</button>
             <button class="btn btn-outline-primary btn-sm" @click="generateProjectBeatsSeries" :disabled="creativeActionDisabled('beats', {series: true})"><i class="bi bi-collection-play me-1"></i><span x-text="seriesGenerationActionLabel('beats')"></span></button>
-            <button class="btn btn-warning btn-sm" data-optimization-draft-conflicting-lock @click="completeProjectBeatsBatch" :disabled="creativeActionDisabled('beats') || !canBatchLockProjectBeats()" title="完成并锁定当前全部 Beats 草稿"><i class="bi bi-lock-fill me-1"></i><span x-text="isFreeCreativeProject() ? '全集完成并锁定' : '批量完成并锁定'"></span></button>
+            <button class="btn btn-warning btn-sm" @click="completeProjectBeatsBatch" :disabled="creativeActionDisabled('beats') || !canBatchLockProjectBeats()" title="完成并锁定当前全部 Beats 草稿"><i class="bi bi-lock-fill me-1"></i><span x-text="isFreeCreativeProject() ? '全集完成并锁定' : '批量完成并锁定'"></span></button>
             <button type="button" class="btn btn-outline-primary btn-sm" @click="openProjectScriptWorkspace" title="场次剧本" aria-label="场次剧本"><i class="bi bi-file-earmark-richtext me-1" aria-hidden="true"></i>场次剧本</button>
             <a class="btn btn-outline-secondary btn-sm" x-show="currentGeneratedResourceId('beats')" :href="creativeGeneratedDownloadUrl('beats', 'md')" title="下载当前 Beats"><i class="bi bi-file-earmark-arrow-down"></i></a>
             <button class="btn btn-outline-secondary btn-sm" type="button" x-show="projectStageEpisodeItems('beats').length" @click="openEpisodeDownload('beats')" title="选择多集或全集下载"><i class="bi bi-download me-1"></i>多集/全集下载</button>
@@ -56,7 +56,7 @@
                 <span class="fw-semibold" x-text="`第 ${creativeWorkspace.selectedEpisode} 集 · v${selectedProjectBeats().version} · ${creativeWorkflowStatusLabel(selectedProjectBeats().status)}`"></span>
                 <div class="d-flex gap-2">
                     <button class="btn btn-outline-light btn-sm" @click="saveProjectEpisode(selectedProjectBeats())" :disabled="!creativeResourceEditable(selectedProjectBeats())"><i class="bi bi-save me-1"></i>保存</button>
-                    <button class="btn btn-warning btn-sm" data-optimization-draft-conflicting-lock @click="completeProjectBeats" :disabled="!creativeResourceEditable(selectedProjectBeats())"><i class="bi bi-lock-fill me-1"></i>完成并锁定</button>
+                    <button class="btn btn-warning btn-sm" @click="completeProjectBeats" :disabled="!creativeResourceEditable(selectedProjectBeats())"><i class="bi bi-lock-fill me-1"></i>完成并锁定</button>
                     <button class="btn btn-outline-info btn-sm" x-show="isFreeCreativeProject() && ['locked', 'approved'].includes(selectedProjectBeats().status)" @click="createFreeResourceRevision('beats')" :disabled="!freeStageCan('beats', 'can_create_revision')"><i class="bi bi-files me-1"></i>创建修订版</button>
                     <span class="small text-muted">草稿 · 已完成 · 已替代</span>
                 </div>

@@ -16,6 +16,14 @@
         document.head.append(style);
     }
 
+    function hideConflictingBeatsLocks() {
+        if (expectedKind !== 'beats' || !draftId || document.getElementById('optimization-draft-lock-style')) return;
+        const style = document.createElement('style');
+        style.id = 'optimization-draft-lock-style';
+        style.textContent = '[data-optimization-draft-conflicting-lock] { display: none !important; }';
+        document.head.append(style);
+    }
+
     function showReviewBackLink(reviewId = null) {
         if (!draftId) return;
         const link = document.getElementById('optimization-draft-review-back-link');
@@ -85,7 +93,9 @@
     }
 
     function draftLabel(draft) {
-        const status = { ready: '待采纳', accepted: '已采纳', rejected: '已放弃' }[draft.status] || draft.status;
+        const status = {
+            ready: '待采纳', locked: '已采纳', accepted: '已采纳', rejected: '已放弃',
+        }[draft.status] || draft.status;
         return `第 ${draft.episode_number} 集 · ${status}`;
     }
 
@@ -355,6 +365,32 @@
         return wrap;
     }
 
+    function editorSelect(label, value, options, update, {column = 'col-md-3'} = {}) {
+        const wrap = document.createElement('div');
+        wrap.className = column;
+        const caption = document.createElement('label');
+        caption.className = 'form-label small';
+        caption.textContent = label;
+        const control = document.createElement('select');
+        control.className = 'form-select form-select-sm';
+        const choices = value && !options.some(([optionValue]) => optionValue === value)
+            ? [[value, value], ...options]
+            : options;
+        choices.forEach(([optionValue, optionLabel]) => {
+            const option = document.createElement('option');
+            option.value = optionValue;
+            option.textContent = optionLabel;
+            option.selected = optionValue === value;
+            control.append(option);
+        });
+        control.addEventListener('change', () => {
+            update(control.value);
+            setUnsavedChanges(true);
+        });
+        wrap.append(caption, control);
+        return wrap;
+    }
+
     function setList(target, key, value) {
         target[key] = value.split(/[,，]/).map((item) => item.trim()).filter(Boolean);
     }
@@ -418,22 +454,27 @@
         }
     }
 
-    async function applyOptimizationDraft(draft, content, lockAfterAccept, button, message) {
-        if (lockAfterAccept && !window.confirm('应用后将立即锁定这个场次剧本版本，确定继续吗？')) return;
+    async function acceptAndLockOptimizationDraft(draft, content, button, message) {
+        const confirmation = draft.kind === 'beats'
+            ? '锁定 Beats 后将不能继续编辑，并立即标记为已采纳。确定继续吗？'
+            : '应用后将立即锁定这个场次剧本版本，确定锁定并采纳吗？';
+        if (!window.confirm(confirmation)) return;
         button.disabled = true;
-        message.textContent = lockAfterAccept ? '正在应用并锁定...' : '正在应用为新版本...';
+        message.textContent = '正在锁定并采纳...';
         try {
             const response = await aiworkerApi.request(`/api/script-optimization-drafts/${encodeURIComponent(draft.id)}/accept`, {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({content, lock_after_accept: lockAfterAccept}),
+                body: JSON.stringify({content, lock_after_accept: true}),
             });
             const payload = await response.json();
-            if (!response.ok) throw new Error(payload.detail || '应用优化草稿失败');
+            if (!response.ok) throw new Error(payload.detail || '锁定并采纳优化草稿失败');
             setUnsavedChanges(false);
-            message.textContent = lockAfterAccept ? '已应用并锁定场次剧本。' : '已应用为新的可编辑版本。';
+            message.textContent = draft.kind === 'beats'
+                ? 'Beats 已锁定并采纳。'
+                : '场次剧本已锁定并采纳。';
             window.location.assign(reviewPageUrl());
         } catch (error) {
-            message.textContent = error.message || '应用优化草稿失败';
+            message.textContent = error.message || '锁定并采纳优化草稿失败';
             button.disabled = false;
         }
     }
@@ -460,14 +501,10 @@
         save.type = 'button';
         save.className = 'btn btn-outline-primary btn-sm';
         save.textContent = '保存草稿';
-        const apply = document.createElement('button');
-        apply.type = 'button';
-        apply.className = 'btn btn-primary btn-sm';
-        apply.textContent = '应用为新版本';
         const applyAndLock = document.createElement('button');
         applyAndLock.type = 'button';
         applyAndLock.className = 'btn btn-warning btn-sm';
-        applyAndLock.textContent = '应用并锁定';
+        applyAndLock.textContent = '锁定并采纳';
         const regenerate = document.createElement('button');
         regenerate.type = 'button';
         regenerate.className = 'btn btn-outline-warning btn-sm';
@@ -475,10 +512,9 @@
         const message = document.createElement('div');
         message.className = 'small text-muted ms-auto';
         save.addEventListener('click', () => saveOptimizationDraft(draft, content, save, message));
-        apply.addEventListener('click', () => applyOptimizationDraft(draft, content, false, apply, message));
-        applyAndLock.addEventListener('click', () => applyOptimizationDraft(draft, content, true, applyAndLock, message));
+        applyAndLock.addEventListener('click', () => acceptAndLockOptimizationDraft(draft, content, applyAndLock, message));
         regenerate.addEventListener('click', () => regenerateOptimizationDraft(draft, regenerate, message));
-        actions.append(download, save, regenerate, apply, applyAndLock);
+        actions.append(download, save, regenerate, applyAndLock);
         header.append(title, actions);
         section.append(header);
         section.append(editorField('集标题', content.episode_title, (value) => { content.episode_title = value; }, {column: 'col-12'}));
@@ -533,6 +569,185 @@
         mount(section, workspace);
     }
 
+    function renderBeatsEditor(draft, after = null) {
+        const content = structuredClone(draft.content || {});
+        content.beats = Array.isArray(content.beats) ? content.beats : [];
+        const section = document.createElement('section');
+        section.className = 'border-top border-bottom py-3 mb-3';
+        const header = document.createElement('div');
+        header.className = 'd-flex flex-wrap justify-content-between align-items-center gap-3 mb-3';
+        const title = document.createElement('h5');
+        title.className = 'mb-0';
+        title.textContent = `编辑 AI 优化 Beats · 第 ${draft.episode_number} 集`;
+        const actions = document.createElement('div');
+        actions.className = 'd-flex flex-wrap gap-2';
+        const save = document.createElement('button');
+        save.type = 'button';
+        save.className = 'btn btn-outline-primary btn-sm';
+        save.textContent = '保存草稿';
+        const acceptAndLock = document.createElement('button');
+        acceptAndLock.type = 'button';
+        acceptAndLock.className = 'btn btn-warning btn-sm';
+        acceptAndLock.textContent = '锁定并采纳';
+        const regenerate = document.createElement('button');
+        regenerate.type = 'button';
+        regenerate.className = 'btn btn-outline-warning btn-sm';
+        regenerate.textContent = '重新生成本集';
+        actions.append(save, regenerate, acceptAndLock);
+        header.append(title, actions);
+        const editor = document.createElement('div');
+        const message = document.createElement('div');
+        message.className = 'small text-muted mt-3';
+
+        const reindex = () => {
+            content.beats.forEach((beat, index) => { beat.order = index + 1; });
+        };
+        const rerender = () => {
+            editor.replaceChildren();
+            content.beats.forEach((beat, beatIndex) => {
+                const beatSection = document.createElement('section');
+                beatSection.className = 'border rounded p-3 mb-3';
+                const beatHeader = document.createElement('div');
+                beatHeader.className = 'd-flex flex-wrap justify-content-between align-items-center gap-2 mb-3';
+                const heading = document.createElement('div');
+                heading.className = 'fw-semibold';
+                heading.textContent = `节拍 ${beatIndex + 1}`;
+                const beatActions = document.createElement('div');
+                beatActions.className = 'd-flex gap-2';
+                const moveUp = document.createElement('button');
+                moveUp.type = 'button';
+                moveUp.className = 'btn btn-outline-light btn-sm';
+                moveUp.textContent = '上移';
+                moveUp.disabled = beatIndex === 0;
+                moveUp.addEventListener('click', () => {
+                    [content.beats[beatIndex - 1], content.beats[beatIndex]] = [content.beats[beatIndex], content.beats[beatIndex - 1]];
+                    reindex();
+                    setUnsavedChanges(true);
+                    rerender();
+                });
+                const moveDown = document.createElement('button');
+                moveDown.type = 'button';
+                moveDown.className = 'btn btn-outline-light btn-sm';
+                moveDown.textContent = '下移';
+                moveDown.disabled = beatIndex === content.beats.length - 1;
+                moveDown.addEventListener('click', () => {
+                    [content.beats[beatIndex], content.beats[beatIndex + 1]] = [content.beats[beatIndex + 1], content.beats[beatIndex]];
+                    reindex();
+                    setUnsavedChanges(true);
+                    rerender();
+                });
+                const removeBeat = document.createElement('button');
+                removeBeat.type = 'button';
+                removeBeat.className = 'btn btn-outline-danger btn-sm';
+                removeBeat.textContent = '删除节拍';
+                removeBeat.disabled = content.beats.length <= 1;
+                removeBeat.addEventListener('click', () => {
+                    if (!window.confirm(`确定删除节拍 ${beatIndex + 1} 吗？`)) return;
+                    content.beats.splice(beatIndex, 1);
+                    reindex();
+                    setUnsavedChanges(true);
+                    rerender();
+                });
+                beatActions.append(moveUp, moveDown, removeBeat);
+                beatHeader.append(heading, beatActions);
+                const fields = document.createElement('div');
+                fields.className = 'row g-2';
+                fields.append(
+                    editorField('场景', beat.scene, (value) => { beat.scene = value; }, {multiline: true, column: 'col-md-6'}),
+                    editorField('人物（逗号分隔）', (beat.characters || []).join('、'), (value) => setList(beat, 'characters', value), {multiline: true, column: 'col-md-6'}),
+                    editorField('行动目标', beat.goal, (value) => { beat.goal = value; }, {multiline: true, column: 'col-md-6'}),
+                    editorField('阻力', beat.obstacle, (value) => { beat.obstacle = value; }, {multiline: true, column: 'col-md-6'}),
+                    editorField('情绪变化', beat.emotion_change, (value) => { beat.emotion_change = value; }, {multiline: true, column: 'col-md-6'}),
+                    editorField('局面变化', beat.state_change, (value) => { beat.state_change = value; }, {multiline: true, column: 'col-md-6'}),
+                    editorField('代价', beat.cost, (value) => { beat.cost = value; }, {multiline: true, column: 'col-md-6'}),
+                    editorField('对抗策略', beat.opposition_tactic, (value) => { beat.opposition_tactic = value; }, {multiline: true, column: 'col-md-6'}),
+                    editorField('转折', beat.turn, (value) => { beat.turn = value; }, {multiline: true, column: 'col-md-6'}),
+                    editorField('结尾钩子', beat.hook, (value) => { beat.hook = value; }, {multiline: true, column: 'col-md-6'}),
+                );
+                beatSection.append(beatHeader, fields);
+
+                const continuityHeader = document.createElement('div');
+                continuityHeader.className = 'd-flex justify-content-between align-items-center mt-3 mb-2';
+                const continuityTitle = document.createElement('div');
+                continuityTitle.className = 'small fw-semibold';
+                continuityTitle.textContent = '连续性变更';
+                const addContinuity = document.createElement('button');
+                addContinuity.type = 'button';
+                addContinuity.className = 'btn btn-outline-secondary btn-sm';
+                addContinuity.textContent = '新增变更';
+                addContinuity.addEventListener('click', () => {
+                    if (!Array.isArray(beat.continuity_updates)) beat.continuity_updates = [];
+                    beat.continuity_updates.push({
+                        kind: 'information', name: '', event: '', holder: '', location: '', known_by: [], status: 'active',
+                    });
+                    setUnsavedChanges(true);
+                    rerender();
+                });
+                continuityHeader.append(continuityTitle, addContinuity);
+                beatSection.append(continuityHeader);
+                const updates = Array.isArray(beat.continuity_updates) ? beat.continuity_updates : [];
+                if (!updates.length) appendText(beatSection, '本节拍暂无连续性变更', 'small text-muted');
+                updates.forEach((update, updateIndex) => {
+                    const updateRow = document.createElement('div');
+                    updateRow.className = 'row g-2 border-top pt-2 mt-2';
+                    const removeUpdateWrap = document.createElement('div');
+                    removeUpdateWrap.className = 'col-12 d-flex justify-content-end';
+                    const removeUpdate = document.createElement('button');
+                    removeUpdate.type = 'button';
+                    removeUpdate.className = 'btn btn-outline-danger btn-sm';
+                    removeUpdate.textContent = '删除变更';
+                    removeUpdate.addEventListener('click', () => {
+                        updates.splice(updateIndex, 1);
+                        setUnsavedChanges(true);
+                        rerender();
+                    });
+                    removeUpdateWrap.append(removeUpdate);
+                    updateRow.append(
+                        editorSelect('类型', update.kind, [
+                            ['state', '状态'], ['resource', '资源'], ['relationship', '关系'],
+                            ['information', '信息'], ['prop', '道具'],
+                        ], (value) => { update.kind = value; }),
+                        editorField('名称', update.name, (value) => { update.name = value; }),
+                        editorField('状态', update.status, (value) => { update.status = value; }),
+                        editorField('事件', update.event, (value) => { update.event = value; }, {multiline: true, column: 'col-md-9'}),
+                        editorField('持有人/来源', update.holder, (value) => { update.holder = value; }, {column: 'col-md-4'}),
+                        editorField('地点', update.location, (value) => { update.location = value; }, {column: 'col-md-4'}),
+                        editorField('知情人（逗号分隔）', (update.known_by || []).join('、'), (value) => setList(update, 'known_by', value), {column: 'col-md-4'}),
+                        removeUpdateWrap,
+                    );
+                    beatSection.append(updateRow);
+                });
+                editor.append(beatSection);
+            });
+            const addBeat = document.createElement('button');
+            addBeat.type = 'button';
+            addBeat.className = 'btn btn-outline-primary btn-sm';
+            addBeat.textContent = '新增节拍';
+            addBeat.disabled = content.beats.length >= 6;
+            addBeat.addEventListener('click', () => {
+                content.beats.push({
+                    order: content.beats.length + 1,
+                    scene: '', characters: [], goal: '', obstacle: '', emotion_change: '',
+                    state_change: '', cost: '', opposition_tactic: '', turn: '', hook: '',
+                    continuity_updates: [],
+                });
+                setUnsavedChanges(true);
+                rerender();
+            });
+            editor.append(addBeat);
+        };
+
+        save.addEventListener('click', () => saveOptimizationDraft(draft, content, save, message));
+        regenerate.addEventListener('click', () => regenerateOptimizationDraft(draft, regenerate, message));
+        acceptAndLock.addEventListener('click', () => acceptAndLockOptimizationDraft(
+            draft, content, acceptAndLock, message,
+        ));
+        section.append(header, editor, message);
+        rerender();
+        if (after?.parentElement) after.insertAdjacentElement('afterend', section);
+        else mount(section);
+    }
+
     function renderDraftNavigation(draft, optimization, before = null) {
         if (!optimization) return;
         const peers = (optimization.drafts || [])
@@ -578,7 +793,7 @@
         header.append(heading);
         const message = document.createElement('div');
         message.className = 'small text-muted mb-2';
-        if (expectedKind === 'beats' && ['ready', 'rejected'].includes(draft.status)) {
+        if (draft.status === 'rejected' && (expectedKind === 'beats' || !draft.peer_draft_id)) {
             const regenerate = document.createElement('button');
             regenerate.type = 'button';
             regenerate.className = 'btn btn-outline-warning btn-sm';
@@ -617,6 +832,7 @@
         const comparison = renderDraftComparison(draft, current, workspace);
         renderDraftNavigation(draft, optimization, comparison);
         if (expectedKind === 'script' && draft.status === 'ready') renderScriptEditor(draft, workspace);
+        if (expectedKind === 'beats' && draft.status === 'ready') renderBeatsEditor(draft, comparison);
     }
 
     async function loadDraftEntries() {
@@ -646,6 +862,7 @@
     }
 
     hideOriginalScriptWorkspace();
+    hideConflictingBeatsLocks();
     showReviewBackLink(reviewId || null);
     (draftId ? loadDraft() : loadDraftEntries()).catch(() => {});
 }());

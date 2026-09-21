@@ -741,7 +741,10 @@
     }
 
     function optimizationStatus(value) {
-        return { queued: '等待生成', running: '生成中', completed: '已生成', failed: '生成失败', ready: '待采纳', accepted: '已采纳', rejected: '已放弃' }[value] || value;
+        return {
+            queued: '等待生成', running: '生成中', completed: '已生成', failed: '生成失败',
+            ready: '待采纳', locked: '已采纳', accepted: '已采纳', rejected: '已放弃',
+        }[value] || value;
     }
 
     function scheduleOptimizationHistory(review, container, items) {
@@ -781,18 +784,25 @@
         }
     }
 
-    async function regenerateOptimizationDraft(draftId, review, container, button) {
+    async function deleteFailedOptimization(optimization, review, container, button) {
+        const drafts = optimization.drafts || [];
+        const savedEpisodes = new Set(drafts.map((draft) => Number(draft.episode_number))).size;
+        const savedNote = savedEpisodes
+            ? `其中 ${savedEpisodes} 集、${drafts.length} 份已保存草稿会一并删除。已应用到项目的版本不会删除。`
+            : '该记录没有已保存草稿。';
+        if (!window.confirm(`确认删除这条失败记录吗？\n${savedNote}\n此操作无法恢复。`)) return;
         button.disabled = true;
-        showOptimizationProgress(`${sourceLabel(review)} · 重新生成单集草稿`);
         try {
-            const payload = await readJson(await aiworkerApi.request(`/api/script-optimization-drafts/${draftId}/regenerate`, { method: 'POST' }));
-            optimizationProgress.optimizationId = payload.optimization.id;
-            updateOptimizationProgress(payload.optimization);
+            await readJson(await aiworkerApi.request(`/api/script-optimizations/${optimization.id}`, {
+                method: 'DELETE',
+            }));
+            if (optimizationProgress.optimizationId === optimization.id) {
+                hideOptimizationProgress();
+                optimizationProgress.optimizationId = null;
+            }
             await loadOptimizationHistory(review, container);
         } catch (requestError) {
             showError(requestError.message);
-            showOptimizationProgressError(requestError.message);
-        } finally {
             button.disabled = false;
         }
     }
@@ -814,14 +824,24 @@
                     note.className = 'small text-muted mt-1';
                     note.textContent = `已保存 ${saved}/${(optimization.target_episode_numbers || []).length} 集；续跑会跳过已保存的集数。`;
                     container.append(note);
+                    const actions = document.createElement('div');
+                    actions.className = 'd-flex flex-wrap gap-2 mt-2';
                     const retry = document.createElement('button');
                     retry.type = 'button';
-                    retry.className = 'btn btn-outline-warning btn-sm mt-2';
+                    retry.className = 'btn btn-outline-warning btn-sm';
                     retry.textContent = '继续生成未完成集数';
                     retry.addEventListener('click', () => retryOptimization(
                         optimization.id, retry, review, container,
                     ));
-                    container.append(retry);
+                    const remove = document.createElement('button');
+                    remove.type = 'button';
+                    remove.className = 'btn btn-outline-danger btn-sm';
+                    remove.textContent = '删除记录';
+                    remove.addEventListener('click', () => deleteFailedOptimization(
+                        optimization, review, container, remove,
+                    ));
+                    actions.append(retry, remove);
+                    container.append(actions);
                 }
                 (optimization.drafts || []).forEach((draft) => {
                     const row = document.createElement('div');
@@ -833,7 +853,7 @@
                     const compare = document.createElement('a');
                     compare.className = 'btn btn-outline-light btn-sm';
                     compare.href = `/writing/projects/${optimization.project_id}/episodes/${draft.episode_number}/${stage}?optimization_draft=${draft.id}&review_id=${review.id}`;
-                    compare.textContent = draft.kind === 'script' && draft.status === 'ready' ? '编辑草稿' : '查看对比';
+                    compare.textContent = draft.status === 'ready' ? '编辑草稿' : '查看对比';
                     row.append(compare);
                     if (draft.status === 'ready') {
                         const reject = document.createElement('button');
@@ -841,41 +861,12 @@
                         reject.className = 'btn btn-outline-secondary btn-sm';
                         reject.textContent = '放弃';
                         reject.addEventListener('click', () => rejectOptimizationDraft(draft.id, review, container));
-                        if (draft.kind === 'beats') {
-                            const accept = document.createElement('button');
-                            accept.type = 'button';
-                            accept.className = 'btn btn-success btn-sm';
-                            accept.textContent = '采纳';
-                            accept.addEventListener('click', () => acceptOptimizationDraft(draft.id, review, container));
-                            row.append(accept);
-                        }
                         row.append(reject);
-                    }
-                    const canRegenerate = ['ready', 'rejected'].includes(draft.status)
-                        && (optimization.mode !== 'structure' || draft.kind === 'beats');
-                    if (canRegenerate) {
-                        const regenerate = document.createElement('button');
-                        regenerate.type = 'button';
-                        regenerate.className = 'btn btn-outline-warning btn-sm';
-                        regenerate.textContent = '重新生成本集';
-                        regenerate.addEventListener('click', () => regenerateOptimizationDraft(
-                            draft.id, review, container, regenerate,
-                        ));
-                        row.append(regenerate);
                     }
                     container.append(row);
                 });
             });
             scheduleOptimizationHistory(review, container, items);
-        } catch (requestError) {
-            showError(requestError.message);
-        }
-    }
-
-    async function acceptOptimizationDraft(draftId, review, container) {
-        try {
-            await readJson(await aiworkerApi.request(`/api/script-optimization-drafts/${draftId}/accept`, { method: 'POST' }));
-            await loadOptimizationHistory(review, container);
         } catch (requestError) {
             showError(requestError.message);
         }

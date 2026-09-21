@@ -6220,6 +6220,30 @@ class CreativeRepository:
             ).fetchall()
         return [self.get_script_optimization(int(row["id"])) or {} for row in rows]
 
+    def delete_failed_script_optimization(
+        self, optimization_id: int
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM script_optimizations WHERE id = ?",
+                (optimization_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError("优化任务不存在")
+            if row["status"] != "failed":
+                raise ValueError("只能删除已失败的优化记录")
+            deleted_drafts = conn.execute(
+                "DELETE FROM script_optimization_drafts WHERE optimization_id = ?",
+                (optimization_id,),
+            ).rowcount
+            conn.execute(
+                "DELETE FROM script_optimizations WHERE id = ?", (optimization_id,)
+            )
+        return {
+            "optimization_id": int(optimization_id),
+            "deleted_draft_count": int(deleted_drafts or 0),
+        }
+
     def start_script_optimization(self, optimization_id: int) -> dict[str, Any]:
         return self._update_script_optimization(
             optimization_id, {"status": "running", "error": ""}
@@ -6328,20 +6352,44 @@ class CreativeRepository:
     def accept_script_optimization_draft(
         self, draft_id: int, episode_id: int, accepted_by: str
     ) -> dict[str, Any]:
-        draft = self.get_script_optimization_draft(draft_id)
-        if not draft:
-            raise ValueError("优化草稿不存在")
-        if draft["status"] != "ready":
-            raise ValueError("该优化草稿当前不能采纳")
         with self._connect() as conn:
-            conn.execute(
+            conn.execute("BEGIN IMMEDIATE")
+            draft = conn.execute(
+                "SELECT * FROM script_optimization_drafts WHERE id = ?",
+                (draft_id,),
+            ).fetchone()
+            if not draft:
+                raise ValueError("优化草稿不存在")
+            if draft["status"] != "ready":
+                raise ValueError("该优化草稿当前不能采纳")
+            peer = None
+            if draft["kind"] == "script" and draft["peer_draft_id"]:
+                peer = conn.execute(
+                    "SELECT kind, status FROM script_optimization_drafts WHERE id = ?",
+                    (int(draft["peer_draft_id"]),),
+                ).fetchone()
+                if not peer or peer["kind"] != "beats" or peer["status"] not in {
+                    "locked",
+                    "accepted",
+                }:
+                    raise ValueError("请先锁定并采纳对应 Beats 草稿")
+            now = time.time()
+            cursor = conn.execute(
                 """
                 UPDATE script_optimization_drafts
-                SET status = 'accepted', accepted_episode_id = ?, accepted_by = ?,
-                    accepted_at = ?, updated_at = ? WHERE id = ?
+                SET status = ?, accepted_episode_id = ?, accepted_by = ?,
+                    accepted_at = ?, updated_at = ? WHERE id = ? AND status = 'ready'
                 """,
-                (episode_id, accepted_by, time.time(), time.time(), draft_id),
+                ("accepted", episode_id, accepted_by, now, now, draft_id),
             )
+            if cursor.rowcount < 1:
+                raise ValueError("该优化草稿当前不能采纳")
+            if draft["kind"] == "script" and draft["peer_draft_id"]:
+                conn.execute(
+                    "UPDATE script_optimization_drafts SET status = 'accepted', updated_at = ? "
+                    "WHERE id = ? AND status = 'locked'",
+                    (now, int(draft["peer_draft_id"])),
+                )
         return self.get_script_optimization_draft(draft_id) or {}
 
     def reject_script_optimization_draft(

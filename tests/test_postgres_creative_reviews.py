@@ -57,6 +57,7 @@ def _create_episode(
     database,
     project_id: int,
     *,
+    stage: str = "script",
     episode_number: int = 1,
     version: int = 1,
     content: dict | None = None,
@@ -69,7 +70,7 @@ def _create_episode(
             project_id, stage, episode_number, batch_id, version, status,
             content_json, created_at, updated_at
         ) VALUES (
-            :project_id, 'script', :episode_number, :batch_id, :version, 'draft',
+            :project_id, :stage, :episode_number, :batch_id, :version, 'draft',
             :content_json, now(), now()
         ) RETURNING id
         """
@@ -80,6 +81,7 @@ def _create_episode(
                 statement,
                 {
                     "project_id": int(project_id),
+                    "stage": stage,
                     "episode_number": int(episode_number),
                     "batch_id": f"batch-{episode_number}-{version}",
                     "version": int(version),
@@ -653,6 +655,61 @@ def test_draft_accept_binds_the_new_episode_version_once(
     with pytest.raises(ValueError, match="优化草稿不存在"):
         postgres_creative.reject_script_optimization_draft(999999, "x")
     assert postgres_creative.get_script_optimization_draft(999999) is None
+
+
+def test_structure_drafts_become_accepted_as_each_locked_version_is_bound(
+    postgres_creative, isolated_system_database
+) -> None:
+    project_id = _create_project(isolated_system_database)
+    source_episode = _create_episode(isolated_system_database, project_id)
+    locked_beats_episode = _create_episode(
+        isolated_system_database, project_id, stage="beats", version=1,
+        content={"beats": [{"order": 1}]},
+    )
+    locked_script_episode = _create_episode(
+        isolated_system_database, project_id, stage="script", version=2,
+        content={"episode_title": "优化稿", "scenes": []},
+    )
+    review = _create_review(postgres_creative, project_id=project_id)
+    _, completed = _completed_optimization(
+        postgres_creative,
+        project_id,
+        review["id"],
+        mode="structure",
+        drafts=[
+            {
+                "episode_number": 1,
+                "kind": "beats",
+                "source_episode_id": source_episode,
+                "source_fingerprint": "beats-fp",
+                "content": {"beats": [{"order": 1}]},
+            },
+            {
+                "episode_number": 1,
+                "kind": "script",
+                "source_episode_id": None,
+                "source_fingerprint": "script-fp",
+                "content": {"episode_title": "优化稿", "scenes": []},
+            },
+        ],
+    )
+    beats_draft = next(item for item in completed["drafts"] if item["kind"] == "beats")
+    script_draft = next(item for item in completed["drafts"] if item["kind"] == "script")
+
+    with pytest.raises(ValueError, match="请先锁定并采纳对应 Beats 草稿"):
+        postgres_creative.accept_script_optimization_draft(
+            script_draft["id"], locked_script_episode, "owner-1"
+        )
+    staged_beats = postgres_creative.accept_script_optimization_draft(
+        beats_draft["id"], locked_beats_episode, "owner-1"
+    )
+    assert staged_beats["status"] == "accepted"
+
+    accepted_script = postgres_creative.accept_script_optimization_draft(
+        script_draft["id"], locked_script_episode, "owner-1"
+    )
+    assert accepted_script["status"] == "accepted"
+    assert postgres_creative.get_script_optimization_draft(beats_draft["id"])["status"] == "accepted"
 
 
 def test_delete_script_review_removes_its_optimizations_and_drafts(

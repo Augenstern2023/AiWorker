@@ -746,7 +746,13 @@ def test_script_review_polls_optimization_tasks_until_drafts_are_ready():
 
     assert "scheduleOptimizationHistory" in script
     assert "['queued', 'running'].includes(optimization.status)" in script
-    assert "重新生成本集" in script
+    assert "重新生成本集" not in script
+    assert "acceptOptimizationDraft" not in script
+    assert "locked: '已采纳'" in script
+    assert "deleteFailedOptimization" in script
+    assert "method: 'DELETE'" in script
+    assert "删除记录" in script
+    assert "此操作无法恢复" in script
     assert "请填写放弃原因" in script
     assert "rejection_note: rejectionNote" in script
 
@@ -791,7 +797,8 @@ def test_writing_pages_load_optimization_draft_comparison():
     assert "renderBeatsPreview" in script
     assert "当前版本" in script
     assert "renderScriptEditor" in script
-    assert "applyOptimizationDraft" in script
+    assert "renderBeatsEditor" in script
+    assert "acceptAndLockOptimizationDraft" in script
     assert "saveOptimizationDraft" in script
     assert "regenerateOptimizationDraft" in script
     assert "renderDraftNavigation" in script
@@ -799,8 +806,13 @@ def test_writing_pages_load_optimization_draft_comparison():
     assert "window.location.assign(reviewPageUrl())" in script
     assert "下载草稿" in script
     assert "保存草稿" in script
-    assert "应用为新版本" in script
-    assert "应用并锁定" in script
+    assert "新增节拍" in script
+    assert "删除节拍" in script
+    assert "新增变更" in script
+    assert "删除变更" in script
+    assert "应用为新版本" not in script
+    assert "应用并锁定" not in script
+    assert "锁定并采纳" in script
     assert "上一份" in script
     assert "下一份" in script
     assert "重新生成本集" in script
@@ -816,6 +828,10 @@ def test_writing_pages_load_optimization_draft_comparison():
     assert "diff-added" in script
     assert ".optimization-diff-line.diff-removed" in _source("static/css/workspaces.css")
     assert ".optimization-diff-line.diff-added" in _source("static/css/workspaces.css")
+
+    beats_workspace = _source("templates/common/workspace/project_beats.html")
+    assert beats_workspace.count("data-optimization-draft-conflicting-lock") == 2
+    assert "hideConflictingBeatsLocks" in script
 
     review_script = _source("static/js/review/scripts.js")
     assert "review_id" in review_script

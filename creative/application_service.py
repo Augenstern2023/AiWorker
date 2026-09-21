@@ -476,6 +476,7 @@ class CreativeApplicationService:
             task_type=stage,
             role_code=role_code,
             actor=actor,
+            project_uid=str(project.get("project_uid") or "") or None,
             writer_operation_id=operation_id,
         )
         if task["status"] not in {"pool", "assigned", "in_progress", "returned"}:

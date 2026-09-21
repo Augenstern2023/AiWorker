@@ -36,6 +36,7 @@ class CreateAssignmentRequest(BaseModel):
 def build_workflow_router(
     repository: WorkflowRepository,
     transition_service: TransitionService | None = None,
+    project_identity_resolver: Callable[[str], tuple[str, str]] | None = None,
 ) -> APIRouter:
     router = APIRouter()
     transitions = transition_service or TransitionService(repository)
@@ -163,13 +164,32 @@ def build_workflow_router(
 
     member_manager = require_permission("project.member.manage")
 
+    def member_project_identity(project_id: str) -> tuple[str, str | None]:
+        normalized = str(project_id).strip()
+        if (
+            project_identity_resolver is None
+            or not normalized.isdigit()
+            or int(normalized) < 1
+        ):
+            return normalized, None
+        resolved_id, project_uid = _call(project_identity_resolver, normalized)
+        return str(resolved_id), str(project_uid)
+
     @router.get("/api/workflow/projects/{project_id}/members")
     def list_project_members(
         project_id: str,
         principal: Principal = Depends(member_manager),
     ) -> list[dict[str, Any]]:
-        _call(repository.assert_can_manage_project, project_id, principal)
-        members = repository.list_project_members(project_id)
+        resolved_id, project_uid = member_project_identity(project_id)
+        _call(
+            repository.assert_can_manage_project,
+            resolved_id,
+            principal,
+            project_uid=project_uid,
+        )
+        members = repository.list_project_members(
+            resolved_id, project_uid=project_uid
+        )
         enriched = []
         for member in members:
             user = repository.identity_repository.get_user(member["user_id"])
@@ -196,7 +216,13 @@ def build_workflow_router(
         task_type = task_types.get(project_role)
         if task_type is None:
             raise HTTPException(400, "unsupported project member role")
-        _call(repository.assert_can_manage_project, project_id, principal)
+        resolved_id, project_uid = member_project_identity(project_id)
+        _call(
+            repository.assert_can_manage_project,
+            resolved_id,
+            principal,
+            project_uid=project_uid,
+        )
         return _call(
             repository.list_role_assignment_candidates,
             project_role,
@@ -215,6 +241,7 @@ def build_workflow_router(
         request: Request,
         principal: Principal = Depends(member_manager),
     ) -> dict[str, Any]:
+        resolved_id, project_uid = member_project_identity(project_id)
         return _audited_call(
             repository,
             request,
@@ -223,12 +250,13 @@ def build_workflow_router(
             "project_member",
             payload.user_id,
             repository.add_project_member,
-            project_id,
+            resolved_id,
             payload.user_id,
             payload.project_role,
             principal,
             status=payload.status,
-            audit_project_id=project_id,
+            project_uid=project_uid,
+            audit_project_id=resolved_id,
         )
 
     @router.delete(
@@ -241,6 +269,7 @@ def build_workflow_router(
         request: Request,
         principal: Principal = Depends(member_manager),
     ) -> Response:
+        resolved_id, project_uid = member_project_identity(project_id)
         _audited_call(
             repository,
             request,
@@ -249,10 +278,11 @@ def build_workflow_router(
             "project_member",
             user_id,
             repository.remove_project_member,
-            project_id,
+            resolved_id,
             user_id,
             principal,
-            audit_project_id=project_id,
+            project_uid=project_uid,
+            audit_project_id=resolved_id,
         )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 

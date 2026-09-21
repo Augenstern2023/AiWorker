@@ -264,6 +264,8 @@ class CreativeRepositoryBase:
         for key, value in dict(row).items():
             if isinstance(value, datetime):
                 converted[key] = epoch_seconds(value)
+            elif isinstance(value, uuid.UUID):
+                converted[key] = str(value)
             elif isinstance(value, (dict, list)):
                 converted[key] = jsonb_copy(value)
             else:

@@ -731,7 +731,13 @@ if system_database is not None:
         build_organization_router(DepartmentService(system_database), audit_service)
     )
 app.include_router(
-    build_workflow_router(workflow_repository, workflow_transition_service)
+    build_workflow_router(
+        workflow_repository,
+        workflow_transition_service,
+        project_identity_resolver=(
+            creative_application_service.workflow_identity.project_reference
+        ),
+    )
 )
 app.include_router(build_page_router(templates, navigation_service))
 register_rag_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")

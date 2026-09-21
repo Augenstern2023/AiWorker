@@ -30,7 +30,7 @@ from sqlalchemy import (
     literal_column,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 
 SYSTEM_METADATA = MetaData()
@@ -252,6 +252,7 @@ project_members = Table(
     SYSTEM_METADATA,
     Column("id", Text, primary_key=True),
     Column("project_id", Text, nullable=False),
+    Column("project_uid", UUID(as_uuid=True)),
     Column("user_id", Text, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False),
     Column("project_role", Text, nullable=False),
     Column("status", Text, nullable=False, server_default=text("'active'")),
@@ -496,6 +497,7 @@ workflow_instances = Table(
     Column("resource_type", Text, nullable=False),
     Column("resource_id", Text, nullable=False),
     Column("project_id", Text),
+    Column("project_uid", UUID(as_uuid=True)),
     Column("status", Text, nullable=False, server_default=text("'active'")),
     Column("created_by", Text, ForeignKey("users.id", ondelete="SET NULL")),
     Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
@@ -506,6 +508,7 @@ workflow_project_deletions = Table(
     "workflow_project_deletions",
     SYSTEM_METADATA,
     Column("project_id", Text, primary_key=True),
+    Column("project_uid", UUID(as_uuid=True)),
     Column("owner_token", Text, nullable=False),
     Column("requested_by", Text, nullable=False),
     Column(
@@ -547,6 +550,7 @@ workflow_tasks = Table(
     Column("role_code", Text, nullable=False),
     Column("topic_id", Integer),
     Column("project_id", Text),
+    Column("project_uid", UUID(as_uuid=True)),
     Column("assignee_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
     Column("assigned_by", Text, ForeignKey("users.id", ondelete="SET NULL")),
     Column(
@@ -668,6 +672,7 @@ workflow_project_member_events = Table(
     SYSTEM_METADATA,
     Column("id", Text, primary_key=True),
     Column("project_id", Text, nullable=False),
+    Column("project_uid", UUID(as_uuid=True)),
     Column("membership_id", Text, nullable=False),
     Column("event_type", Text, nullable=False),
     Column("actor_id", Text, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False),
@@ -715,6 +720,15 @@ Index(
     navigation_items.c.sort_order,
 )
 Index("idx_project_members_project_id", project_members.c.project_id)
+Index("idx_project_members_project_uid", project_members.c.project_uid)
+Index(
+    "uq_project_members_uid_role",
+    project_members.c.project_uid,
+    project_members.c.user_id,
+    project_members.c.project_role,
+    unique=True,
+    postgresql_where=project_members.c.project_uid.is_not(None),
+)
 Index(
     "uq_departments_parent_name",
     func.coalesce(departments.c.parent_id, literal_column("''")),
@@ -730,6 +744,12 @@ Index(
     postgresql_where=user_departments.c.is_primary.is_(True),
 )
 Index("idx_workflow_tasks_pool", workflow_tasks.c.role_code, workflow_tasks.c.status)
+Index("idx_workflow_tasks_project_uid", workflow_tasks.c.project_uid)
+Index("idx_workflow_instances_project_uid", workflow_instances.c.project_uid)
+Index(
+    "idx_workflow_project_deletions_project_uid",
+    workflow_project_deletions.c.project_uid,
+)
 Index("idx_workflow_submissions_task", workflow_submissions.c.task_id, workflow_submissions.c.status)
 Index("idx_audit_logs_created_at", audit_logs.c.created_at)
 Index("idx_audit_logs_action", audit_logs.c.action)
@@ -737,6 +757,11 @@ Index("idx_audit_logs_actor_user_id", audit_logs.c.actor_user_id)
 Index(
     "idx_workflow_project_member_events_project",
     workflow_project_member_events.c.project_id,
+    workflow_project_member_events.c.created_at,
+)
+Index(
+    "idx_workflow_project_member_events_project_uid",
+    workflow_project_member_events.c.project_uid,
     workflow_project_member_events.c.created_at,
 )
 Index(

@@ -16,7 +16,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import Boolean, DateTime, Identity, BigInteger, inspect, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.exc import DBAPIError
 
 from creative.database_schema import (
@@ -140,6 +140,33 @@ def test_creative_integer_primary_keys_are_identity():
     )
 
 
+def test_project_uid_is_permanent_and_shared_with_workflow_tables():
+    from system_database.schema import (
+        project_members,
+        workflow_instances,
+        workflow_project_deletions,
+        workflow_project_member_events,
+        workflow_tasks,
+    )
+
+    project_uid = CREATIVE_METADATA.tables["creative_projects"].c.project_uid
+    assert isinstance(project_uid.type, UUID)
+    assert project_uid.nullable is False
+    assert "uq_creative_projects_project_uid" in {
+        index.name
+        for index in CREATIVE_METADATA.tables["creative_projects"].indexes
+        if index.unique
+    }
+    for table in (
+        project_members,
+        workflow_instances,
+        workflow_project_deletions,
+        workflow_project_member_events,
+        workflow_tasks,
+    ):
+        assert isinstance(table.c.project_uid.type, UUID)
+
+
 def test_legacy_float_measurements_stay_double_precision():
     """NUMERIC would round and break the SQLite -> PostgreSQL -> SQLite round trip."""
     from sqlalchemy.dialects import postgresql
@@ -176,10 +203,14 @@ def test_named_constraints_used_by_repositories_exist():
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_head_includes_video_parameters_and_zip_exports():
+def test_alembic_head_includes_permanent_project_identity():
     revisions = ScriptDirectory.from_config(Config(str(PROJECT_ROOT / "alembic.ini")))
 
-    assert revisions.get_current_head() == "0026_video_params_zip_exports"
+    assert revisions.get_current_head() == "0027_permanent_project_identity"
+    assert (
+        revisions.get_revision("0027_permanent_project_identity").down_revision
+        == "0026_video_params_zip_exports"
+    )
     assert (
         revisions.get_revision("0026_video_params_zip_exports").down_revision
         == "0025_creative_schema_baseline"

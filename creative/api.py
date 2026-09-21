@@ -2969,15 +2969,26 @@ def build_creative_router(
             project_id = str(project["id"])
             scoped_project_id = workflow_project_id(project_id)
             workflow_repository.ensure_project_creator(
-                scoped_project_id, principal.user_id, principal
+                scoped_project_id,
+                principal.user_id,
+                principal,
+                project_uid=str(project.get("project_uid") or "") or None,
             )
             for member_id in planner_member_ids:
                 workflow_repository.add_project_member(
-                    scoped_project_id, member_id, "creative_planner", principal
+                    scoped_project_id,
+                    member_id,
+                    "creative_planner",
+                    principal,
+                    project_uid=str(project.get("project_uid") or "") or None,
                 )
             for member_id in writer_member_ids:
                 workflow_repository.add_project_member(
-                    scoped_project_id, member_id, "screenwriter", principal
+                    scoped_project_id,
+                    member_id,
+                    "screenwriter",
+                    principal,
+                    project_uid=str(project.get("project_uid") or "") or None,
                 )
             tasks = _ensure_stage_tasks(
                 project_id, topic_id, principal
@@ -3050,6 +3061,8 @@ def build_creative_router(
         principal: Principal,
     ) -> list[dict[str, Any]]:
         """Create all creative stage workflow tasks in the project task pool."""
+        project = repository.get_project(int(project_id)) or {}
+        project_uid = str(project.get("project_uid") or "") or None
         stage_roles = [
             ("brief", "creative_planner"),
             ("characters", "creative_planner"),
@@ -3065,6 +3078,7 @@ def build_creative_router(
                 task_type=task_type,
                 role_code=role_code,
                 actor=principal,
+                project_uid=project_uid,
             )
             if task_type == "brief":
                 repository.reconcile_project_workflow_task(
@@ -3532,6 +3546,9 @@ def build_creative_router(
                     workflow_project_id(resolved_project["id"]),
                     principal.user_id,
                     principal,
+                    project_uid=(
+                        str(resolved_project.get("project_uid") or "") or None
+                    ),
                 )
             if payload.workflow_mode == "sequential" and workflow_task_id and bound_id is None:
                 try:
@@ -3539,6 +3556,9 @@ def build_creative_router(
                         workflow_task_id,
                         workflow_project_id(resolved_project["id"]),
                         principal,
+                        project_uid=(
+                            str(resolved_project.get("project_uid") or "") or None
+                        ),
                         expected_task_type="brief",
                         expected_topic_id=payload.topic_id,
                         require_creator_assignment=True,
@@ -4671,6 +4691,7 @@ def build_creative_router(
                 task_type=resource_type,
                 role_code=role_code,
                 actor=principal,
+                project_uid=str(project.get("project_uid") or "") or None,
             )
             if task["status"] not in {"pool", "assigned", "in_progress", "returned"}:
                 task = workflow_repository.create_next_task(
@@ -5131,10 +5152,14 @@ def build_creative_router(
             "name": str(recovery_project.get("name") or ""),
             "creative_store_id": repository.store_id,
             "workflow_project_id": scoped_project_id,
+            "project_uid": str(recovery_project.get("project_uid") or ""),
         }
         try:
             marker = workflow_repository.begin_project_deletion(
                 scoped_project_id,
+                project_uid=(
+                    str(recovery_project.get("project_uid") or "") or None
+                ),
                 owner_token=deletion_owner,
                 requested_by=principal.user_id,
                 project_snapshot=marker_snapshot,

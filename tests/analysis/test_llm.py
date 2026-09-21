@@ -810,6 +810,11 @@ def test_provider_uses_configured_request_timeout_for_long_generation():
     assert provider.timeout == 600
     assert provider.max_retries == 4
     assert provider.retry_base_delay == 2
+    timeout = provider._http_timeout()
+    assert timeout.connect == 10
+    assert timeout.write == 30
+    assert timeout.read == 600
+    assert timeout.pool == 10
 
 
 def test_prefixed_llm_profile_can_disable_global_retries():
@@ -921,10 +926,38 @@ def test_chat_completions_reports_the_configured_timeout_after_retries():
         retry_callback=lambda number, total, reason: retries.append((number, total, reason)),
     )
 
-    with pytest.raises(LLMError, match="模型响应超时（600 秒）"):
+    with pytest.raises(LLMError, match="模型响应超时（600 秒）") as caught:
         asyncio.run(provider.complete_text([{"role": "user", "content": "test"}]))
 
     assert retries == [(1, 1, "模型响应超时（600 秒）")]
+    assert provider.last_request_summary["timeout_phase"] == "read"
+    assert caught.value.request_summary["client_request_id"]
+    assert caught.value.request_summary["timeout_phase"] == "read"
+
+
+def test_read_timeout_is_not_retried_when_disabled():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("", request=request)
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="gpt-5.6-sol",
+        timeout=600,
+        max_retries=4,
+        retry_base_delay=0,
+        retry_read_timeouts=False,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(LLMTimeoutError):
+        asyncio.run(provider.complete_text([{"role": "user", "content": "test"}]))
+
+    assert calls == 1
 
 
 def test_rag_llm_inherits_the_global_text_model_settings():

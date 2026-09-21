@@ -145,6 +145,8 @@ RAG_VECTOR_STORE_DIR = ".runtime/rag/chroma"
 
 # 分集大纲需要在跨批次生成时维持较强的连续性推理。
 CREATIVE_OUTLINE_REASONING_EFFORT = "high"
+# Beats 使用显式阶段预算，避免历史剧情里的关键词把 auto 意外推到 max。
+CREATIVE_BEATS_REASONING_EFFORT = "xhigh"
 
 from .bilibili_config import *
 from .xhs_config import *

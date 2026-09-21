@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 import pytest
 
-from analysis.llm import LLMError, LLMOutputTruncatedError
+from analysis.llm import LLMError, LLMOutputTruncatedError, LLMTimeoutError
 from core.job import CrawlJob
 from creative import api as creative_api
 from creative import phase4_worker
@@ -155,6 +155,27 @@ def test_worker_loads_and_validates_inline_source_snapshot(tmp_path: Path) -> No
     )
 
     assert loaded == snapshot
+
+
+def test_generation_context_keeps_audit_snapshot_out_of_model_input() -> None:
+    snapshot = {
+        "snapshot_id": "snapshot-audit-only",
+        "project": {
+            "generation_meta": {"stages": "AUDIT_ONLY_SENTINEL"},
+            "historical_drafts": ["不应进入模型输入"],
+        },
+    }
+
+    assert phase4_worker._generation_context(
+        {
+            "source_snapshot_id": "snapshot-audit-only",
+            "generation_instruction": "加强本批悬念",
+        },
+        snapshot,
+    ) == {"generation_instruction": "加强本批悬念"}
+    assert phase4_worker._generation_context(
+        {"source_snapshot_id": "snapshot-audit-only"}, snapshot
+    ) is None
 
 
 def test_worker_rejects_snapshot_chunk_path_outside_runtime(tmp_path: Path) -> None:
@@ -2163,22 +2184,22 @@ def test_phase4_worker_retry_takes_over_expired_orphan_before_first_checkpoint(
     assert [item["episode_number"] for item in outlines] == [1]
 
 
-def test_phase4_worker_saves_series_beats_in_ten_episode_checkpoints(tmp_path, monkeypatch):
+def test_phase4_worker_saves_series_beats_in_single_episode_checkpoints(tmp_path, monkeypatch):
     db_path = tmp_path / ".runtime" / "creative" / "creative.db"
     repository = CreativeRepository(db_path)
     project = seed_worker_project(repository)
-    repository.update_project(project["id"], {"target_episode_count": 12})
+    repository.update_project(project["id"], {"target_episode_count": 3})
     brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}}])[0]
     repository.lock_brief(brief["id"])
     characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
     repository.lock_character_batch(project["id"], characters["batch_id"])
     outlines = repository.create_outline_batch(
-        project["id"], [outline_episode(number) for number in range(1, 13)], "全剧弧线"
+        project["id"], [outline_episode(number) for number in range(1, 4)], "全剧弧线"
     )
     repository.lock_outline_batch(project["id"], outlines["batch_id"])
     provider = SequentialProvider([
-        {"episodes": [{"episode": number, **valid_beat_content()} for number in range(1, 11)]},
-        {"episodes": [{"episode": number, **valid_beat_content()} for number in range(11, 13)]},
+        {"episodes": [{"episode": number, **valid_beat_content()}]}
+        for number in range(1, 4)
     ])
     events = []
     monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
@@ -2200,11 +2221,92 @@ def test_phase4_worker_saves_series_beats_in_ten_episode_checkpoints(tmp_path, m
     asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     beats = [item for item in repository.get_project(project["id"])["episodes"] if item["stage"] == "beats"]
-    assert [item["episode_number"] for item in beats] == list(range(1, 13))
+    assert [item["episode_number"] for item in beats] == [1, 2, 3]
     assert len({item["batch_id"] for item in beats}) == 1
-    assert len(provider.calls) == 2
-    assert any(item["payload"].get("completed") == 10 for item in events)
-    assert any(item["payload"].get("completed") == 12 for item in events)
+    assert len(provider.calls) == 3
+    assert all(
+        len(json.loads(call[1]["content"])["locked_outlines"]) == 1
+        for call in provider.calls
+    )
+    assert any(item["payload"].get("completed") == 1 for item in events)
+    assert any(item["payload"].get("completed") == 3 for item in events)
+
+
+def test_phase4_worker_splits_a_two_episode_beats_read_timeout(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository, episode_count=2)
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"], [outline_episode(1), outline_episode(2)], "全剧弧线"
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+
+    class TimeoutThenSinglesProvider(SequentialProvider):
+        retry_read_timeouts = True
+
+        async def complete_json(self, messages):
+            self.calls.append(messages)
+            requested = [
+                int(item["episode_number"])
+                for item in json.loads(messages[1]["content"])["locked_outlines"]
+            ]
+            if requested == [1, 2]:
+                request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+                try:
+                    raise httpx.ReadTimeout("timed out", request=request)
+                except httpx.ReadTimeout as exc:
+                    raise LLMTimeoutError("模型响应超时（600 秒）") from exc
+            number = requested[0]
+            return {"episodes": [{"episode": number, **valid_beat_content()}]}
+
+    provider = TimeoutThenSinglesProvider([])
+    events = []
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    monkeypatch.setattr(
+        phase4_worker,
+        "emit",
+        lambda job, event, message, level="info", payload=None: events.append(
+            {"event": event, "message": message, "level": level, "payload": payload or {}}
+        ),
+    )
+    job = CrawlJob(
+        job_id="creative-worker-timeout-split",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "beats",
+            "series": True,
+            "chunk_size": 2,
+            "project_id": project["id"],
+            "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(repository, project["id"], "timeout-split"),
+        },
+    )
+
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
+
+    beats = [
+        item
+        for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "beats"
+    ]
+    assert [item["episode_number"] for item in beats] == [1, 2]
+    assert len(provider.calls) == 3
+    assert provider.retry_read_timeouts is False
+    split_event = next(
+        item for item in events if item["payload"].get("split_reason") == "read_timeout"
+    )
+    assert (split_event["payload"]["left_start"], split_event["payload"]["right_start"]) == (1, 2)
 
 
 def test_phase4_worker_saves_series_scripts_after_all_current_beats_are_locked(tmp_path, monkeypatch):

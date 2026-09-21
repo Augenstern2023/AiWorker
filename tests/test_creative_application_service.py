@@ -225,6 +225,32 @@ def test_application_service_marks_series_scripts_as_two_episode_chunks(
     assert extra["chunk_size"] == 2
 
 
+def test_application_service_marks_series_beats_as_single_episode_chunks(
+    creative_context,
+) -> None:
+    project = creative_context.create_original_project()
+    creative_context.jobs.get_or_create_job.return_value = SimpleNamespace(
+        job_id="beats-series-job", status="pending"
+    )
+
+    creative_context.application_service.start_generation(
+        project_id=project["id"],
+        stage="beats",
+        actor=creative_context.actor,
+        workflow_task_id="beats-task",
+        operation_id="beats-series-operation",
+        generation_instruction="",
+        source_snapshot_id="beats-series-snapshot",
+        source_snapshot={"snapshot_id": "beats-series-snapshot"},
+        episode_start=1,
+        episode_end=20,
+        series=True,
+    )
+
+    extra = creative_context.jobs.get_or_create_job.call_args.args[1]["extra"]
+    assert extra["chunk_size"] == 1
+
+
 def test_application_service_generation_job_contains_selected_model(
     creative_context,
 ) -> None:

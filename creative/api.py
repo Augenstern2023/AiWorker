@@ -5973,7 +5973,7 @@ def build_creative_router(
         total = int(project["target_episode_count"])
         return create_generation_job(
             project_id, "beats", principal, request,
-            series=True, chunk_size=10, episode_start=1, episode_end=total,
+            series=True, chunk_size=1, episode_start=1, episode_end=total,
             workflow_task_id=workflow_task_id,
             **generation_request_extra(payload),
         )

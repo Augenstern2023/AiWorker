@@ -74,14 +74,26 @@ def _public_request_summary(summary: Any) -> dict[str, Any]:
     if not isinstance(summary, dict):
         return {}
     result = {}
-    for key in ("protocol", "model", "reasoning_effort", "response_format"):
+    for key in (
+        "protocol",
+        "model",
+        "reasoning_effort",
+        "response_format",
+        "client_request_id",
+        "gateway_request_id",
+        "exception_type",
+        "timeout_phase",
+    ):
         value = summary.get(key)
         if isinstance(value, str):
             result[key] = value
-    for key in ("max_tokens", "message_count", "input_chars"):
+    for key in ("max_tokens", "message_count", "input_chars", "request_attempt"):
         value = summary.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             result[key] = value
+    elapsed = summary.get("request_elapsed_seconds")
+    if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) and elapsed >= 0:
+        result["request_elapsed_seconds"] = round(float(elapsed), 3)
     return result
 
 
@@ -104,6 +116,10 @@ def format_request_summary(summary: Any) -> str:
         f"response_format={summary.get('response_format') or '（未发送）'}",
         f"输入={summary.get('input_chars') or 0} 字符",
     ]
+    if summary.get("client_request_id"):
+        parts.append(f"request_id={summary['client_request_id']}")
+    if summary.get("gateway_request_id"):
+        parts.append(f"gateway_request_id={summary['gateway_request_id']}")
     return "请求参数：" + "、".join(parts)
 
 
@@ -230,8 +246,18 @@ def dump_terminal_error(job_id: str, exc: Exception) -> str | None:
             "job_id": str(job_id),
             "error_type": type(exc).__name__,
             "error": str(exc),
+            "cause_type": (
+                type(exc.__cause__).__name__
+                if exc.__cause__ is not None
+                else None
+            ),
             "cause": str(exc.__cause__) if exc.__cause__ is not None else None,
         }
+        request = _public_request_summary(
+            getattr(exc, "request_summary", None)
+        )
+        if request:
+            diagnostic["request"] = request
         if isinstance(exc, LLMOutputTruncatedError):
             diagnostic.update(
                 finish_reason=exc.finish_reason,

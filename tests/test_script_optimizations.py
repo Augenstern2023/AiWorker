@@ -264,6 +264,59 @@ def test_job_launch_failure_stays_visible_and_can_be_retried(tmp_path) -> None:
     assert retried.json()["optimization"]["status"] == "queued"
 
 
+def test_failed_optimization_and_its_drafts_can_be_deleted(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, scripts = _project_with_review(repository)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    completed = repository.complete_script_optimization(
+        optimization["id"],
+        [{
+            "episode_number": 1, "kind": "script",
+            "source_episode_id": scripts[0]["id"],
+            "source_fingerprint": content_fingerprint(scripts[0]["content"]),
+            "content": {"episode_title": "待删除草稿", "scenes": []},
+        }],
+    )
+    draft_id = completed["drafts"][0]["id"]
+    repository.fail_script_optimization(optimization["id"], "生成失败")
+
+    deleted = _admin_client(repository).delete(
+        f"/api/script-optimizations/{optimization['id']}"
+    )
+
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json() == {
+        "deleted": True,
+        "optimization_id": optimization["id"],
+        "deleted_draft_count": 1,
+    }
+    assert repository.get_script_optimization(optimization["id"]) is None
+    assert repository.get_script_optimization_draft(draft_id) is None
+
+
+def test_non_failed_optimization_cannot_be_deleted(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(repository)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+
+    response = _admin_client(repository).delete(
+        f"/api/script-optimizations/{optimization['id']}"
+    )
+
+    assert response.status_code == 409, response.text
+    assert repository.get_script_optimization(optimization["id"]) is not None
+
+
 @pytest.mark.parametrize(
     ("optimization_mode", "change_route", "prompt_mode"),
     [("direct", "script_only", "single"), ("structure", "beats_then_script", "series")],
@@ -631,7 +684,7 @@ def test_text_review_cannot_create_an_optimization_task(tmp_path) -> None:
     assert response.status_code == 409
 
 
-def test_accept_direct_optimization_creates_editable_script_without_status_change(tmp_path) -> None:
+def test_accept_direct_optimization_creates_locked_script_without_project_status_change(tmp_path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
     topic = repository.upsert_topics([{"platform": "hg", "job_id": "job-1", "source_path": "rank.json", "captured_at": "2026-08-03", "title": "优化剧", "score": 90, "confidence": "high", "score_details": {}, "recommendation": "adopt", "evidence": []}])[0]
     repository.update_topic(topic["id"], "adopted")
@@ -666,8 +719,34 @@ def test_accept_direct_optimization_creates_editable_script_without_status_chang
     assert response.status_code == 200, response.text
     accepted = response.json()
     assert accepted["status"] == "accepted"
-    assert repository.get_episode(accepted["accepted_episode_id"])["content"]["episode_title"] == "优化稿"
+    accepted_episode = repository.get_episode(accepted["accepted_episode_id"])
+    assert accepted_episode["content"]["episode_title"] == "优化稿"
+    assert accepted_episode["status"] == "locked"
     assert repository.get_project(project["id"])["status"] == before_status
+
+
+def test_accept_optimization_rejects_the_removed_unlocked_apply_mode(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, scripts = _project_with_review(repository)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    completed = repository.complete_script_optimization(
+        optimization["id"],
+        [{"episode_number": 1, "kind": "script", "source_episode_id": scripts[0]["id"], "source_fingerprint": content_fingerprint(scripts[0]["content"]), "content": {"episode_title": "优化稿", "scenes": []}}],
+    )
+
+    response = _admin_client(repository).post(
+        f"/api/script-optimization-drafts/{completed['drafts'][0]['id']}/accept",
+        json={"lock_after_accept": False},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "优化草稿必须锁定并采纳"
+    assert repository.get_script_optimization_draft(completed["drafts"][0]["id"])["status"] == "ready"
 
 
 def test_free_project_accepts_optimization_as_new_current_head(tmp_path) -> None:
@@ -706,7 +785,7 @@ def test_free_project_accepts_optimization_as_new_current_head(tmp_path) -> None
     assert build_project_source(refreshed, "single", [1])["episodes"][0]["script"]["id"] == accepted["id"]
 
 
-def test_structure_script_draft_requires_accepted_and_locked_paired_beats(tmp_path) -> None:
+def test_structure_drafts_show_accepted_immediately_after_each_is_locked(tmp_path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
     project, review, _ = _project_with_review(repository)
     source_beats = max(
@@ -733,15 +812,17 @@ def test_structure_script_draft_requires_accepted_and_locked_paired_beats(tmp_pa
     assert client.post(f"/api/script-optimization-drafts/{script_draft['id']}/accept").status_code == 409
     accepted_beats = client.post(f"/api/script-optimization-drafts/{beats_draft['id']}/accept")
     assert accepted_beats.status_code == 200, accepted_beats.text
-    assert client.post(f"/api/script-optimization-drafts/{script_draft['id']}/accept").status_code == 409
+    assert accepted_beats.json()["status"] == "accepted"
+    assert repository.get_episode(accepted_beats.json()["accepted_episode_id"])["status"] == "locked"
 
-    repository.lock_episode_beats(accepted_beats.json()["accepted_episode_id"])
     accepted_script = client.post(f"/api/script-optimization-drafts/{script_draft['id']}/accept")
     assert accepted_script.status_code == 200, accepted_script.text
     assert accepted_script.json()["status"] == "accepted"
+    assert repository.get_episode(accepted_script.json()["accepted_episode_id"])["status"] == "locked"
+    assert repository.get_script_optimization_draft(beats_draft["id"])["status"] == "accepted"
 
 
-def test_structure_script_draft_is_rejected_when_accepted_beats_changes(tmp_path) -> None:
+def test_structure_script_draft_is_rejected_when_applied_beats_is_no_longer_locked(tmp_path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
     project, review, _ = _project_with_review(repository)
     source_beats = max(
@@ -766,13 +847,16 @@ def test_structure_script_draft_is_rejected_when_accepted_beats_changes(tmp_path
     client = _admin_client(repository)
     accepted_beats = client.post(f"/api/script-optimization-drafts/{beats_draft['id']}/accept")
     assert accepted_beats.status_code == 200, accepted_beats.text
-    repository.update_episode(accepted_beats.json()["accepted_episode_id"], {"beats": [{"order": 1, "goal": "改过的 Beats"}]})
-    repository.lock_episode_beats(accepted_beats.json()["accepted_episode_id"])
+    with repository._connect() as conn:
+        conn.execute(
+            "UPDATE creative_episodes SET status = 'draft' WHERE id = ?",
+            (accepted_beats.json()["accepted_episode_id"],),
+        )
 
     response = client.post(f"/api/script-optimization-drafts/{script_draft['id']}/accept")
 
     assert response.status_code == 409
-    assert "已变化" in response.json()["detail"]
+    assert "未锁定" in response.json()["detail"]
 
 
 def test_direct_drafts_for_unchanged_episodes_remain_acceptable_after_another_episode_is_adopted(tmp_path) -> None:
@@ -879,6 +963,69 @@ def test_ready_script_optimization_draft_can_be_saved_before_accepting(tmp_path)
     assert saved.status_code == 200, saved.text
     assert saved.json()["content"] == edited
     assert repository.get_script_optimization_draft(draft_id)["status"] == "ready"
+
+
+def test_ready_beats_optimization_draft_can_be_edited_and_saved(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(
+        repository, change_route="beats_then_script"
+    )
+    project_episodes = repository.get_project(project["id"])["episodes"]
+    source_beats = next(item for item in project_episodes if item["stage"] == "beats")
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="structure",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    original_beats = {
+        "beats": [{
+            "order": 1, "scene": "旧场景", "characters": ["主角"],
+            "goal": "旧目标", "obstacle": "旧阻力", "emotion_change": "警惕",
+            "state_change": "得到线索", "cost": "暴露身份",
+            "opposition_tactic": "对手设局", "turn": "发现内鬼", "hook": "门外枪响",
+            "continuity_updates": [],
+        }],
+    }
+    completed = repository.complete_script_optimization(
+        optimization["id"],
+        [
+            {
+                "episode_number": 1, "kind": "beats",
+                "source_episode_id": source_beats["id"],
+                "source_fingerprint": content_fingerprint(source_beats["content"]),
+                "content": original_beats,
+            },
+            {
+                "episode_number": 1, "kind": "script",
+                "source_episode_id": None,
+                "source_fingerprint": content_fingerprint(original_beats),
+                "content": {"episode_title": "优化稿", "scenes": []},
+            },
+        ],
+    )
+    beats_draft = next(item for item in completed["drafts"] if item["kind"] == "beats")
+    edited = {
+        "beats": [{
+            **original_beats["beats"][0],
+            "scene": "人工调整后的场景",
+            "goal": "人工调整后的目标",
+            "continuity_updates": [{
+                "kind": "information", "name": "关键证据", "event": "主角取得证据",
+                "holder": "主角", "location": "仓库", "known_by": ["主角"],
+                "status": "active",
+            }],
+        }],
+    }
+
+    saved = _admin_client(repository).patch(
+        f"/api/script-optimization-drafts/{beats_draft['id']}",
+        json={"content": edited},
+    )
+
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["content"] == edited
+    assert repository.get_script_optimization_draft(beats_draft["id"])["content"] == edited
 
 
 def test_one_optimization_episode_can_be_regenerated_with_the_frozen_settings(tmp_path) -> None:

@@ -585,6 +585,40 @@ class ReviewsRepository:
             for optimization_id in optimization_ids
         ]
 
+    def delete_failed_script_optimization(
+        self, optimization_id: int
+    ) -> dict[str, Any]:
+        """Delete one failed optimization and its saved draft records."""
+
+        with self.transaction_scope() as connection:
+            row = connection.execute(
+                select(
+                    script_optimizations.c.id,
+                    script_optimizations.c.status,
+                )
+                .where(script_optimizations.c.id == int(optimization_id))
+                .with_for_update()
+            ).mappings().one_or_none()
+            if row is None:
+                raise ValueError("优化任务不存在")
+            if row["status"] != "failed":
+                raise ValueError("只能删除已失败的优化记录")
+            deleted_drafts = connection.execute(
+                delete(script_optimization_drafts).where(
+                    script_optimization_drafts.c.optimization_id
+                    == int(optimization_id)
+                )
+            ).rowcount
+            connection.execute(
+                delete(script_optimizations).where(
+                    script_optimizations.c.id == int(optimization_id)
+                )
+            )
+        return {
+            "optimization_id": int(optimization_id),
+            "deleted_draft_count": int(deleted_drafts or 0),
+        }
+
     def start_script_optimization(self, optimization_id: int) -> dict[str, Any]:
         return self._update_script_optimization(
             optimization_id, {"status": "running", "error": ""}
@@ -836,23 +870,33 @@ class ReviewsRepository:
     def accept_script_optimization_draft(
         self, draft_id: int, episode_id: int, accepted_by: str
     ) -> dict[str, Any]:
-        """Bind a ready draft to the episode version it produced, once.
+        """Bind a locked episode version and mark its optimization draft accepted."""
 
-        Accepting is what records the new episode version: the caller creates
-        that version (the legacy API called ``create_episode_script`` /
-        ``create_episode_beats`` before this call) and this method stores its ID.
-        The status change and ``accepted_episode_id`` are one conditional
-        ``UPDATE`` in one transaction, so a draft is never left accepted without
-        a version and never accepted twice.
-        """
-
-        draft = self.get_script_optimization_draft(draft_id)
-        if not draft:
-            raise ValueError("优化草稿不存在")
-        if draft["status"] != "ready":
-            raise ValueError("该优化草稿当前不能采纳")
         now = utc_now()
         with self.transaction_scope() as connection:
+            draft = connection.execute(
+                select(script_optimization_drafts)
+                .where(script_optimization_drafts.c.id == int(draft_id))
+                .with_for_update()
+            ).mappings().one_or_none()
+            if draft is None:
+                raise ValueError("优化草稿不存在")
+            if draft["status"] != "ready":
+                raise ValueError("该优化草稿当前不能采纳")
+            if draft["kind"] == "script" and draft["peer_draft_id"]:
+                peer = connection.execute(
+                    select(script_optimization_drafts)
+                    .where(
+                        script_optimization_drafts.c.id
+                        == int(draft["peer_draft_id"])
+                    )
+                    .with_for_update()
+                ).mappings().one_or_none()
+                if peer is None or peer["kind"] != "beats" or peer["status"] not in {
+                    "locked",
+                    "accepted",
+                }:
+                    raise ValueError("请先锁定并采纳对应 Beats 草稿")
             accepted_id = connection.execute(
                 update(script_optimization_drafts)
                 .where(
@@ -870,6 +914,16 @@ class ReviewsRepository:
             ).scalar_one_or_none()
             if accepted_id is None:
                 raise ValueError("该优化草稿当前不能采纳")
+            if draft["kind"] == "script" and draft["peer_draft_id"]:
+                connection.execute(
+                    update(script_optimization_drafts)
+                    .where(
+                        script_optimization_drafts.c.id
+                        == int(draft["peer_draft_id"]),
+                        script_optimization_drafts.c.status == "locked",
+                    )
+                    .values(status="accepted", updated_at=now)
+                )
         return self.get_script_optimization_draft(draft_id) or {}
 
     def reject_script_optimization_draft(

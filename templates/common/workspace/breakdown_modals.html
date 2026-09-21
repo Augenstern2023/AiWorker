@@ -23,19 +23,31 @@
                         <div class="form-text" x-show="breakdownGeneration.modelsLoading">正在读取可用模型…</div>
                         <div class="form-text" x-show="!breakdownGeneration.modelsLoading">模型使用管理员已保存的提供商 API Key，本次切换无需重新输入。</div>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label" for="breakdown-generation-reasoning-effort">本次推理档位</label>
-                        <select id="breakdown-generation-reasoning-effort" class="form-select"
-                                x-model="breakdownGeneration.reasoningEffort"
-                                :disabled="breakdownGeneration.modelsLoading || breakdownGenerationRunning() || !(breakdownGeneration.reasoningEffortOptions || []).length">
-                            <option value="">不覆盖模型默认档位</option>
+                    <fieldset class="mb-3"
+                              x-show="(breakdownGeneration.reasoningEffortOptions || []).length"
+                              :disabled="breakdownGeneration.modelsLoading || breakdownGenerationRunning()">
+                        <legend class="form-label fs-6 mb-2">本次推理档位（单选）</legend>
+                        <div class="d-flex flex-wrap gap-3" role="radiogroup" aria-label="本次推理档位">
+                            <label class="form-check form-check-inline mb-0 me-0">
+                                <input id="breakdown-generation-reasoning-effort-default" class="form-check-input" type="radio"
+                                       name="breakdown-generation-reasoning-effort" value=""
+                                       x-model="breakdownGeneration.reasoningEffort">
+                                <span class="form-check-label">模型默认</span>
+                            </label>
                             <template x-for="item in (breakdownGeneration.reasoningEffortOptions || [])" :key="`breakdown-effort-${item.value}`">
-                                <option :value="item.value" x-text="`${item.label}（${item.value}）`"></option>
+                                <label class="form-check form-check-inline mb-0 me-0">
+                                    <input class="form-check-input" type="radio"
+                                           name="breakdown-generation-reasoning-effort"
+                                           :id="`breakdown-generation-reasoning-effort-${item.value}`"
+                                           :value="item.value"
+                                           x-model="breakdownGeneration.reasoningEffort">
+                                    <span class="form-check-label" x-text="item.label"></span>
+                                </label>
                             </template>
-                        </select>
+                        </div>
                         <div class="form-text" x-show="(breakdownGeneration.reasoningEffortOptions || []).length">显式选择后将原样发送，不会自动升档或降档。</div>
-                        <div class="form-text" x-show="!breakdownGeneration.modelsLoading && !(breakdownGeneration.reasoningEffortOptions || []).length">当前模型不支持推理档位参数，本次请求不会发送该参数。</div>
-                    </div>
+                    </fieldset>
+                    <div class="form-text mb-3" x-show="!breakdownGeneration.modelsLoading && !(breakdownGeneration.reasoningEffortOptions || []).length">当前模型不支持推理档位参数，本次请求不会发送该参数。</div>
                     <div x-show="breakdownGeneration.status !== 'configuring'">
                         <div class="small text-info mb-2" x-show="breakdownGeneration.coverage.length" x-text="breakdownGeneration.requiresTranscription ? `已发现第 ${breakdownGeneration.coverage.join('、')} 集下载视频` : `已加载第 ${breakdownGeneration.coverage.join('、')} 集剧目脚本`"></div>
                         <div class="d-flex justify-content-between small mb-1"><span x-text="breakdownGeneration.message || '正在创建生成任务'"></span><strong x-text="breakdownGenerationProgressLabel()"></strong></div>

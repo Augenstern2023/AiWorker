@@ -13,14 +13,22 @@
                 </template>
             </select>
             <div class="small text-muted mt-2">仅影响这次生成，下次仍由你选择。</div>
-            <label class="form-label mt-3" for="sequentialGenerationReasoningEffort">本次推理档位</label>
-            <select id="sequentialGenerationReasoningEffort" class="form-select" x-model="creativeWorkspace.sequentialGeneration.reasoningEffort" :disabled="creativeWorkspace.sequentialGeneration.loading || !(creativeWorkspace.sequentialGeneration.reasoningEffortOptions || []).length">
-                <option value="">不覆盖模型默认档位</option>
-                <template x-for="item in (creativeWorkspace.sequentialGeneration.reasoningEffortOptions || [])" :key="`run-effort-${item.value}`">
-                    <option :value="item.value" x-text="`${item.label}（${item.value}）`"></option>
-                </template>
-            </select>
-            <div class="small text-muted mt-2" x-show="(creativeWorkspace.sequentialGeneration.reasoningEffortOptions || []).length">显式选择后将原样发送，不会自动升档或降档。</div>
+            <fieldset class="mt-3" x-show="(creativeWorkspace.sequentialGeneration.reasoningEffortOptions || []).length" :disabled="creativeWorkspace.sequentialGeneration.loading">
+                <legend class="form-label fs-6 mb-2">本次推理档位（单选）</legend>
+                <div class="d-flex flex-wrap gap-3" role="radiogroup" aria-label="本次推理档位">
+                    <label class="form-check form-check-inline mb-0 me-0">
+                        <input id="sequential-generation-reasoning-effort-default" class="form-check-input" type="radio" name="sequential-generation-reasoning-effort" value="" x-model="creativeWorkspace.sequentialGeneration.reasoningEffort">
+                        <span class="form-check-label">模型默认</span>
+                    </label>
+                    <template x-for="item in (creativeWorkspace.sequentialGeneration.reasoningEffortOptions || [])" :key="`run-effort-${item.value}`">
+                        <label class="form-check form-check-inline mb-0 me-0">
+                            <input class="form-check-input" type="radio" name="sequential-generation-reasoning-effort" :id="`sequential-generation-reasoning-effort-${item.value}`" :value="item.value" x-model="creativeWorkspace.sequentialGeneration.reasoningEffort">
+                            <span class="form-check-label" x-text="item.label"></span>
+                        </label>
+                    </template>
+                </div>
+                <div class="small text-muted mt-2">显式选择后将原样发送，不会自动升档或降档。</div>
+            </fieldset>
             <div class="small text-muted mt-2" x-show="!creativeWorkspace.sequentialGeneration.loading && !(creativeWorkspace.sequentialGeneration.reasoningEffortOptions || []).length">当前模型不支持推理档位参数，本次请求不会发送该参数。</div>
             <div class="small text-muted mt-2" x-show="creativeWorkspace.sequentialGeneration.loading">正在读取可用模型…</div>
             <div class="small text-danger mt-2" role="alert" x-show="creativeWorkspace.sequentialGeneration.error" x-text="creativeWorkspace.sequentialGeneration.error"></div>
@@ -41,7 +49,23 @@
             </div>
             <div class="modal-body">
                 <div class="mb-3"><label class="form-label">本次使用模型</label><select class="form-select" x-model="creativeWorkspace.freeGeneration.modelRecordId" @change="creativeWorkspace.freeGeneration.reasoningEffort = ''; syncGenerationReasoningEfforts(creativeWorkspace.freeGeneration)" :disabled="creativeWorkspace.freeGeneration.loading"><option value="">使用全局默认模型</option><template x-for="item in (creativeWorkspace.freeGeneration.modelOptions || [])" :key="item.id"><option :value="item.id" x-text="item.is_default ? `${item.label}（全局默认）` : item.label"></option></template></select><div class="form-text">模型凭据由服务启动环境提供，本次切换无需重新输入。</div></div>
-                <div class="mb-3"><label class="form-label" for="freeGenerationReasoningEffort">本次推理档位</label><select id="freeGenerationReasoningEffort" class="form-select" x-model="creativeWorkspace.freeGeneration.reasoningEffort" :disabled="creativeWorkspace.freeGeneration.loading || !(creativeWorkspace.freeGeneration.reasoningEffortOptions || []).length"><option value="">不覆盖模型默认档位</option><template x-for="item in (creativeWorkspace.freeGeneration.reasoningEffortOptions || [])" :key="`free-effort-${item.value}`"><option :value="item.value" x-text="`${item.label}（${item.value}）`"></option></template></select><div class="form-text" x-show="(creativeWorkspace.freeGeneration.reasoningEffortOptions || []).length">显式选择后将原样发送，不会自动升档或降档。</div><div class="form-text" x-show="!creativeWorkspace.freeGeneration.loading && !(creativeWorkspace.freeGeneration.reasoningEffortOptions || []).length">当前模型不支持推理档位参数，本次请求不会发送该参数。</div></div>
+                <fieldset class="mb-3" x-show="(creativeWorkspace.freeGeneration.reasoningEffortOptions || []).length" :disabled="creativeWorkspace.freeGeneration.loading">
+                    <legend class="form-label fs-6 mb-2">本次推理档位（单选）</legend>
+                    <div class="d-flex flex-wrap gap-3" role="radiogroup" aria-label="本次推理档位">
+                        <label class="form-check form-check-inline mb-0 me-0">
+                            <input id="free-generation-reasoning-effort-default" class="form-check-input" type="radio" name="free-generation-reasoning-effort" value="" x-model="creativeWorkspace.freeGeneration.reasoningEffort">
+                            <span class="form-check-label">模型默认</span>
+                        </label>
+                        <template x-for="item in (creativeWorkspace.freeGeneration.reasoningEffortOptions || [])" :key="`free-effort-${item.value}`">
+                            <label class="form-check form-check-inline mb-0 me-0">
+                                <input class="form-check-input" type="radio" name="free-generation-reasoning-effort" :id="`free-generation-reasoning-effort-${item.value}`" :value="item.value" x-model="creativeWorkspace.freeGeneration.reasoningEffort">
+                                <span class="form-check-label" x-text="item.label"></span>
+                            </label>
+                        </template>
+                    </div>
+                    <div class="form-text">显式选择后将原样发送，不会自动升档或降档。</div>
+                </fieldset>
+                <div class="form-text mb-3" x-show="!creativeWorkspace.freeGeneration.loading && !(creativeWorkspace.freeGeneration.reasoningEffortOptions || []).length">当前模型不支持推理档位参数，本次请求不会发送该参数。</div>
                 <div class="mb-3" x-show="creativeWorkspace.freeGeneration.stage === 'brief'"><label class="form-label">本次生成方向数</label><select class="form-select" x-model.number="creativeWorkspace.freeGeneration.count"><option :value="1">1</option><option :value="2">2</option><option :value="3">3</option><option :value="4">4</option><option :value="5">5</option></select><div class="form-text">每个方向单独保存，已有方向继续保留。</div></div>
                 <div class="mb-3"><label class="form-label">本次生成指令（可选）</label><textarea class="form-control" rows="3" maxlength="2000" x-model="creativeWorkspace.freeGeneration.instruction" placeholder="例如：强化悬疑感，但保持低成本场景"></textarea></div>
                 <div class="row g-3" x-show="!creativeWorkspace.freeGeneration.loading">

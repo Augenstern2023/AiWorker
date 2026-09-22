@@ -2128,7 +2128,22 @@ def test_my_task_tables_append_rows_instead_of_stringifying_them():
     script = _source("static/js/common/my_tasks.js")
 
     assert "submissionList.replaceChildren(...rows)" not in script
-    assert "projectList.replaceChildren(...rows)" in script
+    assert "projectList.replaceChildren(...cards)" in script
+
+
+def test_my_tasks_is_an_operate_and_monitor_workspace():
+    html = _source("templates/common/workspace/my_tasks.html")
+    script = _source("static/js/common/my_tasks.js")
+
+    for marker in (
+        'id="task-summary"', 'id="task-search"', 'id="task-status-filter"',
+        'id="my-project-list"', 'aria-live="polite"',
+    ):
+        assert marker in html
+    assert "projectNextAction" in script
+    assert "applyProjectFilters" in script
+    assert "data-task-card" in script
+    assert "innerHTML = project" not in script
 
 
 def test_download_modal_restores_running_job_and_explains_progress():

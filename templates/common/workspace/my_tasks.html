@@ -1,39 +1,48 @@
 <div class="d-flex align-items-center justify-content-between border-bottom pb-3 mb-4">
     <div>
-        <h3 class="mb-1">我的项目</h3>
-        <div class="small text-muted">查看被分配的项目及当前进度</div>
+        <h3 class="mb-1" id="task-workspace-title">我的工作台</h3>
+        <div class="small text-muted">集中处理项目下一步动作，并掌握创作进度</div>
     </div>
     <button class="btn btn-outline-secondary btn-sm" id="refresh-my-tasks" title="刷新" aria-label="刷新项目列表">
-        <i class="bi bi-arrow-clockwise"></i>
+        <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
     </button>
 </div>
 <div id="my-tasks-error" class="alert alert-danger d-none" role="alert"></div>
 
-<div class="d-flex align-items-center justify-content-between mb-3">
-    <h5 class="mb-0">我被分配的项目</h5>
-    <span class="badge bg-secondary" id="project-count" aria-live="polite">0</span>
-</div>
-<div class="table-responsive" id="my-tasks-table-container" aria-busy="true">
-    <table class="table table-sm align-middle">
-        <thead>
-            <tr>
-                <th>项目</th>
-                <th>来源选题</th>
-                <th>项目状态</th>
-                <th>更新时间</th>
-                <th class="text-end">操作</th>
-            </tr>
-        </thead>
-        <tbody id="my-project-list">
-            <tr id="my-tasks-skeleton" aria-hidden="true">
-                <td colspan="5">
-                    <div class="ui-skeleton" style="height:20px;width:60%;margin:8px 0;"></div>
-                    <div class="ui-skeleton" style="height:14px;width:40%;"></div>
-                </td>
-            </tr>
-        </tbody>
-    </table>
-</div>
+<section class="task-workspace" aria-labelledby="task-workspace-title">
+    <div id="task-summary" class="task-summary-grid" aria-live="polite">
+        <div class="task-summary-item">
+            <span class="task-summary-label">需处理</span>
+            <strong class="task-summary-value" id="task-summary-action">0</strong>
+        </div>
+        <div class="task-summary-item">
+            <span class="task-summary-label">进行中</span>
+            <strong class="task-summary-value" id="task-summary-running">0</strong>
+        </div>
+        <div class="task-summary-item">
+            <span class="task-summary-label">已完成</span>
+            <strong class="task-summary-value" id="task-summary-done">0</strong>
+        </div>
+    </div>
+    <div class="task-toolbar" role="search">
+        <label class="visually-hidden" for="task-search">搜索项目</label>
+        <input id="task-search" class="form-control" type="search" placeholder="搜索项目或来源选题">
+        <label class="visually-hidden" for="task-status-filter">筛选状态</label>
+        <select id="task-status-filter" class="form-select">
+            <option value="all">全部状态</option>
+            <option value="action">需处理</option>
+            <option value="running">进行中</option>
+            <option value="done">已完成</option>
+        </select>
+    </div>
+    <div id="my-project-list" class="task-card-grid" aria-busy="true">
+        <div id="my-tasks-skeleton" class="task-card task-card-skeleton" aria-hidden="true">
+            <div class="ui-skeleton task-skeleton-title"></div>
+            <div class="ui-skeleton task-skeleton-line"></div>
+            <div class="ui-skeleton task-skeleton-line task-skeleton-line-short"></div>
+        </div>
+    </div>
+</section>
 
 <div class="modal fade" id="project-edit-modal" tabindex="-1" aria-labelledby="project-edit-modal-title" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">

@@ -146,9 +146,9 @@ def ensure_sidecar(environment: dict[str, str], timeout_seconds: int) -> dict[st
 
 def review_environment(base: dict[str, str]) -> dict[str, str]:
     environment = base.copy()
+    environment.pop("SCREENPLAY_REVIEW_ENGINE", None)
     environment.update(
         {
-            "SCREENPLAY_REVIEW_ENGINE": "semif",
             "SCREENPLAY_REVIEW_SEMIF_URL": SIDECAR_URL,
             "SCREENPLAY_REVIEW_SEMIF_FALLBACK": "legacy",
             "SCREENPLAY_REVIEW_SEMIF_TIMEOUT_SECONDS": "900",

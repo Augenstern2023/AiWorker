@@ -120,7 +120,7 @@ def _build_report(
     total = len(windows)
     status = "部分状态包已评分" if partial else "全部状态包已评分"
     summary = (
-        f"SemIf {status}（{completed}/{total}）。结果仅表示给定选项之间的条件评分，"
+        f"本地初审{status}（{completed}/{total}）。结果仅表示给定选项之间的条件评分，"
         "尚未经过剧本业务校准，必须由人工复核；系统未生成因果解释或原句证据。"
     )
     return {
@@ -265,7 +265,7 @@ def _episode_reviews(states: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     rule = RULES_BY_ID.get(str(score.get("id") or ""))
                     issue_labels.append(rule.label if rule else str(score.get("id") or ""))
         labels = "、".join(dict.fromkeys(issue_labels))
-        summary = "SemIf 未标记需复核维度。" if not labels else f"待人工复核：{labels}。"
+        summary = "本地初审未标记需复核维度。" if not labels else f"待人工复核：{labels}。"
         result.append({"episode_number": number, "summary": summary, "findings": []})
     return result
 

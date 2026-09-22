@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -31,11 +31,13 @@ from .service import (
     source_fingerprint,
     validate_review_request,
 )
+from .local_runtime import LocalReviewRuntimeManager
 
 
 class ScriptReviewCreateRequest(BaseModel):
     source_type: str
     mode: str
+    review_method: Literal["complete", "local"] = "complete"
     project_id: int | None = None
     episode_numbers: list[int] = Field(default_factory=list)
     text: str = ""
@@ -79,9 +81,12 @@ def build_script_review_router(
     job_manager: Any,
     *,
     runtime_dir: str | Path = ".runtime",
+    local_runtime_manager: Any | None = None,
+    project_prompt_service: Any | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/script-reviews", tags=["script-reviews"])
-    prompt_service = ProjectPromptService(repository)
+    prompt_service = project_prompt_service or ProjectPromptService(repository)
+    local_runtime = local_runtime_manager or LocalReviewRuntimeManager()
 
     def assert_permission(principal: Principal, permission: str) -> None:
         if not principal.is_system_admin and permission not in principal.permissions:
@@ -184,12 +189,14 @@ def build_script_review_router(
         source: dict[str, Any],
         principal: Principal,
         *,
+        review_method: str = "complete",
         prompt_template_key: str | None = None,
         prompt_template_revision: int | None = None,
         prompt_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         source = dict(source)
-        if source_type == "project":
+        source["review_method"] = review_method
+        if source_type == "project" and review_method == "complete":
             prompt_snapshot = prompt_service.resolve_generation_snapshot(
                 project_id=int(source["project_id"]),
                 stage="review",
@@ -221,6 +228,7 @@ def build_script_review_router(
             "extra": {
                 "review_id": review["id"],
                 "project_id": source.get("project_id"),
+                "review_method": review_method,
                 "created_by_user_id": principal.user_id,
                 "runtime_dir": str(Path(runtime_dir).resolve()),
                 "prompt_snapshot": source.get("prompt_snapshot"),
@@ -253,6 +261,45 @@ def build_script_review_router(
         review = repository.set_script_review_job(review["id"], str(state.job_id))
         return {"review": review, "job_id": state.job_id}
 
+    async def require_method_ready(review_method: str) -> None:
+        if review_method != "local":
+            return
+        status = await local_runtime.status()
+        if not status.get("available"):
+            raise HTTPException(
+                503,
+                "本地初审尚未就绪，请等待准备完成、重试或改用完整审核",
+            )
+
+    @router.get("/capabilities")
+    async def review_capabilities(
+        _principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        local_status = await local_runtime.status()
+        return {
+            "default_method": "complete",
+            "methods": {
+                "complete": {
+                    "available": True,
+                    "installed": True,
+                    "state": "ready",
+                    "message": "完整审核可用",
+                },
+                "local": local_status,
+            },
+        }
+
+    @router.post("/local-runtime/start", status_code=202)
+    async def start_local_runtime(
+        _principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        try:
+            return await local_runtime.start()
+        except OSError as exc:
+            raise HTTPException(
+                503, "无法准备本地初审，请重试或改用完整审核"
+            ) from exc
+
     @router.post("", status_code=201)
     async def create_review(
         payload: ScriptReviewCreateRequest,
@@ -263,6 +310,13 @@ def build_script_review_router(
             data = validate_review_request(payload.model_dump())
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        if data["review_method"] == "local" and (
+            payload.prompt_template_key
+            or payload.prompt_template_revision
+            or payload.prompt_override
+        ):
+            raise HTTPException(400, "本地初审不使用审核模板或补充要求")
+        await require_method_ready(data["review_method"])
         if data["source_type"] == "text":
             assert_permission(principal, "script.review.generate")
             source = build_text_source(data["text"])
@@ -283,6 +337,7 @@ def build_script_review_router(
                 data["source_type"],
                 source,
                 principal,
+                review_method=data["review_method"],
                 prompt_template_key=payload.prompt_template_key,
                 prompt_template_revision=payload.prompt_template_revision,
                 prompt_override=payload.prompt_override,
@@ -304,7 +359,26 @@ def build_script_review_router(
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        return queue_review("text", build_text_source(text, source_filename=filename), principal)
+        try:
+            data = validate_review_request(
+                {
+                    "source_type": "text",
+                    "mode": "single",
+                    "review_method": request.headers.get(
+                        "X-Review-Method", "complete"
+                    ),
+                    "text": text,
+                }
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        await require_method_ready(data["review_method"])
+        return queue_review(
+            "text",
+            build_text_source(text, source_filename=filename),
+            principal,
+            review_method=data["review_method"],
+        )
 
     @router.get("")
     async def list_reviews(
@@ -373,6 +447,9 @@ def build_script_review_router(
             raise HTTPException(409, "完整项目审核必须从项目审核入口恢复")
         if review.get("status") != "failed" or not review.get("job_id"):
             raise HTTPException(409, "只有已失败且存在原任务的剧本审核可以继续")
+        await require_method_ready(
+            str((review.get("source_payload") or {}).get("review_method") or "complete")
+        )
         try:
             repository.prepare_script_review_resume(review_id)
             state = job_manager.retry(str(review["job_id"]))

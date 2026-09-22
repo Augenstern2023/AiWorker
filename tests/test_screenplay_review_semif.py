@@ -262,6 +262,17 @@ def test_worker_feature_flags_keep_legacy_default(monkeypatch) -> None:
     assert _semif_fallback_engine() == "legacy"
 
 
+def test_task_review_method_overrides_process_default(monkeypatch) -> None:
+    monkeypatch.setenv("SCREENPLAY_REVIEW_ENGINE", "legacy")
+    local_review = {"source_payload": {"review_method": "local"}}
+    assert _screenplay_review_engine(local_review) == "semif"
+    assert _semif_fallback_engine(local_review) == "none"
+
+    monkeypatch.setenv("SCREENPLAY_REVIEW_ENGINE", "semif")
+    complete_review = {"source_payload": {"review_method": "complete"}}
+    assert _screenplay_review_engine(complete_review) == "legacy"
+
+
 def test_worker_rejects_unknown_engine(monkeypatch) -> None:
     monkeypatch.setenv("SCREENPLAY_REVIEW_ENGINE", "unknown")
 
@@ -392,4 +403,4 @@ async def test_worker_falls_back_to_legacy_when_sidecar_is_unavailable(
     )
 
     assert repository.completed["summary"] == "Legacy fallback"
-    assert any("切换 Legacy" in message for _event, message in events)
+    assert any("切换完整审核" in message for _event, message in events)

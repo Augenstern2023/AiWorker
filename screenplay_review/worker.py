@@ -107,7 +107,7 @@ async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
             "unit": "正在逐集审核",
             "batch_summary": "正在汇总审核批次",
             "final_summary": "正在生成审核总评",
-            "semif_state": "正在执行 SemIf 规则评分",
+            "semif_state": "正在执行本地规则初审",
         }
         emit(
             job,
@@ -145,7 +145,7 @@ async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
                 or prompt_snapshot.get("mode") != expected_mode
             ):
                 raise ValueError("审核提示词快照与任务范围不匹配")
-        engine = _screenplay_review_engine()
+        engine = _screenplay_review_engine(review)
         if engine == "semif":
             try:
                 report = await _run_semif_review(
@@ -156,12 +156,12 @@ async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
                     on_request=request_started,
                 )
             except Exception as exc:
-                if _semif_fallback_engine() != "legacy":
+                if _semif_fallback_engine(review) != "legacy":
                     raise
                 emit(
                     job,
                     "progress",
-                    "SemIf 暂不可用，已切换 Legacy 审核",
+                    "本地初审暂不可用，已切换完整审核",
                     "warning",
                     {
                         "stage": "script_review",
@@ -230,14 +230,28 @@ async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
     )
 
 
-def _screenplay_review_engine() -> str:
+def _screenplay_review_engine(review: dict[str, Any] | None = None) -> str:
+    review_method = str(
+        ((review or {}).get("source_payload") or {}).get("review_method") or ""
+    ).strip()
+    if review_method == "complete":
+        return "legacy"
+    if review_method == "local":
+        return "semif"
+    if review_method:
+        raise ValueError("review_method must be complete or local")
     engine = os.getenv("SCREENPLAY_REVIEW_ENGINE", "legacy").strip().lower()
     if engine not in {"legacy", "semif"}:
         raise ValueError("SCREENPLAY_REVIEW_ENGINE must be legacy or semif")
     return engine
 
 
-def _semif_fallback_engine() -> str:
+def _semif_fallback_engine(review: dict[str, Any] | None = None) -> str:
+    review_method = str(
+        ((review or {}).get("source_payload") or {}).get("review_method") or ""
+    ).strip()
+    if review_method == "local":
+        return "none"
     fallback = os.getenv("SCREENPLAY_REVIEW_SEMIF_FALLBACK", "legacy").strip().lower()
     if fallback not in {"legacy", "none"}:
         raise ValueError("SCREENPLAY_REVIEW_SEMIF_FALLBACK must be legacy or none")

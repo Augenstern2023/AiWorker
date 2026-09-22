@@ -13,10 +13,30 @@
 <section class="mb-4" aria-label="发起剧本审核">
     <div class="row g-3 align-items-end">
         <div class="col-md-3"><label for="script-review-source" class="form-label small">来源</label><select id="script-review-source" class="form-select form-select-sm"><option value="project">创作项目</option><option value="text">上传剧本文件</option></select></div>
-        <div class="col-md-3"><label for="script-review-mode" class="form-label small">审核方式</label><select id="script-review-mode" class="form-select form-select-sm"><option value="single">单集</option><option value="multiple">多集</option><option value="collection">合集</option></select></div>
+        <div class="col-md-3"><label for="script-review-mode" class="form-label small">审核范围</label><select id="script-review-mode" class="form-select form-select-sm"><option value="single">单集</option><option value="multiple">多集</option><option value="collection">合集</option></select></div>
         <div id="script-review-project-wrap" class="col-md-4"><label for="script-review-project" class="form-label small">项目</label><select id="script-review-project" class="form-select form-select-sm"></select></div>
         <div class="col-md-2"><button id="script-review-submit" class="btn btn-primary btn-sm w-100" type="button"><i class="bi bi-magic me-1" aria-hidden="true"></i>开始审核</button></div>
     </div>
+    <fieldset id="script-review-methods" class="border rounded p-3 mt-3">
+        <legend class="float-none w-auto px-1 fs-6 mb-2">审核方式</legend>
+        <div class="row g-2">
+            <div class="col-md-6">
+                <div class="form-check border rounded p-3 h-100">
+                    <input id="script-review-method-complete" class="form-check-input ms-0 me-2" type="radio" name="script-review-method" value="complete" aria-describedby="script-review-method-complete-help" checked>
+                    <label class="form-check-label fw-semibold" for="script-review-method-complete">完整审核 <span class="badge text-bg-primary ms-1">推荐</span></label>
+                    <div id="script-review-method-complete-help" class="small text-muted mt-1 ms-4">提供问题分析、原文依据和修改建议。</div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="form-check border rounded p-3 h-100">
+                    <input id="script-review-method-local" class="form-check-input ms-0 me-2" type="radio" name="script-review-method" value="local" aria-describedby="script-review-method-local-help">
+                    <label class="form-check-label fw-semibold" for="script-review-method-local">本地初审 <span id="script-review-method-local-badge" class="badge text-bg-secondary ms-1">检查中</span></label>
+                    <div id="script-review-method-local-help" class="small text-muted mt-1 ms-4">剧本在本机处理，速度较慢，结果需要人工确认。</div>
+                </div>
+            </div>
+        </div>
+        <div id="script-review-method-status" class="small text-muted mt-2" aria-live="polite"></div>
+    </fieldset>
     <div id="script-review-episodes" class="d-flex flex-wrap gap-2 mt-3"></div>
     <div id="script-review-file-wrap" class="mt-3 d-none"><label for="script-review-file" class="form-label small">剧本文件</label><input id="script-review-file" class="form-control" type="file" accept=".txt,.text,.md,.markdown,.mdown,.fountain,.fd,.rst,text/plain,text/markdown"></div>
     <div id="script-review-prompt-wrap" class="border rounded p-3 mt-3">
@@ -37,7 +57,7 @@
 <section id="script-review-result" class="d-none border-top pt-4 mb-4" aria-live="polite"></section>
 <section aria-label="审核历史">
     <h5 class="mb-3">审核历史</h5>
-    <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>来源</th><th>范围</th><th>AI 建议</th><th>人工结论</th><th>状态</th><th>时间</th><th class="text-end">操作</th></tr></thead><tbody id="script-review-history"><tr id="script-review-skeleton" aria-hidden="true"><td colspan="7"><div class="ui-skeleton" style="height:18px;width:80%;margin:6px 0;"></div><div class="ui-skeleton" style="height:14px;width:50%;"></div></td></tr></tbody></table></div>
+    <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>来源</th><th>方式</th><th>范围</th><th>系统结论</th><th>人工结论</th><th>状态</th><th>时间</th><th class="text-end">操作</th></tr></thead><tbody id="script-review-history"><tr id="script-review-skeleton" aria-hidden="true"><td colspan="8"><div class="ui-skeleton" style="height:18px;width:80%;margin:6px 0;"></div><div class="ui-skeleton" style="height:14px;width:50%;"></div></td></tr></tbody></table></div>
 </section>
 
 <div class="modal fade" id="scriptReviewProgressModal" tabindex="-1" data-bs-backdrop="static" aria-labelledby="scriptReviewProgressModalLabel" aria-hidden="true">
@@ -97,4 +117,4 @@
     </div>
 </div>
 {% endblock %}
-{% block scripts %}<script src="/static/js/review/scripts.js?v={{ asset_version }}-review-and-optimization-progress"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/review/scripts.js?v={{ asset_version }}-friendly-review-method"></script>{% endblock %}

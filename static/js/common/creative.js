@@ -2863,6 +2863,33 @@ window.aiworkerModules.push(() => ({
                     this.showCreativeNotice(`${template.title}将在下次${this.promptStageLabel(state.stage)}生成中使用，已有内容不变`);
                 },
 
+                async enableCurrentProjectPromptLibrary() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || state.saving || state.settings?.enabled) return;
+                    state.saving = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-system/enable`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({template_key: 'classic-compatible'}),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '启用模板配置失败');
+                        state.settings = data.settings || data;
+                        await this.loadProjectPromptModule(state.stage);
+                        this.showCreativeNotice('模板配置已启用，现在可以选择生成模板');
+                    } catch (error) {
+                        state.error = error.message || '启用模板配置失败';
+                    } finally {
+                        state.saving = false;
+                    }
+                },
+
                 async savePromptBinding() {
                     const state = this.creativeWorkspace.promptLibrary;
                     const projectId = this.creativeWorkspace.project?.id;

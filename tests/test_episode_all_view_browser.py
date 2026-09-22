@@ -151,10 +151,10 @@ def test_episode_workspace_all_view_and_multi_download_modal(
                   return new Response(JSON.stringify({
                     default_template_id: 'classic',
                     items: [
-                      {id: 'classic', name: '经典场次剧本', description: '经典', previewable: true},
-                      {id: 'wife_revenge', name: '妻子的反击', description: '妻子', previewable: true},
-                      {id: 'character_outsource', name: '人设外包公司', description: '人设', previewable: true},
-                      {id: 'scholar_beggar', name: '状元与乞丐', description: '状元', previewable: true}
+                      {id: 'classic', name: '标准场次格式', description: '标准', previewable: true},
+                      {id: 'wife_revenge', name: '全案审阅格式', description: '审阅', previewable: true},
+                      {id: 'character_outsource', name: '紧凑编剧格式', description: '紧凑', previewable: true},
+                      {id: 'scholar_beggar', name: 'EP 分集格式', description: '分集', previewable: true}
                     ]
                   }), {status: 200, headers: {'content-type': 'application/json'}});
                 }

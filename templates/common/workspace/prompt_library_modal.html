@@ -20,7 +20,7 @@
             <div class="modal-body">
                 <div class="alert alert-info" x-show="!creativeWorkspace.promptLibrary.settings?.enabled" x-cloak>
                     <div class="fw-semibold">这是旧项目，当前默认仍使用原有提示词。</div>
-                    <div class="small mt-1">“仅下次生成使用”不会改变项目设置；首次“保存默认设置”会同时启用模板设置。两种操作都只影响之后新生成的内容，不会修改已有内容。</div>
+                    <div class="small mt-1">启用模板配置后，即可为各创作阶段选择生成模板。只影响之后新生成的内容，不会修改已有内容。</div>
                 </div>
 
                 <div class="text-center text-muted py-4" x-show="creativeWorkspace.promptLibrary.loading">正在读取模板库…</div>
@@ -830,8 +830,9 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
                 {% if prompt_library_surface == 'picker' %}
-                <button type="button" class="btn btn-outline-primary" @click="usePromptForNextGeneration" :disabled="!creativeWorkspace.promptLibrary.selectedTemplateKey">仅下次生成使用</button>
-                <button type="button" class="btn btn-primary" @click="savePromptBinding" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">保存默认设置</button>
+                <button type="button" class="btn btn-outline-primary" x-show="creativeWorkspace.promptLibrary.settings?.enabled" x-cloak @click="usePromptForNextGeneration" :disabled="!creativeWorkspace.promptLibrary.selectedTemplateKey">仅下次生成使用</button>
+                <button type="button" class="btn btn-primary" x-show="creativeWorkspace.promptLibrary.settings?.enabled" x-cloak @click="savePromptBinding" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">保存默认设置</button>
+                <button type="button" class="btn btn-primary" x-show="!creativeWorkspace.promptLibrary.settings?.enabled" x-cloak @click="enableCurrentProjectPromptLibrary" :disabled="creativeWorkspace.promptLibrary.saving">启用模板配置</button>
                 {% endif %}
             </div>
         </div>

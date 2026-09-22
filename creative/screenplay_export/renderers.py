@@ -499,9 +499,9 @@ def export_filename(
     template_id: str,
     format: str,
 ) -> str:
-    """Build a Windows-safe, length-bounded human export filename."""
+    """Build a Windows-safe filename without exposing the layout template."""
 
-    spec = get_template_spec(template_id)
+    get_template_spec(template_id)
     numbers = list(document.metadata.episode_numbers)
     if len(numbers) == 1:
         scope = f"第{numbers[0]}集"
@@ -511,10 +511,9 @@ def export_filename(
         scope = "第" + "、".join(map(str, numbers)) + "集"
     else:
         scope = "全集"
-    short_name = _safe_filename_part(spec.short_name, limit=24)
     if len(scope) > 64 and numbers:
         scope = f"第{numbers[0]}集等{len(numbers)}集"
-    suffix = f"{scope}{short_name}模板"
+    suffix = scope
     name = _safe_filename_part(
         document.drama_name,
         limit=max(20, 180 - len(suffix)),

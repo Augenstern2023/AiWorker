@@ -81,8 +81,8 @@ _COMMON_FULLWIDTH_BLOCKS = (
 _TEMPLATES = (
     TemplateSpec(
         id="classic",
-        name="经典场次剧本",
-        short_name="经典",
+        name="标准场次格式",
+        short_name="标准场次",
         description="沿用现有场次、道具、人物和剧本标记，适合制作交付与旧版兼容。",
         previewable=True,
         formats=("md", "pdf", "docx"),
@@ -115,8 +115,8 @@ _TEMPLATES = (
     ),
     TemplateSpec(
         id="wife_revenge",
-        name="《妻子的反击》样式",
-        short_name="妻子反击",
+        name="全案审阅格式",
+        short_name="全案审阅",
         description="突出剧名、简介、人物小传和分集层级，适合阅读与审稿。",
         previewable=True,
         formats=("md", "pdf", "docx"),
@@ -139,8 +139,8 @@ _TEMPLATES = (
     ),
     TemplateSpec(
         id="character_outsource",
-        name="《人设外包公司》样式",
-        short_name="人设外包",
+        name="紧凑编剧格式",
+        short_name="紧凑编剧",
         description="动作与台词连续排布，场次结构紧凑，适合编剧流畅阅读。",
         previewable=True,
         formats=("md", "pdf", "docx"),
@@ -163,8 +163,8 @@ _TEMPLATES = (
     ),
     TemplateSpec(
         id="scholar_beggar",
-        name="《状元与乞丐》样式",
-        short_name="状元乞丐",
+        name="EP 分集格式",
+        short_name="EP分集",
         description="采用 EP 集标识和中文全角场次标点，适合明确分集分页的交付稿。",
         previewable=True,
         formats=("md", "pdf", "docx"),

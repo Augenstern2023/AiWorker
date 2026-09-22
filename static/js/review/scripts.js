@@ -12,9 +12,6 @@
     const reviewPromptTemplate = document.getElementById('script-review-prompt-template');
     const reviewPromptRequirements = document.getElementById('script-review-prompt-requirements');
     const reviewPromptDescription = document.getElementById('script-review-prompt-description');
-    const reviewEngine = document.getElementById('script-review-engine');
-    const reviewModelProfileWrap = document.getElementById('script-review-model-profile-wrap');
-    const reviewModelProfile = document.getElementById('script-review-model-profile');
     const submit = document.getElementById('script-review-submit');
     const result = document.getElementById('script-review-result');
     const history = document.getElementById('script-review-history');
@@ -66,20 +63,6 @@
 
     function label(value) {
         return { queued: '等待审核', running: '审核中', cancelled: '已取消', pending_confirmation: '待人工确认', confirmed: '已确认', stale: '已过期', failed: '审核失败' }[value] || value || '-';
-    }
-
-    function qualityLabel(value) {
-        return { passed: '质量通过', needs_revision: '修改后复审', rejected: '未通过', manual_review: '人工复核' }[value] || value || '-';
-    }
-
-    function safeLocalUrl(value) {
-        const raw = String(value || '');
-        try {
-            const origin = window.location.origin === 'null' ? 'http://aiworker.local' : window.location.origin;
-            const parsed = new URL(raw, origin);
-            if (raw.startsWith('/') && !raw.startsWith('//') && !raw.includes('\\') && parsed.origin === origin) return `${parsed.pathname}${parsed.search}${parsed.hash}`;
-        } catch (_error) { return ''; }
-        return '';
     }
 
     function reviewScope(payload) {
@@ -489,12 +472,10 @@
         }
         submit.disabled = true;
         const payload = source.value === 'text'
-            ? { source_type: 'text', mode: 'single', engine: reviewEngine?.value || 'legacy' }
+            ? { source_type: 'text', mode: 'single' }
             : {
                 source_type: 'project', mode: mode.value, project_id: Number(project.value),
                 episode_numbers: selectedEpisodes(),
-                engine: reviewEngine?.value || 'legacy',
-                ...(reviewEngine?.value === 'semif' ? { model_profile: String(reviewModelProfile?.value || 'local-default').trim() } : {}),
                 ...promptSelectionPayload(reviewPromptTemplate, reviewPromptRequirements),
             };
         showReviewProgress(reviewScope(payload));
@@ -502,12 +483,7 @@
             const response = source.value === 'text'
                 ? await aiworkerApi.request('/api/script-reviews/file', {
                     method: 'POST',
-                    headers: {
-                        'X-Script-Filename': encodeURIComponent(file.name),
-                        'X-Script-Review-Engine': payload.engine,
-                        ...(payload.engine === 'semif' ? { 'X-SemIf-Model-Profile': String(reviewModelProfile?.value || 'local-default').trim() } : {}),
-                        'Content-Type': file.type || 'text/plain',
-                    },
+                    headers: {'X-Script-Filename': encodeURIComponent(file.name), 'Content-Type': file.type || 'text/plain'},
                     body: file,
                 })
                 : await aiworkerApi.request('/api/script-reviews', {
@@ -598,100 +574,6 @@
             list.append(item);
         });
         result.append(list);
-    }
-
-    function renderSemifReport(review) {
-        const report = review.report || {};
-        if (report.schema_version !== 'screenplay-review-report-v2' || report.partial === true) return;
-        const summary = document.createElement('section');
-        summary.className = 'border rounded p-3 mb-3';
-        const top = document.createElement('div');
-        top.className = 'd-flex flex-wrap gap-2 align-items-center mb-3';
-        const quality = document.createElement('span');
-        quality.className = `badge ${report.quality_status === 'passed' ? 'text-bg-success' : report.quality_status === 'needs_revision' ? 'text-bg-warning' : 'text-bg-danger'}`;
-        quality.textContent = qualityLabel(report.quality_status);
-        const score = document.createElement('strong');
-        score.textContent = `综合得分 ${Number(report.overall_score || 0)}/100`;
-        const gate = document.createElement('span');
-        gate.className = 'small text-muted';
-        gate.textContent = `硬门槛：${report.hard_gate?.passed ? '通过' : '未通过或需人工复核'} · ${report.review_version || 'review-v001'}`;
-        top.append(quality, score, gate);
-        summary.append(top);
-        const dimensions = document.createElement('div');
-        dimensions.className = 'row g-2';
-        (report.dimensions || []).forEach((item) => {
-            const column = document.createElement('div');
-            column.className = 'col-md-6';
-            const card = document.createElement('div');
-            card.className = 'border rounded p-2 h-100';
-            const heading = document.createElement('div');
-            heading.className = 'd-flex justify-content-between gap-2';
-            const name = document.createElement('strong'); name.textContent = item.label || item.id || '-';
-            const value = document.createElement('span'); value.textContent = `${Number(item.weighted_score || 0).toFixed(1)} / ${Number(item.weight || 0)}`;
-            heading.append(name, value); card.append(heading);
-            const option = document.createElement('div'); option.className = 'small text-muted'; option.textContent = item.selected_option || '-'; card.append(option);
-            (item.evidence || []).slice(0, 3).forEach((evidence) => {
-                const line = document.createElement('div'); line.className = 'small mt-1';
-                const url = safeLocalUrl(evidence.source_url);
-                if (url) {
-                    const link = document.createElement('a'); link.href = url; link.textContent = `${evidence.episode_id || '-'} / ${evidence.scene_id || '-'}`; line.append(link);
-                } else {
-                    line.textContent = `${evidence.episode_id || '-'} / ${evidence.scene_id || '-'}`;
-                }
-                if (evidence.text) line.append(document.createTextNode(`：${evidence.text}`));
-                card.append(line);
-            });
-            column.append(card); dimensions.append(column);
-        });
-        summary.append(dimensions);
-        if ((report.revision_plan || []).length) {
-            const list = document.createElement('ul'); list.className = 'mt-3 mb-0 ps-3';
-            report.revision_plan.forEach((item) => {
-                const row = document.createElement('li'); row.textContent = `[${item.priority || 'P2'}] ${item.action || item.suggestion || '待补充修改动作'}`; list.append(row);
-            });
-            summary.append(list);
-        }
-        result.append(summary);
-    }
-
-    const pendingRerunKeys = new Map();
-
-    function rerunRequestKey(reviewId, scope) {
-        const identity = `${reviewId}:${scope}`;
-        if (!pendingRerunKeys.has(identity)) {
-            pendingRerunKeys.set(identity, window.crypto?.randomUUID?.() || `review-${reviewId}-${scope}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-        }
-        return pendingRerunKeys.get(identity);
-    }
-
-    async function rerunSemifReview(reviewId, scope) {
-        showError();
-        const identity = `${reviewId}:${scope}`;
-        try {
-            const payload = await readJson(await aiworkerApi.request(`/api/script-reviews/${reviewId}/reruns`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ scope, request_key: rerunRequestKey(reviewId, scope) }),
-            }));
-            pendingRerunKeys.delete(identity);
-            activeReviewId = payload.review.id;
-            renderReview(payload.review);
-            await loadHistory();
-            void pollReview(payload.review.id);
-        } catch (requestError) { showError(requestError.message); }
-    }
-
-    function renderSemifRerunActions(review) {
-        if (review.report?.schema_version !== 'screenplay-review-report-v2' || ['queued', 'running', 'failed'].includes(review.status)) return;
-        const actions = document.createElement('div'); actions.className = 'd-flex flex-wrap gap-2 mt-3';
-        [
-            ['failed_dimensions_only', '仅复审失败维度'],
-            ['affected_episodes', '复审受影响集'],
-            ['full', '完整复审'],
-        ].forEach(([scope, text]) => {
-            const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-outline-light btn-sm'; button.textContent = text;
-            button.addEventListener('click', () => rerunSemifReview(review.id, scope)); actions.append(button);
-        });
-        result.append(actions);
     }
 
     function appendFindingSection(parent, title, items) {
@@ -1071,7 +953,6 @@
             overview.className = 'mb-3';
             overview.textContent = `AI 建议：${review.ai_verdict}。${review.report.summary || ''}`;
             result.append(overview);
-            renderSemifReport(review);
         }
         const coreFindings = review.report.core_findings || [];
         const coreFindingKeys = new Set(coreFindings.map(findingKey));
@@ -1110,7 +991,6 @@
             });
         }
         appendFindingSection(result, '跨集问题', review.report.cross_episode_findings || []);
-        renderSemifRerunActions(review);
         if (review.status === 'pending_confirmation' && review.source_payload?.formal) {
             const controls = document.createElement('div');
             controls.className = 'd-flex flex-wrap gap-2 align-items-center mt-3';
@@ -1149,10 +1029,6 @@
         }
         renderOptimizationSection(review);
     }
-
-    reviewEngine?.addEventListener('change', () => {
-        reviewModelProfileWrap?.classList.toggle('d-none', reviewEngine.value !== 'semif');
-    });
 
     async function confirmReview(reviewId, finalVerdict, confirmationNote) {
         try {

@@ -258,56 +258,6 @@ def test_script_review_marks_stale_when_the_script_changed(
         postgres_creative.mark_script_review_stale_if_changed(999999, "fp")
 
 
-def test_script_review_rerun_creation_is_idempotent_and_snapshot_bound(
-    postgres_creative,
-) -> None:
-    parent = _create_review(postgres_creative, project_id=None, fingerprint="fp-parent")
-    payload = {
-        "mode": "single",
-        "episode_numbers": [1],
-        "fingerprint": "fp-parent",
-        "execution_snapshot": {
-            "engine": "semif",
-            "parent_review_id": parent["id"],
-            "request_key": "rerun-once-1",
-            "rerun_scope": "full",
-        },
-    }
-    values = {
-        "source_type": "text",
-        "mode": "single",
-        "project_id": None,
-        "episode_numbers": [1],
-        "source_fingerprint": "fp-parent",
-        "source_payload": payload,
-        "created_by": "writer-1",
-        "parent_review_id": parent["id"],
-        "request_key": "rerun-once-1",
-        "rerun_scope": "full",
-    }
-
-    first, first_created = postgres_creative.create_script_review_rerun_once(**values)
-    second, second_created = postgres_creative.create_script_review_rerun_once(**values)
-
-    assert first_created is True
-    assert second_created is False
-    assert second["id"] == first["id"]
-    with pytest.raises(ValueError, match="不同的复审范围"):
-        postgres_creative.create_script_review_rerun_once(
-            **{
-                **values,
-                "rerun_scope": "affected_episodes",
-                "source_payload": {
-                    **payload,
-                    "execution_snapshot": {
-                        **payload["execution_snapshot"],
-                        "rerun_scope": "affected_episodes",
-                    },
-                },
-            }
-        )
-
-
 def test_script_review_listing_filters_and_ordering(
     postgres_creative, isolated_system_database
 ) -> None:

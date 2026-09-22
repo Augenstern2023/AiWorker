@@ -87,6 +87,13 @@ def test_template_registry_exposes_four_previewable_templates() -> None:
     templates = list_template_specs()
 
     assert [item.id for item in templates] == TEMPLATE_IDS
+    assert [item.name for item in templates] == [
+        "标准场次格式",
+        "全案审阅格式",
+        "紧凑编剧格式",
+        "EP 分集格式",
+    ]
+    assert not any("《" in item.name or "》" in item.name for item in templates)
     assert all(item.previewable for item in templates)
     assert all({"md", "pdf", "docx"} <= set(item.formats) for item in templates)
     assert all(item.scene_header and item.episode_header for item in templates)
@@ -213,12 +220,16 @@ def test_pdf_is_readable_and_uses_a4_pages() -> None:
     assert len(reader.pages) >= 1
 
 
-def test_export_filename_is_safe_and_describes_scope_template_and_format() -> None:
+@pytest.mark.parametrize("template_id", TEMPLATE_IDS)
+def test_export_filename_is_safe_and_keeps_original_drama_scope(
+    template_id: str,
+) -> None:
     filename = export_filename(
-        sample_document(), template_id="character_outsource", format="docx"
+        sample_document(), template_id=template_id, format="docx"
     )
 
-    assert filename == "记忆_裂缝第1集-第2集人设外包模板.docx"
+    assert filename == "记忆_裂缝第1集-第2集.docx"
+    assert "模板" not in filename
     assert not any(character in filename for character in '\\/:*?"<>|')
 
 

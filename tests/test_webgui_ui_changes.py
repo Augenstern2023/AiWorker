@@ -1729,6 +1729,82 @@ Object.assign(component, {
     assert result.returncode == 0, result.stderr
 
 
+def test_standard_generation_reuses_last_model_and_reasoning_selection():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+const storage = new Map();
+global.window = {
+  aiworkerModules: [],
+  localStorage: {
+    getItem: key => storage.has(key) ? storage.get(key) : null,
+    setItem: (key, value) => storage.set(key, value),
+  },
+};
+global.aiworkerApi = {request: async () => ({
+  ok: true,
+  json: async () => ({
+    default_model_record_id: 'model-a',
+    items: [
+      {id: 'model-a', reasoning_effort_options: [{value: 'high', label: '高'}]},
+      {id: 'model-b', reasoning_effort_options: [{value: 'high', label: '高'}]},
+    ],
+  }),
+})};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+
+const createComponent = () => {
+  const component = window.aiworkerModules[0]();
+  Object.assign(component, {
+    creativeWorkspace: {
+      sequentialGeneration: {
+        modelOptions: [], modelRecordId: '', defaultModelRecordId: '',
+        reasoningEffortOptions: [], reasoningEffort: '', loading: false,
+        error: '', pending: null,
+      },
+    },
+    sequentialGenerationModelModal: {show: () => {}},
+  });
+  return component;
+};
+
+(async () => {
+  const first = createComponent();
+  await first.openSequentialGenerationModel('/generate', {}, 'script', {});
+  first.creativeWorkspace.sequentialGeneration.modelRecordId = 'model-b';
+  first.syncGenerationReasoningEfforts(first.creativeWorkspace.sequentialGeneration);
+  first.creativeWorkspace.sequentialGeneration.reasoningEffort = 'high';
+  first.persistSequentialGenerationPreference();
+
+  const afterReload = createComponent();
+  await afterReload.openSequentialGenerationModel('/generate', {}, 'script', {});
+  assert.equal(afterReload.creativeWorkspace.sequentialGeneration.modelRecordId, 'model-b');
+  assert.equal(afterReload.creativeWorkspace.sequentialGeneration.reasoningEffort, 'high');
+
+  storage.set(
+    afterReload.sequentialGenerationPreferenceStorageKey(),
+    JSON.stringify({modelRecordId: 'retired-model', reasoningEffort: 'high'})
+  );
+  const withRetiredModel = createComponent();
+  await withRetiredModel.openSequentialGenerationModel('/generate', {}, 'script', {});
+  assert.equal(withRetiredModel.creativeWorkspace.sequentialGeneration.modelRecordId, '');
+  assert.equal(withRetiredModel.creativeWorkspace.sequentialGeneration.reasoningEffort, '');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_free_outline_keeps_field_level_ai_rewrite_and_head_conflict_guard():
     outlines = _source("static/js/writing/outlines.js")
     schema = _source("creative/schema.py")

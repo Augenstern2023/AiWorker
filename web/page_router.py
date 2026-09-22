@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import lru_cache
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -26,13 +27,18 @@ from .navigation_service import PAGE_ROUTES, NavigationService
 STATIC_ASSET_ROOT = Path(__file__).resolve().parents[1] / "static"
 
 
-def static_asset_version() -> str:
-    """Invalidate browser assets whenever a workspace script or stylesheet changes."""
-    latest_mtime_ns = max(
+def _scan_static_asset_version() -> str:
+    """Scan static files for the latest modification timestamp."""
+    return str(max(
         (path.stat().st_mtime_ns for path in STATIC_ASSET_ROOT.rglob("*") if path.is_file()),
         default=0,
-    )
-    return str(latest_mtime_ns)
+    ))
+
+
+@lru_cache(maxsize=1)
+def static_asset_version() -> str:
+    """Return the process-level version for static browser assets."""
+    return _scan_static_asset_version()
 
 
 PAGE_TEMPLATES = {
@@ -295,6 +301,7 @@ def _page_response(
             navigation_service,
             page_title=page_title,
             workspace_runtime=template_name not in {
+                "common/my_tasks.html",
                 "selection/dashboard.html",
                 "writing/dashboard.html",
             },

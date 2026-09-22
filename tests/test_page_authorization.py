@@ -88,18 +88,51 @@ def _principal(
     )
 
 
-def test_asset_version_changes_when_a_static_file_changes(tmp_path: Path, monkeypatch):
-    asset = tmp_path / "selection-topics.js"
+def test_asset_version_scans_static_tree_once(tmp_path: Path, monkeypatch):
+    static_root = tmp_path / "static"
+    static_root.mkdir()
+    asset = static_root / "app.js"
     asset.write_text("first", encoding="utf-8")
-    monkeypatch.setattr(page_router, "STATIC_ASSET_ROOT", tmp_path)
+    monkeypatch.setattr(page_router, "STATIC_ASSET_ROOT", static_root)
+    page_router.static_asset_version.cache_clear()
     os.utime(asset, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
 
-    first_version = page_router.static_asset_version()
+    first = page_router.static_asset_version()
 
     asset.write_text("second", encoding="utf-8")
     os.utime(asset, ns=(1_700_000_002_000_000_000, 1_700_000_002_000_000_000))
 
-    assert page_router.static_asset_version() != first_version
+    assert page_router.static_asset_version() == first
+    page_router.static_asset_version.cache_clear()
+    assert page_router.static_asset_version() != first
+
+
+def test_asset_version_scanner_runs_once_per_process(monkeypatch):
+    calls = 0
+
+    def scan() -> str:
+        nonlocal calls
+        calls += 1
+        return str(calls)
+
+    monkeypatch.setattr(page_router, "_scan_static_asset_version", scan)
+    page_router.static_asset_version.cache_clear()
+    try:
+        assert page_router.static_asset_version() == "1"
+        assert page_router.static_asset_version() == "1"
+        assert calls == 1
+    finally:
+        page_router.static_asset_version.cache_clear()
+
+
+def test_tasks_page_does_not_load_workspace_runtime(page_app):
+    client = _client(page_app, _principal(roles=("system_admin",)))
+    response = client.get("/tasks")
+
+    assert response.status_code == 200
+    assert "/static/js/common/my_tasks.js" in response.text
+    assert "/static/js/common/tasks.js" not in response.text
+    assert "/static/js/common/creative.js" not in response.text
 
 
 @pytest.fixture

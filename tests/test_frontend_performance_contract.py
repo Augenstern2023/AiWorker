@@ -34,3 +34,10 @@ def test_heavy_libraries_are_route_scoped():
     assert "echarts.min.js" not in base
     assert "echarts.min.js" in analytics
     assert "creative.js" not in base
+
+
+def test_tasks_template_only_loads_its_page_script():
+    tasks = source("templates/common/my_tasks.html")
+    assert "/static/js/common/my_tasks.js" in tasks
+    assert "/static/js/common/tasks.js" not in tasks
+    assert "/static/js/common/creative.js" not in tasks

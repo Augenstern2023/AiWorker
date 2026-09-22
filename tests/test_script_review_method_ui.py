@@ -26,6 +26,8 @@ def test_review_page_uses_writer_facing_method_choices() -> None:
     assert "本地初审" in page
     assert "提供问题分析、原文依据和修改建议" in page
     assert "剧本在本机处理" in page
+    assert "审核模板" not in page
+    assert "本次审核补充要求" not in page
     assert "SemIf" not in page
     assert "Legacy" not in page
 

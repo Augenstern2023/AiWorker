@@ -39,19 +39,6 @@
     </fieldset>
     <div id="script-review-episodes" class="d-flex flex-wrap gap-2 mt-3"></div>
     <div id="script-review-file-wrap" class="mt-3 d-none"><label for="script-review-file" class="form-label small">剧本文件</label><input id="script-review-file" class="form-control" type="file" accept=".txt,.text,.md,.markdown,.mdown,.fountain,.fd,.rst,text/plain,text/markdown"></div>
-    <div id="script-review-prompt-wrap" class="border rounded p-3 mt-3">
-        <div class="row g-3">
-            <div class="col-md-5">
-                <label for="script-review-prompt-template" class="form-label small">审核模板</label>
-                <select id="script-review-prompt-template" class="form-select form-select-sm"><option value="">读取项目模板…</option></select>
-                <div id="script-review-prompt-description" class="form-text">模板只调整审核关注点、严重度倾向和证据表达，不改变报告契约或人工确认。</div>
-            </div>
-            <div class="col-md-7">
-                <label for="script-review-prompt-requirements" class="form-label small">本次审核补充要求</label>
-                <textarea id="script-review-prompt-requirements" class="form-control form-control-sm" rows="2" maxlength="4000" placeholder="例如：优先检查身份信息差和感情推进是否失速。"></textarea>
-            </div>
-        </div>
-    </div>
 </section>
 
 <section id="script-review-result" class="d-none border-top pt-4 mb-4" aria-live="polite"></section>
@@ -117,4 +104,4 @@
     </div>
 </div>
 {% endblock %}
-{% block scripts %}<script src="/static/js/review/scripts.js?v={{ asset_version }}-friendly-review-method"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/review/scripts.js?v={{ asset_version }}-simplified-review-method"></script>{% endblock %}

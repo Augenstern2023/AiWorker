@@ -8,10 +8,6 @@
     const fileWrap = document.getElementById('script-review-file-wrap');
     const scriptFile = document.getElementById('script-review-file');
     const episodes = document.getElementById('script-review-episodes');
-    const reviewPromptWrap = document.getElementById('script-review-prompt-wrap');
-    const reviewPromptTemplate = document.getElementById('script-review-prompt-template');
-    const reviewPromptRequirements = document.getElementById('script-review-prompt-requirements');
-    const reviewPromptDescription = document.getElementById('script-review-prompt-description');
     const reviewMethodInputs = [...document.querySelectorAll('input[name="script-review-method"]')];
     const localReviewMethodInput = document.getElementById('script-review-method-local');
     const localReviewMethodBadge = document.getElementById('script-review-method-local-badge');
@@ -88,8 +84,6 @@
 
     function syncReviewMethodUi() {
         const local = selectedReviewMethod() === 'local';
-        const uploading = source.value === 'text';
-        reviewPromptWrap?.classList.toggle('d-none', uploading || local);
         if (reviewMethodStatus) {
             reviewMethodStatus.textContent = local
                 ? localReviewCapability.message
@@ -451,16 +445,9 @@
     async function loadSelectedProject() {
         const id = Number(project.value || 0);
         selectedProject = null;
-        if (reviewPromptRequirements) reviewPromptRequirements.value = '';
-        if (!id) {
-            resetPromptSelector(reviewPromptTemplate, reviewPromptDescription);
-            return renderEpisodes();
-        }
+        if (!id) return renderEpisodes();
         try {
             selectedProject = await readJson(await aiworkerApi.request(`/api/creative/projects/${id}`));
-            await loadPromptSelector(
-                id, 'review', reviewPromptTemplate, reviewPromptDescription,
-            );
         } catch (requestError) {
             showError(requestError.message);
         }
@@ -479,7 +466,6 @@
             option.textContent = '暂无可进入正式审核的项目';
             project.append(option);
             selectedProject = null;
-            resetPromptSelector(reviewPromptTemplate, reviewPromptDescription);
             renderEpisodes();
             return;
         }
@@ -581,7 +567,6 @@
                     source_type: 'project', mode: mode.value, project_id: Number(project.value),
                     episode_numbers: selectedEpisodes(),
                     review_method: reviewMethod,
-                    ...(reviewMethod === 'complete' ? promptSelectionPayload(reviewPromptTemplate, reviewPromptRequirements) : {}),
                 };
             showReviewProgress(reviewScope(payload));
             const response = source.value === 'text'

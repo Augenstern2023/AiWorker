@@ -3426,6 +3426,12 @@ def test_workspace_shell_has_live_region_and_toast_container():
     assert "ui-state.js" in base
 
 
+def test_workspace_shell_exposes_skip_link_and_main_landmark():
+    base = _source("templates/layouts/base.html")
+    assert 'class="ui-skip-link"' in base
+    assert 'id="workspace-main"' in base
+
+
 def test_workspace_shell_has_accessible_mobile_drawer_controls():
     base = _source("templates/layouts/base.html")
     assert 'id="sidebar-toggle"' in base

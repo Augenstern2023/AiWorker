@@ -63,7 +63,8 @@
     <div id="ui-live-region" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
     <div id="ui-toast-region" class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 1100;"></div>
     {% endif %}
-    <main{% if workspace_page %} class="main-content"{% else %} class="container py-4"{% endif %}>
+    <a class="ui-skip-link" href="#workspace-main">跳到主要内容</a>
+    <main id="workspace-main"{% if workspace_page %} class="main-content"{% else %} class="container py-4"{% endif %}>
         {% block page_header %}{% endblock %}
         {% block content %}{% endblock %}
     </main>

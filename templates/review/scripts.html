@@ -17,20 +17,6 @@
         <div id="script-review-project-wrap" class="col-md-4"><label for="script-review-project" class="form-label small">项目</label><select id="script-review-project" class="form-select form-select-sm"></select></div>
         <div class="col-md-2"><button id="script-review-submit" class="btn btn-primary btn-sm w-100" type="button"><i class="bi bi-magic me-1" aria-hidden="true"></i>开始审核</button></div>
     </div>
-    <div class="row g-3 align-items-end mt-1">
-        <div class="col-md-4">
-            <label for="script-review-engine" class="form-label small">审核引擎</label>
-            <select id="script-review-engine" class="form-select form-select-sm">
-                <option value="legacy">Legacy（默认）</option>
-                <option value="semif">SemIf（内部灰度）</option>
-            </select>
-        </div>
-        <div id="script-review-model-profile-wrap" class="col-md-4 d-none">
-            <label for="script-review-model-profile" class="form-label small">SemIf 模型配置</label>
-            <input id="script-review-model-profile" class="form-control form-control-sm" maxlength="120" value="local-default">
-        </div>
-        <div class="col-md-4 small text-muted">SemIf 不可用或尚未校准时，请继续使用 Legacy。</div>
-    </div>
     <div id="script-review-episodes" class="d-flex flex-wrap gap-2 mt-3"></div>
     <div id="script-review-file-wrap" class="mt-3 d-none"><label for="script-review-file" class="form-label small">剧本文件</label><input id="script-review-file" class="form-control" type="file" accept=".txt,.text,.md,.markdown,.mdown,.fountain,.fd,.rst,text/plain,text/markdown"></div>
     <div id="script-review-prompt-wrap" class="border rounded p-3 mt-3">

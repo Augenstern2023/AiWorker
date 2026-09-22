@@ -206,7 +206,7 @@ def source_fingerprint(source: dict[str, Any]) -> str:
         {
             key: value
             for key, value in source.items()
-            if key not in {"fingerprint", "prompt_snapshot", "execution_snapshot"}
+            if key not in {"fingerprint", "prompt_snapshot"}
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -295,88 +295,6 @@ def build_review_markdown(review: dict[str, Any]) -> str:
                 f"- 第 {episode.get('episode_number') or '-'} 集：大纲 v{(episode.get('outline') or {}).get('version') or '-'} · "
                 f"Beats v{(episode.get('beats') or {}).get('version') or '-'} · 场次剧本 v{(episode.get('script') or {}).get('version') or episode.get('version') or '-'}"
             )
-
-    if str(report.get("schema_version") or "") == "screenplay-review-report-v2":
-        hard_gate = report.get("hard_gate") if isinstance(report.get("hard_gate"), dict) else {}
-        lines.extend(
-            [
-                "",
-                "## SemIf 质量判定",
-                "",
-                f"- 质量状态：{report.get('quality_status') or '-'}",
-                f"- 综合得分：{report.get('overall_score') if report.get('overall_score') is not None else '-'}/100",
-                f"- 硬门槛：{'通过' if hard_gate.get('passed') else '未通过或需人工复核'}",
-                f"- 评审版本：{report.get('review_version') or '-'}",
-            ]
-        )
-        failed_items = [
-            item
-            for item in [
-                *(hard_gate.get("failed_items") or []),
-                *(hard_gate.get("insufficient_items") or []),
-            ]
-            if isinstance(item, dict)
-        ]
-        if failed_items:
-            lines.extend(["", "### 硬门槛明细", ""])
-            for item in failed_items:
-                lines.append(
-                    f"- {item.get('label') or item.get('dimension_id') or '-'}："
-                    f"{item.get('selected_option') or '-'} · {item.get('scope_ref') or '-'}"
-                )
-        dimensions = [
-            item for item in report.get("dimensions") or [] if isinstance(item, dict)
-        ]
-        if dimensions:
-            lines.extend(
-                [
-                    "",
-                    "### 评分维度",
-                    "",
-                    "| 维度 | 结果 | 得分 | 权重 | 证据 |",
-                    "|---|---:|---:|---:|---|",
-                ]
-            )
-            for item in dimensions:
-                evidence = [
-                    value
-                    for value in item.get("evidence") or []
-                    if isinstance(value, dict)
-                ]
-                refs = "；".join(
-                    f"{value.get('episode_id') or '-'} / {value.get('scene_id') or '-'}："
-                    f"{str(value.get('text') or '').strip()}"
-                    for value in evidence[:3]
-                ) or "-"
-                refs = refs.replace("|", "\\|").replace("\n", " ")
-                lines.append(
-                    f"| {item.get('label') or item.get('id') or '-'} | "
-                    f"{item.get('selected_option') or '-'} | "
-                    f"{item.get('weighted_score') if item.get('weighted_score') is not None else '-'} | "
-                    f"{item.get('weight') if item.get('weight') is not None else '-'} | {refs} |"
-                )
-        revision_plan = [
-            item for item in report.get("revision_plan") or [] if isinstance(item, dict)
-        ]
-        if revision_plan:
-            lines.extend(["", "### 修改计划", ""])
-            for item in revision_plan:
-                action = str(item.get("action") or item.get("suggestion") or "").strip()
-                lines.append(
-                    f"- [{str(item.get('priority') or 'P2').upper()}] {action or '待补充修改动作'}"
-                )
-        model = report.get("model") if isinstance(report.get("model"), dict) else {}
-        lines.extend(
-            [
-                "",
-                "### 审计信息",
-                "",
-                f"- 规则包：{report.get('rule_package') or '-'}",
-                f"- 模型：{model.get('name') or '-'} · {model.get('revision') or '-'}",
-                f"- 输入快照：{report.get('input_snapshot_hash') or '-'}",
-                f"- Prompt：{report.get('prompt_hash') or '-'}",
-            ]
-        )
 
     sections = [
         ("核心问题", report.get("core_findings") or []),

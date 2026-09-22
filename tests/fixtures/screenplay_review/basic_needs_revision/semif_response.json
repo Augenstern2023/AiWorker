@@ -1,6 +1,0 @@
-{
-  "model": {"name": "fixture-semif", "revision": "fixture-v1"},
-  "default_gate_option": "passed",
-  "default_score_option": "good",
-  "overrides": {}
-}

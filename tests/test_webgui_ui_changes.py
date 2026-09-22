@@ -2374,14 +2374,14 @@ def test_breakdown_task_log_opens_inside_the_generation_modal():
     assert "window.location.assign(`/tasks" not in script
 
 
-def test_creative_generation_task_log_opens_inside_the_progress_modal():
+def test_creative_generation_log_is_inline_and_can_reopen_from_project_progress():
     modal = _source("templates/common/workspace/creative_progress_modal.html")
     progress = _source("templates/common/workspace/project_progress.html")
     script = _source("static/js/common/creative.js")
 
     assert 'id="creativeGenerationLogPane"' in modal
     assert "creativeWorkspace.jobLogs" in modal
-    assert '@click="openCreativeTaskLog"' in modal
+    assert '@click="openCreativeTaskLog"' not in modal
     assert '@click="openCreativeTaskLog"' in progress
     assert "syncCreativeJobLogs" in script
     assert "aiworkerApi.request(`/api/jobs/${jobId}/logs`)" in script

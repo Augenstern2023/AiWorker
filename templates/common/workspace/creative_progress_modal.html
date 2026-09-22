@@ -35,7 +35,6 @@
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">后台运行</button>
-                    <button type="button" class="btn btn-outline-light" x-show="creativeWorkspace.jobId" @click="openCreativeTaskLog"><i class="bi bi-list-ul me-1"></i>任务日志</button>
                     <button type="button" class="btn btn-primary" x-show="creativeJobRetryable()" @click="retryCreativeJob"><i class="bi bi-arrow-clockwise me-1"></i>重试</button>
                 </div>
             </div>

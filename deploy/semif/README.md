@@ -60,10 +60,22 @@ NVIDIA 显卡也只使用 CPU；环境、缓存和模型均在 D 盘不代表模
 
 AIWorker 默认仍使用 Legacy 审核。仅在试点环境设置：
 
+Windows 本机安装完成后，可以先关闭正在运行的普通版 GUI，再双击仓库根目录的
+`启动Web程序-SemIf试点.bat` 或 `启动程序-SemIf试点.bat`。启动器会校验 D 盘
+模型哈希，自动复用或启动 sidecar，并且只给本次 GUI 进程设置以下开关：
+
 ```powershell
 $env:SCREENPLAY_REVIEW_ENGINE = "semif"
 $env:SCREENPLAY_REVIEW_SEMIF_URL = "http://127.0.0.1:8765"
 $env:SCREENPLAY_REVIEW_SEMIF_FALLBACK = "legacy"
+$env:SCREENPLAY_REVIEW_SEMIF_TIMEOUT_SECONDS = "900"
+$env:SCREENPLAY_REVIEW_SEMIF_MAX_RETRIES = "0"
+```
+
+可在不启动 GUI 的情况下验证本机安装：
+
+```powershell
+uv run python scripts/start_semif_pilot.py --check-only
 ```
 
 SemIf 结果始终标记为 `manual_review`。选项概率是给定选项之间的条件分数，

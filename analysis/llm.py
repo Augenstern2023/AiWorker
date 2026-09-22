@@ -18,12 +18,15 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 import asyncio
-import os
 import json
 import logging
+import math
+import os
 import re
 import time
 import uuid
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Dict, List
 from urllib.parse import urlsplit
 
@@ -35,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 # 单次调用的默认输出上限。0 表示不发送该参数、沿用网关默认值。
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
+MAX_RETRY_DELAY_SECONDS = 120.0
 
 _CONFIGURED_LLM_SETTINGS_REPOSITORY: Any | None = None
 
@@ -517,6 +521,11 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                         "request_elapsed_seconds": 0.0,
                         "timeout_phase": "",
                         "exception_type": "",
+                        "http_status": 0,
+                        "retry_after_seconds": 0.0,
+                        "retry_delay_seconds": 0.0,
+                        "upstream_error_code": "",
+                        "upstream_error_type": "",
                     }
                 )
                 try:
@@ -543,6 +552,22 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                         payload = response.json()
                     except ValueError:
                         payload = None
+                    upstream_error_code, upstream_error_type = (
+                        _safe_upstream_error_fields(payload)
+                    )
+                    retry_after_seconds = (
+                        _retry_after_seconds(response)
+                        if int(response.status_code) == 429
+                        else 0.0
+                    )
+                    self.last_request_summary.update(
+                        {
+                            "http_status": int(response.status_code),
+                            "retry_after_seconds": retry_after_seconds,
+                            "upstream_error_code": upstream_error_code,
+                            "upstream_error_type": upstream_error_type,
+                        }
+                    )
                     self._record_usage(payload, responses=endpoint.endswith("/responses"))
                     response.raise_for_status()
                     return response
@@ -570,7 +595,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                     reason = (
                         f"模型响应超时（{self.timeout} 秒）"
                         if isinstance(exc, httpx.TimeoutException)
-                        else str(exc)
+                        else _safe_retry_reason(exc)
                     )
                     retryable = is_retryable_llm_exception(exc) and not (
                         isinstance(exc, httpx.ReadTimeout)
@@ -585,15 +610,141 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                             raise timeout_error from exc
                         raise
                     retry_number = attempt + 1
+                    exponential_delay = self.retry_base_delay * (
+                        2 ** (retry_number - 1)
+                    )
+                    retry_after_delay = (
+                        float(self.last_request_summary.get("retry_after_seconds") or 0.0)
+                        if isinstance(exc, httpx.HTTPStatusError)
+                        and int(exc.response.status_code) == 429
+                        else 0.0
+                    )
+                    delay = min(
+                        MAX_RETRY_DELAY_SECONDS,
+                        max(exponential_delay, retry_after_delay),
+                    )
+                    self.last_request_summary["retry_delay_seconds"] = round(
+                        delay, 3
+                    )
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        reason = _safe_retry_reason(
+                            exc, retry_delay_seconds=delay
+                        )
                     if self.retry_callback:
                         try:
                             self.retry_callback(retry_number, self.max_retries, reason)
                         except Exception:
                             pass
-                    delay = self.retry_base_delay * (2 ** (retry_number - 1))
                     if delay:
                         await asyncio.sleep(delay)
         raise LLMError("LLM request retry loop exited unexpectedly.")
+
+
+def _safe_upstream_error_fields(payload: Any) -> tuple[str, str]:
+    if not isinstance(payload, dict):
+        return "", ""
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        error = payload
+
+    def safe_token(value: Any) -> str:
+        if not isinstance(value, (str, int, float)):
+            return ""
+        return re.sub(r"[\x00-\x1f\x7f]+", " ", str(value)).strip()[:120]
+
+    return safe_token(error.get("code")), safe_token(error.get("type"))
+
+
+def _retry_after_seconds(
+    response: httpx.Response,
+    *,
+    now: datetime | None = None,
+) -> float:
+    raw_value = str(response.headers.get("Retry-After") or "").strip()
+    if not raw_value:
+        return 0.0
+    try:
+        seconds = float(raw_value)
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        reference = now or datetime.now(timezone.utc)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        seconds = (retry_at - reference).total_seconds()
+    if not math.isfinite(seconds):
+        return 0.0
+    return round(max(0.0, seconds), 3)
+
+
+def _rate_limit_payload_text(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            values = (error.get("code"), error.get("type"), error.get("message"))
+        else:
+            values = (payload.get("code"), payload.get("type"), payload.get("message"))
+        return " ".join(str(value or "") for value in values).lower()
+    return str(response.text or "").lower()
+
+
+def is_non_retryable_rate_limit_exception(exc: Exception) -> bool:
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    if int(exc.response.status_code) != 429:
+        return False
+    text = _rate_limit_payload_text(exc.response)
+    return any(
+        marker in text
+        for marker in (
+            "insufficient_quota",
+            "insufficient quota",
+            "quota has been exhausted",
+            "quota exhausted",
+            "exceeded your current quota",
+            "billing_hard_limit",
+            "billing hard limit",
+            "billing_not_active",
+            "billing inactive",
+            "billing disabled",
+            "credit balance",
+            "insufficient credit",
+            "insufficient balance",
+            "余额不足",
+            "额度不足",
+        )
+    )
+
+
+def _safe_retry_reason(
+    exc: Exception,
+    *,
+    retry_delay_seconds: float = 0.0,
+) -> str:
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return str(exc)
+    status = int(exc.response.status_code)
+    phrase = str(exc.response.reason_phrase or "").strip()
+    try:
+        payload = exc.response.json()
+    except ValueError:
+        payload = None
+    code, error_type = _safe_upstream_error_fields(payload)
+    details = [value for value in (code, error_type) if value]
+    reason = f"HTTP {status}{f' {phrase}' if phrase else ''}"
+    if details:
+        reason += f"（上游错误：{' / '.join(dict.fromkeys(details))}）"
+    if retry_delay_seconds:
+        reason += f"；{retry_delay_seconds:g} 秒后重试"
+    return reason
 
 
 def is_retryable_llm_exception(exc: Exception) -> bool:
@@ -601,6 +752,8 @@ def is_retryable_llm_exception(exc: Exception) -> bool:
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         status = int(exc.response.status_code)
+        if status == 429 and is_non_retryable_rate_limit_exception(exc):
+            return False
         return status in {408, 409, 425, 429} or 500 <= status <= 599
     return isinstance(exc, httpx.RequestError)
 

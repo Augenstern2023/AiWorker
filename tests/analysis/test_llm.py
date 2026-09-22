@@ -21,6 +21,8 @@ import asyncio
 import importlib
 import json
 import logging
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 
 import httpx
 import config
@@ -37,6 +39,7 @@ from analysis.llm import (
     LLMOutputTruncatedError,
     LLMTimeoutError,
     OpenAICompatibleLLMProvider,
+    _retry_after_seconds,
     build_responses_request_body,
     build_video_analysis_messages,
     create_llm_provider_from_config,
@@ -611,6 +614,123 @@ def test_chat_completions_retries_transient_gateway_errors_before_succeeding():
     assert attempts == 3
     assert [(number, total) for number, total, _ in retries] == [(1, 2), (2, 2)]
     assert all("502" in reason for _, _, reason in retries)
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_retry_respects_retry_after_before_succeeding(monkeypatch):
+    attempts = 0
+    delays = []
+    retries = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                429,
+                request=request,
+                headers={"Retry-After": "7", "x-request-id": "rate-limit-1"},
+                json={
+                    "error": {
+                        "type": "rate_limit_error",
+                        "code": "rate_limit_exceeded",
+                        "message": "slow down",
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+        )
+
+    monkeypatch.setattr("analysis.llm.asyncio.sleep", fake_sleep)
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="test-model",
+        max_retries=2,
+        retry_base_delay=1,
+        transport=httpx.MockTransport(handler),
+        retry_callback=lambda number, total, reason: retries.append(
+            (number, total, reason)
+        ),
+    )
+
+    result = await provider.complete_text(
+        [{"role": "user", "content": "test"}], json_mode=True
+    )
+
+    assert result == '{"ok": true}'
+    assert attempts == 2
+    assert delays == [7.0]
+    assert len(retries) == 1
+    assert "HTTP 429" in retries[0][2]
+    assert "rate_limit_exceeded" in retries[0][2]
+    assert "7" in retries[0][2]
+
+
+@pytest.mark.asyncio
+async def test_quota_exhausted_rate_limit_fails_without_retry_and_records_safe_diagnostics(
+    monkeypatch,
+):
+    attempts = 0
+    delays = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            429,
+            request=request,
+            headers={"Retry-After": "60", "x-request-id": "quota-1"},
+            json={
+                "error": {
+                    "type": "insufficient_quota",
+                    "code": "insufficient_quota",
+                    "message": "secret quota detail that must not enter diagnostics",
+                }
+            },
+        )
+
+    monkeypatch.setattr("analysis.llm.asyncio.sleep", fake_sleep)
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="test-model",
+        max_retries=4,
+        retry_base_delay=2,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await provider.complete_text([{"role": "user", "content": "test"}])
+
+    assert attempts == 1
+    assert delays == []
+    assert provider.last_request_summary["http_status"] == 429
+    assert provider.last_request_summary["retry_after_seconds"] == 60.0
+    assert provider.last_request_summary["retry_delay_seconds"] == 0.0
+    assert provider.last_request_summary["upstream_error_code"] == "insufficient_quota"
+    assert provider.last_request_summary["upstream_error_type"] == "insufficient_quota"
+    assert "secret quota detail" not in json.dumps(provider.last_request_summary)
+    assert "key" not in json.dumps(provider.last_request_summary)
+
+
+def test_retry_after_http_date_is_parsed_relative_to_current_time():
+    now = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
+    response = httpx.Response(
+        429,
+        headers={"Retry-After": format_datetime(now + timedelta(seconds=45))},
+    )
+
+    assert _retry_after_seconds(response, now=now) == 45.0
 
 
 @pytest.mark.parametrize(

@@ -1757,7 +1757,7 @@ Object.assign(component, {
     assert result.returncode == 0, result.stderr
 
 
-def test_standard_generation_reuses_last_model_and_reasoning_selection():
+def test_standard_generation_reuses_last_model_and_blocks_unavailable_selection():
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required to execute the browser module")
@@ -1792,10 +1792,11 @@ const createComponent = () => {
       sequentialGeneration: {
         modelOptions: [], modelRecordId: '', defaultModelRecordId: '',
         reasoningEffortOptions: [], reasoningEffort: '', loading: false,
+        unavailableModelRecordId: '', unavailableReasoningEffort: '',
         error: '', pending: null,
       },
     },
-    sequentialGenerationModelModal: {show: () => {}},
+    sequentialGenerationModelModal: {show: () => {}, hide: () => {}},
   });
   return component;
 };
@@ -1819,8 +1820,89 @@ const createComponent = () => {
   );
   const withRetiredModel = createComponent();
   await withRetiredModel.openSequentialGenerationModel('/generate', {}, 'script', {});
-  assert.equal(withRetiredModel.creativeWorkspace.sequentialGeneration.modelRecordId, '');
-  assert.equal(withRetiredModel.creativeWorkspace.sequentialGeneration.reasoningEffort, '');
+  const unavailable = withRetiredModel.creativeWorkspace.sequentialGeneration;
+  assert.equal(unavailable.modelRecordId, 'retired-model');
+  assert.equal(unavailable.reasoningEffort, 'high');
+  assert.equal(unavailable.unavailableModelRecordId, 'retired-model');
+  assert.equal(unavailable.unavailableReasoningEffort, 'high');
+  assert.deepEqual(
+    JSON.parse(storage.get(withRetiredModel.sequentialGenerationPreferenceStorageKey())),
+    {modelRecordId: 'retired-model', reasoningEffort: 'high'}
+  );
+  let submitted = false;
+  withRetiredModel.startCreativeGeneration = async () => { submitted = true; };
+  await withRetiredModel.submitSequentialGeneration();
+  assert.equal(submitted, false);
+  assert.equal(unavailable.pending.action, 'script');
+  assert.match(unavailable.error, /当前不可用/);
+  unavailable.modelRecordId = '';
+  withRetiredModel.selectSequentialGenerationModel();
+  assert.equal(unavailable.unavailableModelRecordId, '');
+  assert.deepEqual(
+    JSON.parse(storage.get(withRetiredModel.sequentialGenerationPreferenceStorageKey())),
+    {modelRecordId: '', reasoningEffort: ''}
+  );
+  await withRetiredModel.submitSequentialGeneration();
+  assert.equal(submitted, true);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_cancelled_generation_restores_its_model_and_reasoning_preference():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+const storage = new Map();
+global.window = {
+  aiworkerModules: [],
+  localStorage: {
+    getItem: key => storage.has(key) ? storage.get(key) : null,
+    setItem: (key, value) => storage.set(key, value),
+  },
+};
+global.confirm = () => true;
+const requests = [];
+global.aiworkerApi = {request: async (url, options) => {
+  requests.push([url, options]);
+  return {ok: true, json: async () => ({})};
+}};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+const component = window.aiworkerModules[0]();
+Object.assign(component, {
+  creativeWorkspace: {
+    jobId: 'job-9',
+    sequentialGeneration: {
+      modelOptions: [], modelRecordId: 'stale-model', defaultModelRecordId: '',
+      reasoningEffortOptions: [], reasoningEffort: 'low', loading: false,
+      unavailableModelRecordId: '', unavailableReasoningEffort: '',
+      error: '', pending: null,
+    },
+  },
+  jobs: [{
+    job_id: 'job-9',
+    job: {extra: {llm_model_record_id: 'cancelled-model', reasoning_effort: 'xhigh'}},
+  }],
+  fetchJobs: async () => {},
+});
+(async () => {
+  await component.cancelCreativeJob();
+  assert.deepEqual(requests, [['/api/jobs/job-9/stop', {method: 'POST'}]]);
+  assert.deepEqual(
+    JSON.parse(storage.get(component.sequentialGenerationPreferenceStorageKey())),
+    {modelRecordId: 'cancelled-model', reasoningEffort: 'xhigh'}
+  );
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
     result = subprocess.run(

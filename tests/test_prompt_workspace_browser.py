@@ -101,8 +101,9 @@ def _install_workspace_runtime(
         }};
         """
     )
-    page.add_script_tag(content=_source("static/js/common/creative.js"))
     page.add_script_tag(content=_source("static/js/common/tasks.js"))
+    page.add_script_tag(content=_source("static/js/common/creative.js"))
+    page.add_script_tag(content=_source("static/js/common/prompt_templates.js"))
     page.add_script_tag(content=_source("static/js/alpine.min.js"))
     page.wait_for_timeout(400)
     return page_errors

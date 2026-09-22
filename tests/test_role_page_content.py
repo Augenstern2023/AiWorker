@@ -116,6 +116,11 @@ def test_all_workspace_javascript_has_valid_syntax():
     node = shutil.which("node")
     assert node is not None
     scripts = sorted((ROOT / "static/js").glob("**/*.js"))
+    for relative_path in (
+        "selection/drama_reviews.js", "writing/creative_episodes.js",
+        "common/prompt_templates.js", "common/creative_generation.js",
+    ):
+        assert ROOT / "static/js" / relative_path in scripts
     failures = []
     for script in scripts:
         result = subprocess.run(
@@ -127,6 +132,93 @@ def test_all_workspace_javascript_has_valid_syntax():
         if result.returncode:
             failures.append(f"{script.relative_to(ROOT)}: {result.stderr}")
     assert failures == []
+
+
+def test_creative_route_modules_register_before_alpine_init():
+    base = _read("templates/layouts/base.html")
+    assert '<script defer src="/static/js/alpine.min.js"></script>' in base
+    assert base.index('/static/js/common/tasks.js') < base.index('{% block scripts %}')
+    routes = (
+        ("selection/topics.html", "selection-topics"),
+        ("selection/hits.html", "selection-hits"),
+        ("selection/dramas.html", "selection-dramas"),
+        ("planning/projects.html", "planning-projects"),
+        ("planning/brief.html", "planning-brief"),
+        ("planning/characters.html", "planning-characters"),
+        ("writing/projects.html", "writing-projects"),
+        ("writing/outlines.html", "writing-outlines"),
+        ("writing/beats.html", "writing-beats"),
+        ("writing/scripts.html", "writing-scripts"),
+        ("common/workspace/prompt_template_center.html", "prompt-center"),
+        ("common/workspace/prompt_template_effects.html", "prompt-effects"),
+    )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        for template, page_name in routes:
+            scripts = re.findall(r'<script[^>]+src="/static/js/[^>]+></script>',
+                                 _read(f"templates/{template}"))
+            assert scripts, template
+            assert all(" defer " not in tag and " async " not in tag for tag in scripts)
+            html = (
+                '<head><script defer src="/static/js/alpine.min.js"></script></head>'
+                f'<body data-workspace-page="{page_name}"><main x-data="probeData()"></main>'
+                '<script src="/static/js/common/tasks.js"></script>'
+                + "".join(scripts) + """
+                <script>
+                document.addEventListener('alpine:init', () => {
+                    window.registeredModuleCount = window.aiworkerModules.length;
+                    window.registeredKeys = window.aiworkerModules.flatMap(
+                        factory => Object.keys(factory())
+                    );
+                });
+                window.aiworkerApi = {request: async (url) => ({
+                    ok: true,
+                    json: async () => url.endsWith('/module-capabilities')
+                        ? {capabilities: {}} : {id: 9, target_episode_count: 2}
+                })};
+                window.probeData = () => {
+                    const app = appData();
+                    // Exercise registration and selection without starting job polling.
+                    app.init = () => { window.probeInitialized = true; };
+                    return app;
+                };
+                </script></body>
+                """
+            )
+            page = browser.new_page()
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+
+            def respond(route):
+                path = route.request.url.split("aiworker.test/", 1)[1].split("?", 1)[0]
+                if path.startswith("static/js/"):
+                    route.fulfill(content_type="application/javascript", body=_read(path))
+                else:
+                    route.fulfill(content_type="text/html", body=html)
+
+            page.route("http://aiworker.test/**", respond)
+            page.goto("http://aiworker.test/")
+            page.wait_for_function("window.probeInitialized === true")
+            keys = page.evaluate("window.registeredKeys")
+            expected_count = sum(
+                _read(path).count("window.aiworkerModules.push(")
+                for path in re.findall(r'src="/([^?]+)\?', "".join(scripts))
+            )
+            assert page.evaluate("window.registeredModuleCount") == expected_count, template
+            assert "selectCreativeProject" in keys
+            assert ("openTopicReviewCapture" in keys) == (page_name in {"selection-topics", "selection-hits"})
+            assert ("downloadSelectedEpisodes" in keys) == (page_name in {"writing-outlines", "writing-beats", "writing-scripts"})
+            assert ("openPromptLibrary" in keys) == (page_name.startswith("planning-") or page_name.startswith("prompt-") or page_name in {"writing-outlines", "writing-beats", "writing-scripts"})
+            assert ("openFreeCreativeGeneration" in keys) == (page_name.startswith("planning-") or page_name in {"writing-outlines", "writing-beats", "writing-scripts"})
+            result = page.evaluate("""async () => {
+                const app = Alpine.$data(document.querySelector('main'));
+                await app.selectCreativeProject(9);
+                return {id: app.creativeWorkspace.project?.id, error: app.creativeWorkspace.error};
+            }""")
+            assert result == {"id": 9, "error": ""}, (template, result)
+            assert errors == [], (template, errors)
+            page.close()
+        browser.close()
 
 
 def test_selection_pages_load_topic_capabilities_before_alpine_init():
@@ -290,7 +382,7 @@ def test_project_beats_long_text_controls_wrap_without_clipping():
 
 def test_writing_outlines_link_each_episode_to_beats_route():
     outlines = _read("templates/common/workspace/project_outlines.html")
-    creative = _read("static/js/common/creative.js")
+    creative = _read("static/js/writing/creative_episodes.js")
 
     assert (
         "`/writing/projects/${creativeWorkspace.project.id}/episodes/"
@@ -482,7 +574,7 @@ def test_selection_download_pages_load_workflow_task_resolvers():
 
 
 def test_creative_workflow_ui_locks_versions_without_review_panels():
-    creative = _read("static/js/common/creative.js")
+    creative = _read("static/js/common/creative.js") + _read("static/js/common/creative_generation.js")
     breakdowns = _read("static/js/selection/breakdowns.js")
     workspace = "\n".join(
         _read(f"templates/common/workspace/{name}")

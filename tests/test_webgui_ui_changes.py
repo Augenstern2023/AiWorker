@@ -424,7 +424,7 @@ def test_character_workspace_can_choose_among_locked_brief_directions():
 
 
 def test_locking_a_brief_saves_edited_project_episode_count_first():
-    script = _source("static/js/common/creative.js")
+    script = _source("static/js/common/creative_generation.js")
     method = script.split("async completeProjectBrief()", 1)[1].split("async createBlankCharacterBatch", 1)[0]
 
     assert method.index("await this.saveCreativeProjectSettings()") < method.index("completeCreativeResource('brief'")
@@ -489,7 +489,7 @@ def test_partial_outline_checkpoints_cannot_be_locked_from_the_workspace():
 
 
 def test_workspace_downloads_the_current_generated_resource_instead_of_legacy_export():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative_generation.js")
     outlines = _source("templates/common/workspace/project_outlines.html")
     blueprints = _source("templates/common/workspace/project_blueprints.html")
     characters = _source("templates/common/workspace/project_characters.html")
@@ -505,7 +505,7 @@ def test_workspace_downloads_the_current_generated_resource_instead_of_legacy_ex
 
 
 def test_writing_workspaces_offer_resumable_full_series_beats_and_script_generation():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative_generation.js")
     beats = _source("templates/common/workspace/project_beats.html")
     scripts = _source("templates/common/workspace/project_scripts.html")
 
@@ -521,7 +521,7 @@ def test_writing_workspaces_offer_resumable_full_series_beats_and_script_generat
 
 
 def test_free_workspace_can_generate_beats_for_all_episodes_at_once():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative_generation.js")
     tasks = _source("static/js/common/tasks.js")
     beats = _source("templates/common/workspace/project_beats.html")
     modal = _source("templates/common/workspace/free_creative_modals.html")
@@ -536,7 +536,7 @@ def test_free_workspace_can_generate_beats_for_all_episodes_at_once():
 
 
 def test_free_workspace_uses_shared_per_request_model_selector():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative_generation.js")
     tasks = _source("static/js/common/tasks.js")
     modal = _source("templates/common/workspace/free_creative_modals.html")
     navigation = _source(
@@ -557,7 +557,7 @@ def test_free_workspace_uses_shared_per_request_model_selector():
 
 
 def test_free_workspace_can_generate_scripts_for_all_episodes_at_once():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative_generation.js")
     scripts = _source("templates/common/workspace/project_scripts.html")
     modal = _source("templates/common/workspace/free_creative_modals.html")
 
@@ -570,7 +570,7 @@ def test_free_workspace_can_generate_scripts_for_all_episodes_at_once():
 
 
 def test_free_multi_episode_workspaces_offer_atomic_series_locking():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative_generation.js")
     beats = _source("templates/common/workspace/project_beats.html")
     scripts = _source("templates/common/workspace/project_scripts.html")
 
@@ -585,7 +585,7 @@ def test_free_multi_episode_workspaces_offer_atomic_series_locking():
 
 
 def test_beats_workspace_uses_an_episode_selector_to_review_series_drafts():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/writing/creative_episodes.js")
     beats = _source("templates/common/workspace/project_beats.html")
 
     assert "projectBeatEpisodeLabel(episodeNumber)" in creative
@@ -599,7 +599,7 @@ def test_writing_episode_workspaces_can_show_and_download_selected_or_all_episod
     beats = _source("templates/common/workspace/project_beats.html")
     scripts = _source("templates/common/workspace/project_scripts.html")
     modal = _source("templates/common/workspace/creative_episode_download_modal.html")
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/writing/creative_episodes.js")
     tasks = _source("static/js/common/tasks.js")
     api = _source("creative/api.py")
 
@@ -649,7 +649,7 @@ def test_brief_and_characters_navigation_hide_episode_selector():
 
 
 def test_beats_workspace_labels_single_episode_generation_as_regeneration_when_present():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/writing/creative_episodes.js")
     beats = _source("templates/common/workspace/project_beats.html")
 
     assert "projectBeatGenerationActionLabel()" in creative
@@ -658,7 +658,7 @@ def test_beats_workspace_labels_single_episode_generation_as_regeneration_when_p
 
 
 def test_beats_workspace_offers_a_confirmed_batch_lock_for_full_current_drafts():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/writing/creative_episodes.js", "static/js/common/creative_generation.js")
     beats = _source("templates/common/workspace/project_beats.html")
 
     assert "async completeProjectBeatsBatch()" in creative
@@ -718,7 +718,7 @@ def test_review_report_offers_a_markdown_export():
 
 
 def test_beats_workspace_edits_continuity_updates_as_structured_fields_not_json():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/writing/creative_episodes.js")
     beats = _source("templates/common/workspace/project_beats.html")
 
     assert "addContinuityUpdate(beat)" in creative
@@ -730,7 +730,7 @@ def test_beats_workspace_edits_continuity_updates_as_structured_fields_not_json(
 
 
 def test_outline_workspace_exposes_continue_generation_for_a_saved_partial_batch():
-    script = _source("static/js/common/creative.js")
+    script = _source("static/js/writing/creative_episodes.js")
     template = _source("templates/common/workspace/project_outlines.html")
 
     assert "hasResumableProjectOutlines()" in script
@@ -739,7 +739,7 @@ def test_outline_workspace_exposes_continue_generation_for_a_saved_partial_batch
 
 
 def test_outline_workspace_calls_generation_a_regeneration_after_a_locked_current_outline():
-    script = _source("static/js/common/creative.js")
+    script = _source("static/js/writing/creative_episodes.js")
     method = script.split("outlineGenerationActionLabel()", 1)[1].split(
         "currentOutlineBatchStatus() {", 1
     )[0]
@@ -749,7 +749,7 @@ def test_outline_workspace_calls_generation_a_regeneration_after_a_locked_curren
 
 
 def test_outline_workspace_does_not_resume_a_draft_from_an_old_direction_or_character_batch():
-    script = _source("static/js/common/creative.js")
+    script = _source("static/js/writing/creative_episodes.js")
     function_start = script.index("latestOutlineBatchId()")
     function_end = script.index("currentProjectOutlines()", function_start)
     function = script[function_start:function_end]
@@ -952,7 +952,7 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
 
 
 def test_blank_character_batch_links_the_active_workflow_task():
-    script = _source("static/js/common/creative.js")
+    script = _source("static/js/common/creative_generation.js")
     method = script.split("async createBlankCharacterBatch()", 1)[1].split(
         "async saveProjectCharacter", 1
     )[0]
@@ -1072,7 +1072,7 @@ def test_planning_project_list_offers_permission_aware_deletion():
 
 def test_mode_switch_does_not_request_a_creative_seed():
     modal = _source("templates/common/workspace/free_creative_modals.html")
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative.js", "static/js/common/creative_generation.js")
     tasks = _source("static/js/common/tasks.js")
     migration_modal = modal.split('id="creativeModeMigrationModal"', 1)[1]
     method = creative.split("async openCreativeModeMigration()", 1)[1].split(
@@ -1330,7 +1330,7 @@ def test_topic_library_shows_full_lifecycle_and_breakdown_version_column():
 
 def test_topic_library_keeps_review_download_jobs_by_drama_for_parallel_captures():
     tasks = _source("static/js/common/tasks.js")
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/selection/drama_reviews.js")
     topics = _source("templates/common/workspace/selection_topics.html")
 
     assert "dramaReviewJobs: {}" in tasks
@@ -1343,7 +1343,7 @@ def test_topic_library_keeps_review_download_jobs_by_drama_for_parallel_captures
 def test_topic_library_offers_review_download_for_douyin_topics():
     paths = {route.path for route in WebGUI.app.routes}
     topics = _source("templates/common/workspace/selection_topics.html")
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/selection/drama_reviews.js")
 
     assert "/api/douyin/reviews/jobs" in paths
     assert "/api/douyin/reviews/jobs/{job_id}" in paths
@@ -1374,7 +1374,7 @@ def test_completed_review_capture_only_shows_the_local_download_action():
 
 def test_closing_a_completed_review_modal_syncs_its_row_action_state():
     tasks = _source("static/js/common/tasks.js")
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/selection/drama_reviews.js")
 
     assert "finishDisplayedDramaReviewJob?.()" in tasks
     assert "finishDisplayedDramaReviewJob()" in creative
@@ -1410,7 +1410,7 @@ def test_create_project_refreshes_the_topic_library_after_success():
 
 
 def test_saving_a_scene_script_refreshes_topic_library_state():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative.js", "static/js/common/creative_generation.js")
     save_method = creative.split("async saveProjectEpisode(item)", 1)[1].split(
         "async saveCreativeItem", 1
     )[0]
@@ -1423,7 +1423,7 @@ def test_saving_a_scene_script_refreshes_topic_library_state():
 
 
 def test_completed_scene_script_generation_refreshes_topic_library_state():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative.js", "static/js/common/creative_generation.js")
     reconcile_method = creative.split("reconcileCreativeGenerationState(project)", 1)[1].split(
         "async syncCreativeJobProgress", 1
     )[0]
@@ -1480,7 +1480,7 @@ def test_delivery_page_lists_existing_resources_without_delivery_actions():
 def test_outline_page_exposes_beats_and_script_update_records_per_episode():
     page = _source("templates/writing/outlines.html")
     outline = _source("templates/common/workspace/project_outlines.html")
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/writing/creative_episodes.js")
 
     assert 'id="outlineEpisodeUpdatesModal"' in page
     assert "projectEpisodeUpdateRecords" in creative
@@ -1570,7 +1570,7 @@ def test_project_stage_pages_use_project_list_instead_of_redundant_stage_links(
 
 
 def test_outline_rows_show_a_link_when_the_episode_script_exists():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/writing/creative_episodes.js", "static/js/common/creative_generation.js")
     outlines = _source("templates/common/workspace/project_outlines.html")
 
     assert "projectEpisodeScript(episodeNumber)" in creative
@@ -1589,7 +1589,7 @@ def test_locked_outlines_hide_edit_actions():
 
 def test_outline_workspace_offers_merged_scene_script_download():
     outlines = _source("templates/common/workspace/project_outlines.html")
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/writing/creative_episodes.js")
 
     assert "剧本下载" in outlines
     assert "mergedScriptDownloadUrl()" in outlines
@@ -1612,7 +1612,7 @@ def test_episode_workspace_reads_the_episode_number_from_beats_and_scripts_urls(
 
 
 def test_scene_script_actions_stop_before_navigation_without_locked_beats():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative_generation.js")
     beats = _source("templates/common/workspace/project_beats.html")
 
     assert "currentEpisodeHasLockedBeats()" in creative
@@ -1622,7 +1622,7 @@ def test_scene_script_actions_stop_before_navigation_without_locked_beats():
 
 
 def test_scene_script_workspace_keeps_superseded_scripts_out_of_current_version():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/writing/creative_episodes.js")
     scripts = _source("templates/common/workspace/project_scripts.html")
 
     assert "return this.projectEpisodeScript(episodeNumber);" in creative
@@ -1632,7 +1632,7 @@ def test_scene_script_workspace_keeps_superseded_scripts_out_of_current_version(
 
 
 def test_scene_script_workspace_can_preview_superseded_versions_read_only():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/writing/creative_episodes.js", "static/js/common/creative_generation.js")
     scripts = _source("templates/common/workspace/project_scripts.html")
 
     assert "projectEpisodeScriptVersions(episodeNumber)" in creative
@@ -1646,7 +1646,7 @@ def test_scene_script_workspace_can_preview_superseded_versions_read_only():
 
 
 def test_scene_script_workspace_calls_generation_a_regeneration_when_locked_beats_changed():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/writing/creative_episodes.js")
     scripts = _source("templates/common/workspace/project_scripts.html")
 
     assert "projectScriptGenerationActionLabel()" in creative
@@ -1655,7 +1655,7 @@ def test_scene_script_workspace_calls_generation_a_regeneration_when_locked_beat
 
 
 def test_scene_script_workspace_locks_standard_and_free_mode_versions():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative_generation.js")
     scripts = _source("templates/common/workspace/project_scripts.html")
 
     assert '@click="completeProjectScript"' in scripts
@@ -1716,8 +1716,10 @@ const fs = require('fs');
 const vm = require('vm');
 const assert = require('assert/strict');
 global.window = {aiworkerModules: []};
-vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
-const component = window.aiworkerModules[0]();
+for (const path of process.argv.slice(1)) {
+  vm.runInThisContext(fs.readFileSync(path, 'utf8'), {filename: path});
+}
+const component = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
 const calls = [];
 Object.assign(component, {
   creativeWorkspace: {
@@ -1764,7 +1766,7 @@ Object.assign(component, {
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
     result = subprocess.run(
-        [node, "-e", script, "static/js/common/creative.js"],
+        [node, "-e", script, "static/js/common/creative.js", "static/js/writing/creative_episodes.js", "static/js/common/prompt_templates.js", "static/js/common/creative_generation.js"],
         capture_output=True, text=True, encoding="utf-8", check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -1796,10 +1798,12 @@ global.aiworkerApi = {request: async () => ({
     ],
   }),
 })};
-vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+for (const path of process.argv.slice(1)) {
+  vm.runInThisContext(fs.readFileSync(path, 'utf8'), {filename: path});
+}
 
 const createComponent = () => {
-  const component = window.aiworkerModules[0]();
+  const component = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
   Object.assign(component, {
     creativeWorkspace: {
       sequentialGeneration: {
@@ -1837,7 +1841,7 @@ const createComponent = () => {
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
     result = subprocess.run(
-        [node, "-e", script, "static/js/common/creative.js"],
+        [node, "-e", script, "static/js/common/creative.js", "static/js/writing/creative_episodes.js", "static/js/common/prompt_templates.js", "static/js/common/creative_generation.js"],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -1866,7 +1870,7 @@ def test_brief_page_mounts_only_one_production_export_modal():
 
 
 def test_free_locked_resources_offer_non_destructive_revision_actions():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative.js", "static/js/common/creative_generation.js")
     api = _source("creative/api.py")
     blueprints = _source("templates/common/workspace/project_blueprints.html")
     characters = _source("templates/common/workspace/project_characters.html")
@@ -1907,8 +1911,10 @@ const vm = require('vm');
 const assert = require('assert/strict');
 global.window = {aiworkerModules: []};
 global.aiworkerApi = {request: async () => ({ok: true, json: async () => ({})})};
-vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
-const component = window.aiworkerModules[0]();
+for (const path of process.argv.slice(1)) {
+  vm.runInThisContext(fs.readFileSync(path, 'utf8'), {filename: path});
+}
+const component = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
 const requests = [];
 Object.assign(component, {
   creativeWorkspace: {
@@ -1939,7 +1945,7 @@ Object.assign(component, {
 })().catch(error => { console.error(error); process.exit(1); });
 '''
     result = subprocess.run(
-        [node, "-e", script, "static/js/common/creative.js"],
+        [node, "-e", script, "static/js/common/creative.js", "static/js/writing/creative_episodes.js", "static/js/common/prompt_templates.js", "static/js/common/creative_generation.js"],
         capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -1965,8 +1971,10 @@ global.aiworkerApi = {
     }, {once: true});
   }),
 };
-vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
-const component = window.aiworkerModules[0]();
+for (const path of process.argv.slice(1)) {
+  vm.runInThisContext(fs.readFileSync(path, 'utf8'), {filename: path});
+}
+const component = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
 Object.assign(component, {
   creativeWorkspace: {
     project: {id: 4, workflow_mode: 'free'},
@@ -1988,7 +1996,7 @@ Object.assign(component, {
 })().catch(error => { console.error(error); process.exit(1); });
 '''
     result = subprocess.run(
-        [node, "-e", script, "static/js/common/creative.js"],
+        [node, "-e", script, "static/js/common/creative.js", "static/js/writing/creative_episodes.js", "static/js/common/prompt_templates.js", "static/js/common/creative_generation.js"],
         capture_output=True, text=True, encoding="utf-8", check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -2003,10 +2011,10 @@ def test_free_revision_runtime_clones_alpine_proxy_content():
 const fs = require('fs');
 const vm = require('vm');
 global.window = {aiworkerModules: []};
-vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'), {
-  filename: process.argv[1],
-});
-const component = window.aiworkerModules[0]();
+for (const path of process.argv.slice(1)) {
+  vm.runInThisContext(fs.readFileSync(path, 'utf8'), {filename: path});
+}
+const component = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
 let requestCount = 0;
 let notice = '';
 global.aiworkerApi = {
@@ -2056,7 +2064,7 @@ Object.assign(component, {
 });
 '''
     result = subprocess.run(
-        [node, "-e", script, "static/js/common/creative.js"],
+        [node, "-e", script, "static/js/common/creative.js", "static/js/writing/creative_episodes.js", "static/js/common/prompt_templates.js", "static/js/common/creative_generation.js"],
         capture_output=True,
         text=True,
         check=False,
@@ -2066,7 +2074,7 @@ Object.assign(component, {
 
 
 def test_saving_a_scene_script_reloads_its_new_version():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative_generation.js")
     save_method = creative.split("async saveProjectEpisode(item)", 1)[1].split(
         "async saveCreativeItem", 1
     )[0]
@@ -2075,7 +2083,7 @@ def test_saving_a_scene_script_reloads_its_new_version():
 
 
 def test_script_series_generation_does_not_offer_resume_for_an_old_beats_version():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative_generation.js")
     scripts = _source("templates/common/workspace/project_scripts.html")
 
     assert "isCompatibleProjectSeriesEpisode(stage, item)" in creative
@@ -2084,7 +2092,7 @@ def test_script_series_generation_does_not_offer_resume_for_an_old_beats_version
 
 
 def test_continuity_ledger_renders_known_status_codes_in_chinese():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative.js", "static/js/writing/creative_episodes.js")
     beats = _source("templates/common/workspace/project_beats.html")
 
     assert "continuityStatusLabel(status)" in creative
@@ -2126,7 +2134,7 @@ def test_download_click_notifies_when_a_douyin_full_drama_is_already_local():
 def test_topic_library_can_capture_and_export_hongguo_reviews():
     topics = _source("templates/common/workspace/selection_topics.html")
     modal = _source("templates/common/workspace/selection_modals.html")
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/selection/drama_reviews.js")
 
     assert '@click="openTopicReviewCapture(topic)"' in topics
     assert 'id="dramaReviewCaptureModal"' in modal
@@ -2248,7 +2256,7 @@ def test_creative_generation_opens_progress_modal_with_retry_controls():
 
 
 def test_creative_generation_retry_uses_owning_business_action():
-    script = _source("static/js/common/creative.js")
+    script = _source("static/js/common/creative_generation.js")
     modal = _source("templates/common/workspace/creative_progress_modal.html")
 
     assert "/generation-jobs/${this.creativeWorkspace.jobId}/retry" in script
@@ -2288,7 +2296,7 @@ def test_next_stage_generation_is_not_blocked_by_a_stale_previous_action():
 
 
 def test_episode_generation_controls_only_block_the_active_episode():
-    creative = _source("static/js/common/creative.js")
+    creative = _source("static/js/common/creative_generation.js")
     tasks = _source("static/js/common/tasks.js")
 
     assert "activeEpisode: 0" in tasks
@@ -2408,7 +2416,7 @@ def test_breakdown_task_log_opens_inside_the_generation_modal():
 def test_creative_generation_log_is_inline_and_can_reopen_from_project_progress():
     modal = _source("templates/common/workspace/creative_progress_modal.html")
     progress = _source("templates/common/workspace/project_progress.html")
-    script = _source("static/js/common/creative.js")
+    script = _source("static/js/common/creative_generation.js")
 
     assert 'id="creativeGenerationLogPane"' in modal
     assert "creativeWorkspace.jobLogs" in modal
@@ -2458,10 +2466,12 @@ global.aiworkerApi = {
   },
   isAbortError: () => false,
 };
-vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+for (const path of process.argv.slice(1)) {
+  vm.runInThisContext(fs.readFileSync(path, 'utf8'), {filename: path});
+}
 
 const createComponent = workflowMode => {
-  const component = window.aiworkerModules[0]();
+  const component = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
   Object.assign(component, {
     creativeWorkspace: {
       project: {id: 7, workflow_mode: workflowMode}, selectedEpisode: 1,
@@ -2494,7 +2504,7 @@ const createComponent = workflowMode => {
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
     result = subprocess.run(
-        [node, "-e", script, "static/js/common/creative.js"],
+        [node, "-e", script, "static/js/common/creative.js", "static/js/writing/creative_episodes.js", "static/js/common/prompt_templates.js", "static/js/common/creative_generation.js"],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -2522,8 +2532,10 @@ global.aiworkerApi = {
     };
   },
 };
-vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
-const component = window.aiworkerModules[0]();
+for (const path of process.argv.slice(1)) {
+  vm.runInThisContext(fs.readFileSync(path, 'utf8'), {filename: path});
+}
+const component = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
 Object.assign(component, {
   jobs: [],
   creativeWorkspace: {
@@ -2543,7 +2555,7 @@ Object.assign(component, {
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
     result = subprocess.run(
-        [node, "-e", script, "static/js/common/creative.js"],
+        [node, "-e", script, "static/js/common/creative.js", "static/js/writing/creative_episodes.js", "static/js/common/prompt_templates.js", "static/js/common/creative_generation.js"],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -2554,7 +2566,7 @@ Object.assign(component, {
 
 def test_creative_generation_progress_shows_current_batch_and_slow_request_warning():
     modal = _source("templates/common/workspace/creative_progress_modal.html")
-    script = _source("static/js/common/creative.js")
+    script = _source("static/js/common/creative_generation.js")
 
     assert "creativeBatchProgressText()" in modal
     assert "creativeBatchSlow()" in modal
@@ -2871,7 +2883,7 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "dramaReviewStatusLabel" in drama_actions
     assert "captureStatusLabel" in drama_actions
     assert "优先检索第三方剧目来源" in drama_page
-    review_actions = _source("static/js/common/creative.js")
+    review_actions = _source("static/js/selection/drama_reviews.js")
     assert "剧评检索下载" in drama_page
     assert "startDramaReviewCapture" in drama_page
     assert "dramaReviews.limit" in drama_page
@@ -3576,7 +3588,7 @@ def test_selection_topics_template_has_skeleton():
 
 
 def test_creative_uses_show_toast_and_request_key():
-    script = _source("static/js/common/creative.js")
+    script = _source("static/js/common/creative.js", "static/js/common/creative_generation.js")
     assert "showToast" in script
     assert "requestKey" in script
 

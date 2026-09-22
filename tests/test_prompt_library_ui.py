@@ -123,7 +123,7 @@ def test_prompt_library_information_architecture_separates_daily_and_advanced_wo
 
 def test_prompt_library_ui_keeps_contract_locked_and_supports_all_mvp_scopes():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
-    script = _read("static/js/common/creative.js")
+    script = _read("static/js/common/prompt_templates.js")
 
     assert "输出字段、JSON 契约和运行变量由系统锁定" in modal
     assert "作为当前阶段默认模板" in modal
@@ -143,7 +143,7 @@ def test_prompt_library_ui_keeps_contract_locked_and_supports_all_mvp_scopes():
 
 def test_prompt_picker_clicks_full_card_and_shows_selected_template_details():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
-    script = _read("static/js/common/creative.js")
+    script = _read("static/js/common/prompt_templates.js")
 
     assert '@click="selectPromptTemplate(template)"' in modal
     assert '@keydown.enter.prevent="selectPromptTemplate(template)"' in modal
@@ -175,7 +175,7 @@ def test_prompt_picker_clicks_full_card_and_shows_selected_template_details():
 
 def test_prompt_library_ui_explains_recommendations_and_requires_import_confirmation():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
-    script = _read("static/js/common/creative.js")
+    script = _read("static/js/common/prompt_templates.js")
 
     assert "七维匹配度排序" in modal
     assert "promptRecommendation(template).reasons" in modal
@@ -190,7 +190,7 @@ def test_prompt_library_ui_explains_recommendations_and_requires_import_confirma
 
 def test_prompt_library_ui_omits_ab_testing_and_pricing_workflows():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
-    script = _read("static/js/common/creative.js")
+    script = _read("static/js/common/prompt_templates.js")
     effects = _read("templates/common/workspace/prompt_template_effects.html")
 
     for removed in (
@@ -222,7 +222,7 @@ def test_prompt_library_ui_omits_ab_testing_and_pricing_workflows():
 
 def test_prompt_library_ui_exposes_real_usage_and_coverage_observability():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
-    script = _read("static/js/common/creative.js")
+    script = _read("static/js/common/prompt_templates.js")
     state = _read("static/js/common/tasks.js")
 
     assert "效果数据" in modal
@@ -239,7 +239,7 @@ def test_prompt_library_ui_exposes_real_usage_and_coverage_observability():
 
 def test_prompt_library_ui_exposes_moderated_cross_project_marketplace():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
-    script = _read("static/js/common/creative.js")
+    script = _read("static/js/common/prompt_templates.js")
     state = _read("static/js/common/tasks.js")
 
     assert "模板市场" in modal
@@ -277,7 +277,7 @@ def test_prompt_library_ui_exposes_moderated_cross_project_marketplace():
 
 
 def test_generation_payload_consumes_a_server_versioned_single_run_selection():
-    script = _read("static/js/common/creative.js")
+    script = _read("static/js/common/prompt_templates.js") + "\n" + _read("static/js/common/creative_generation.js")
 
     assert "prompt_template_key: selection.templateKey" in script
     assert "prompt_template_revision: selection.revision" in script
@@ -305,7 +305,8 @@ def test_next_generation_template_selection_survives_navigation_and_is_cleared()
       },
     };
     require('./static/js/common/creative.js');
-    const component = window.aiworkerModules[0]();
+    require('./static/js/common/prompt_templates.js');
+    const component = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
     component.creativeWorkspace = {
       project: {id: 9},
       promptLibrary: {runSelections: {}},
@@ -336,7 +337,7 @@ def test_next_generation_template_selection_survives_navigation_and_is_cleared()
 
 def test_old_project_upgrade_is_folded_into_first_real_template_action():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
-    script = _read("static/js/common/creative.js")
+    script = _read("static/js/common/prompt_templates.js")
     api = _read("creative/api.py")
 
     assert "这是旧项目，当前默认仍使用原有提示词" in modal

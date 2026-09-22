@@ -6,6 +6,7 @@
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 
+import re
 from pathlib import Path
 
 
@@ -34,6 +35,37 @@ def test_heavy_libraries_are_route_scoped():
     assert "echarts.min.js" not in base
     assert "echarts.min.js" in analytics
     assert "creative.js" not in base
+
+
+def test_creative_modules_are_route_scoped():
+    core = "common/creative.js"
+    reviews = "selection/drama_reviews.js"
+    episodes = "writing/creative_episodes.js"
+    prompt = "common/prompt_templates.js"
+    generation = "common/creative_generation.js"
+    routes = {
+        "selection/topics.html": [core, reviews],
+        "selection/hits.html": [core, reviews],
+        "selection/dramas.html": [core],
+        "planning/projects.html": [core, prompt, generation],
+        "planning/brief.html": [core, prompt, generation],
+        "planning/characters.html": [core, prompt, generation],
+        "writing/projects.html": [core],
+        "writing/outlines.html": [core, episodes, prompt, generation],
+        "writing/beats.html": [core, episodes, prompt, generation],
+        "writing/scripts.html": [core, episodes, prompt, generation],
+        "common/workspace/prompt_template_center.html": [core, prompt],
+        "common/workspace/prompt_template_effects.html": [core, prompt],
+    }
+    modules = {core, reviews, episodes, prompt, generation}
+    for template, expected in routes.items():
+        scripts = re.findall(r'<script src="/static/js/([^?]+)\?', source(f"templates/{template}"))
+        assert [script for script in scripts if script in modules] == expected, template
+        assert scripts[:len(expected)] == expected, template
+
+
+def test_common_creative_bundle_stays_within_source_budget():
+    assert (ROOT / "static/js/common/creative.js").stat().st_size <= 160_000
 
 
 def test_tasks_template_only_loads_its_page_script():

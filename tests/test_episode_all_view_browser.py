@@ -53,6 +53,10 @@ def test_episode_workspace_initial_state_matches_the_all_episode_url(
         page.evaluate("window.aiworkerModules = []")
         page.add_script_tag(path=tasks_script)
         page.add_script_tag(path=creative_script)
+        if page_name.startswith("writing-"):
+            page.add_script_tag(path=ROOT / "static/js/writing/creative_episodes.js")
+        page.add_script_tag(path=ROOT / "static/js/common/prompt_templates.js")
+        page.add_script_tag(path=ROOT / "static/js/common/creative_generation.js")
 
         state = page.evaluate(
             """
@@ -139,10 +143,13 @@ def test_episode_workspace_all_view_and_multi_download_modal(
         page.add_style_tag(path=ROOT / "static/css/bootstrap.min.css")
         page.evaluate("window.aiworkerModules = []")
         page.add_script_tag(path=creative_script)
+        page.add_script_tag(path=ROOT / "static/js/writing/creative_episodes.js")
+        page.add_script_tag(path=ROOT / "static/js/common/prompt_templates.js")
+        page.add_script_tag(path=ROOT / "static/js/common/creative_generation.js")
         page.evaluate(
             """
             ([stage, items]) => {
-              const methods = window.aiworkerModules.at(-1)();
+              const methods = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
               window.aiworkerApi = {
                 async request(url) {
                   if (!url.endsWith('/episodes/export/templates')) {
@@ -282,10 +289,13 @@ def test_episode_download_moves_focus_and_uses_blob_download() -> None:
         )
         page.evaluate("window.aiworkerModules = []")
         page.add_script_tag(path=creative_script)
+        page.add_script_tag(path=ROOT / "static/js/writing/creative_episodes.js")
+        page.add_script_tag(path=ROOT / "static/js/common/prompt_templates.js")
+        page.add_script_tag(path=ROOT / "static/js/common/creative_generation.js")
         result = page.evaluate(
             """
             async () => {
-              const methods = window.aiworkerModules.at(-1)();
+              const methods = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
               const modal = document.getElementById('creativeEpisodeDownloadModal');
               const notices = [];
               const state = Object.assign({}, methods, {
@@ -365,10 +375,13 @@ def test_screenplay_template_preview_uses_selected_template_and_sorted_episodes(
         page.set_content("<main></main>")
         page.evaluate("window.aiworkerModules = []")
         page.add_script_tag(path=creative_script)
+        page.add_script_tag(path=ROOT / "static/js/writing/creative_episodes.js")
+        page.add_script_tag(path=ROOT / "static/js/common/prompt_templates.js")
+        page.add_script_tag(path=ROOT / "static/js/common/creative_generation.js")
         result = page.evaluate(
             """
             async () => {
-              const methods = window.aiworkerModules.at(-1)();
+              const methods = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
               const state = Object.assign({}, methods, {
                 creativeWorkspace: {
                   project: {id: 21},
@@ -421,10 +434,13 @@ def test_scene_script_history_selection_is_read_only() -> None:
         page.set_content("<main></main>")
         page.evaluate("window.aiworkerModules = []")
         page.add_script_tag(path=creative_script)
+        page.add_script_tag(path=ROOT / "static/js/writing/creative_episodes.js")
+        page.add_script_tag(path=ROOT / "static/js/common/prompt_templates.js")
+        page.add_script_tag(path=ROOT / "static/js/common/creative_generation.js")
         result = page.evaluate(
             """
             () => {
-              const methods = window.aiworkerModules.at(-1)();
+              const methods = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
               const oldScript = {
                 id: 43, stage: 'script', episode_number: 1, version: 1, status: 'draft',
                 upstream_refs: {beats_id: 21, beats_version: 1},
@@ -506,10 +522,13 @@ def test_scene_script_history_selector_renders_old_script_read_only() -> None:
         page.add_style_tag(path=ROOT / "static/css/bootstrap.min.css")
         page.evaluate("window.aiworkerModules = []")
         page.add_script_tag(path=creative_script)
+        page.add_script_tag(path=ROOT / "static/js/writing/creative_episodes.js")
+        page.add_script_tag(path=ROOT / "static/js/common/prompt_templates.js")
+        page.add_script_tag(path=ROOT / "static/js/common/creative_generation.js")
         page.evaluate(
             """
             () => {
-              const methods = window.aiworkerModules.at(-1)();
+              const methods = Object.assign({}, ...window.aiworkerModules.map(factory => factory()));
               const oldScript = {
                 id: 43, stage: 'script', episode_number: 1, version: 1, status: 'draft',
                 upstream_refs: {beats_id: 21, beats_version: 1},
@@ -589,6 +608,7 @@ def test_scene_script_history_selector_renders_old_script_read_only() -> None:
         assert page.get_by_role("link", name="下载此版本").is_visible()
         assert not errors
         browser.close()
+
 
 def test_beats_focus_editor_selects_and_updates_the_original_scene() -> None:
     """Selecting a scene edits its original Alpine beat instead of a copied draft."""

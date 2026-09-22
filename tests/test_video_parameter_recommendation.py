@@ -368,7 +368,7 @@ def test_video_parameter_worker_command() -> None:
 def test_script_workspace_contains_model_specific_recommendation_ui() -> None:
     template = Path("templates/common/workspace/project_scripts.html").read_text(encoding="utf-8")
     modal = Path("templates/common/workspace/creative_episode_download_modal.html").read_text(encoding="utf-8")
-    script = Path("static/js/common/creative.js").read_text(encoding="utf-8")
+    script = Path("static/js/writing/creative_episodes.js").read_text(encoding="utf-8")
 
     assert "AI 视频规格建议" in template
     assert "minimax_h3_max" in template
@@ -377,7 +377,7 @@ def test_script_workspace_contains_model_specific_recommendation_ui() -> None:
     assert "confirmVideoParameter" in script
     assert "videoParameterExportDefaults" in script
     assert "enabled: true" in script
-    assert "导出视频尺寸建议" in modal
+    assert "经典模板附录中的视频尺寸建议" in modal
     assert 'x-model="item.ratio"' in modal
     assert 'x-model="item.resolutionTier"' in modal
     assert "videoParameterElapsedSeconds" in script

@@ -64,8 +64,11 @@ def test_running_video_parameter_analysis_has_bounded_progress_feedback(
         window.aiworkerApi = {request() { return new Promise(() => {}); }};
         """
     )
-    page.add_script_tag(content=_source("static/js/common/creative.js"))
     page.add_script_tag(content=_source("static/js/common/tasks.js"))
+    page.add_script_tag(content=_source("static/js/common/creative.js"))
+    page.add_script_tag(content=_source("static/js/writing/creative_episodes.js"))
+    page.add_script_tag(content=_source("static/js/common/prompt_templates.js"))
+    page.add_script_tag(content=_source("static/js/common/creative_generation.js"))
     page.add_script_tag(content=_source("static/js/alpine.min.js"))
 
     progress = page.locator('[role="progressbar"]')

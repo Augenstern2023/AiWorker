@@ -63,8 +63,8 @@ def mount_original_project_form(page) -> None:
         };
         """
     )
-    page.add_script_tag(content=_source("static/js/common/creative.js"))
     page.add_script_tag(content=_source("static/js/common/tasks.js"))
+    page.add_script_tag(content=_source("static/js/common/creative.js"))
     page.add_script_tag(content=_source("static/js/alpine.min.js"))
 
 
@@ -142,8 +142,10 @@ def mount_blueprint_workspace(
         }};
         """
     )
-    page.add_script_tag(content=_source("static/js/common/creative.js"))
     page.add_script_tag(content=_source("static/js/common/tasks.js"))
+    page.add_script_tag(content=_source("static/js/common/creative.js"))
+    page.add_script_tag(content=_source("static/js/common/prompt_templates.js"))
+    page.add_script_tag(content=_source("static/js/common/creative_generation.js"))
     page.add_script_tag(content=_source("static/js/alpine.min.js"))
 
 
@@ -199,8 +201,8 @@ def test_project_list_links_open_the_projects_current_stage() -> None:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         page.set_content('<body data-workspace-page="planning-projects"></body>')
-        page.add_script_tag(content=_source("static/js/common/creative.js"))
         page.add_script_tag(content=_source("static/js/common/tasks.js"))
+        page.add_script_tag(content=_source("static/js/common/creative.js"))
         actual_urls = page.evaluate(
             """statuses => {
                 const workspace = appData();
@@ -252,8 +254,8 @@ def test_free_project_list_links_open_the_latest_active_resource() -> None:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         page.set_content('<body data-workspace-page="planning-projects"></body>')
-        page.add_script_tag(content=_source("static/js/common/creative.js"))
         page.add_script_tag(content=_source("static/js/common/tasks.js"))
+        page.add_script_tag(content=_source("static/js/common/creative.js"))
         actual_urls = page.evaluate(
             """projects => {
                 const workspace = appData();
@@ -290,8 +292,8 @@ def test_free_project_status_label_shows_the_latest_locked_stage() -> None:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         page.set_content('<body data-workspace-page="planning-projects"></body>')
-        page.add_script_tag(content=_source("static/js/common/creative.js"))
         page.add_script_tag(content=_source("static/js/common/tasks.js"))
+        page.add_script_tag(content=_source("static/js/common/creative.js"))
         labels = page.evaluate(
             "projects => projects.map(project => appData().creativeProjectStatusLabel(project))",
             projects,
@@ -332,8 +334,8 @@ def test_project_list_requests_the_page_visibility_scope(
             }};
             """
         )
-        page.add_script_tag(content=_source("static/js/common/creative.js"))
         page.add_script_tag(content=_source("static/js/common/tasks.js"))
+        page.add_script_tag(content=_source("static/js/common/creative.js"))
 
         urls = page.evaluate(
             """async () => {
@@ -658,6 +660,8 @@ def test_original_brief_query_starts_direction_generation_once() -> None:
         )
         page.add_script_tag(content=_source("static/js/common/tasks.js"))
         page.add_script_tag(content=_source("static/js/common/creative.js"))
+        page.add_script_tag(content=_source("static/js/common/prompt_templates.js"))
+        page.add_script_tag(content=_source("static/js/common/creative_generation.js"))
         result = page.evaluate(
             """async () => {
                 const workspace = appData();

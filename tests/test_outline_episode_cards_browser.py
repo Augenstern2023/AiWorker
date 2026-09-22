@@ -366,6 +366,9 @@ def test_latest_outline_batch_prefers_new_revision_draft_only_while_project_is_d
         page.set_content("<body></body>")
         page.evaluate("window.aiworkerModules = []")
         page.add_script_tag(path=creative_script)
+        page.add_script_tag(path=ROOT / "static/js/writing/creative_episodes.js")
+        page.add_script_tag(path=ROOT / "static/js/common/prompt_templates.js")
+        page.add_script_tag(path=ROOT / "static/js/common/creative_generation.js")
         result = page.evaluate(
             """
             () => {

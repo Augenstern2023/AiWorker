@@ -21,4 +21,4 @@
 {% include "common/workspace/free_creative_modals.html" %}
 {% include "common/workspace/prompt_library_modal.html" %}
 {% endblock %}
-{% block scripts %}<script src="/static/js/common/creative.js?v={{ asset_version }}"></script><script src="/static/js/planning/brief.js?v={{ asset_version }}"></script>{% if can_export_projects %}<script src="/static/js/common/production_export.js?v={{ asset_version }}"></script><script src="/static/js/planning/brief_export.js?v={{ asset_version }}"></script>{% endif %}{% endblock %}
+{% block scripts %}<script src="/static/js/common/creative.js?v={{ asset_version }}"></script><script src="/static/js/common/prompt_templates.js?v={{ asset_version }}"></script><script src="/static/js/common/creative_generation.js?v={{ asset_version }}"></script><script src="/static/js/planning/brief.js?v={{ asset_version }}"></script>{% if can_export_projects %}<script src="/static/js/common/production_export.js?v={{ asset_version }}"></script><script src="/static/js/planning/brief_export.js?v={{ asset_version }}"></script>{% endif %}{% endblock %}

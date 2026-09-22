@@ -32,6 +32,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 
+from creative.legacy_sqlite_repository import CreativeRepository
 from system_database import SystemDatabase, SystemDatabaseSettings
 
 # Add project root to Python path
@@ -185,8 +186,6 @@ def build_test_creative_repository(runtime_dir: str | Path) -> "CreativeReposito
     builds it must name the store it talks to. Tests keep exercising the frozen
     SQLite implementation, at the path the removed derivation used to produce.
     """
-
-    from creative.legacy_sqlite_repository import CreativeRepository
 
     path = Path(runtime_dir) / "creative" / "creative.db"
     path.parent.mkdir(parents=True, exist_ok=True)

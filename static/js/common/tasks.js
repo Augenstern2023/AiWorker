@@ -40,6 +40,7 @@
             const workspace = {
                 page: document.body.dataset.workspacePage || '',
                 JOB_POLL_INTERVAL_MS: 5000,
+                pollers: new Map(),
                 pageNeedsJobPolling() {
                     return this.page === 'admin-jobs'
                         || ['selection-hits', 'selection-topics', 'selection-dramas'].includes(this.page)
@@ -342,6 +343,60 @@
                     return element ? bootstrap.Modal.getOrCreateInstance(element) : null;
                 },
 
+                schedulePoller(name, callback, intervalMs, immediate = false) {
+                    this.stopPoller(name);
+                    const poller = {callback, intervalMs, timer: null, running: false};
+                    this.pollers.set(name, poller);
+                    const run = async () => {
+                        poller.timer = null;
+                        if (document.hidden || poller.running || this.pollers.get(name) !== poller) return;
+                        poller.running = true;
+                        try {
+                            await callback();
+                        } finally {
+                            poller.running = false;
+                            if (!document.hidden && this.pollers.get(name) === poller) {
+                                poller.timer = window.setTimeout(run, poller.intervalMs);
+                            }
+                        }
+                    };
+                    poller.run = run;
+                    poller.timer = window.setTimeout(run, immediate ? 0 : intervalMs);
+                },
+
+                stopPoller(name) {
+                    const poller = this.pollers.get(name);
+                    if (poller?.timer != null) window.clearTimeout(poller.timer);
+                    this.pollers.delete(name);
+                },
+
+                pausePollers() {
+                    for (const poller of this.pollers.values()) {
+                        if (poller.timer !== null) window.clearTimeout(poller.timer);
+                        poller.timer = null;
+                    }
+                },
+
+                resumePollers() {
+                    for (const poller of this.pollers.values()) {
+                        if (!poller.running && poller.timer === null) {
+                            poller.timer = window.setTimeout(poller.run, 0);
+                        }
+                    }
+                },
+
+                clearPollers() {
+                    for (const name of [...this.pollers.keys()]) this.stopPoller(name);
+                },
+
+                initPollerLifecycle() {
+                    document.addEventListener('visibilitychange', () => {
+                        if (document.hidden) this.pausePollers();
+                        else this.resumePollers();
+                    });
+                    window.addEventListener('pagehide', () => this.clearPollers());
+                },
+
                 showAdoptionNotice(success, title, message) {
                     this.adoptionNotice = {success: Boolean(success), title: title || '', message: message || ''};
                     this.adoptionNoticeModal = this.modal('adoptionNoticeModal');
@@ -349,6 +404,7 @@
                 },
 
                 async init() {
+                    this.initPollerLifecycle();
                     this.projectModal = this.modal('projectModal');
                     this.audioModal = this.modal('audioModal');
                     this.filePreviewModal = this.modal('filePreviewModal');
@@ -484,10 +540,15 @@
                     }
                     if (initialJobsRequest) await initialJobsRequest;
                     this.initTooltips();
-                    if (this.page === 'admin-jobs') setInterval(() => this.fetchLogs(), 1000);
-                    if (this.pageNeedsJobPolling()) setInterval(() => this.fetchJobs(), this.JOB_POLL_INTERVAL_MS);
-                    if (this.tickCreativeGenerationElapsed) setInterval(() => this.tickCreativeGenerationElapsed(), 1000);
-                    if (this.tickBreakdownGenerationElapsed) setInterval(() => this.tickBreakdownGenerationElapsed(), 1000);
+                    if (this.page === 'admin-jobs') {
+                        this.schedulePoller('logs', () => this.fetchLogs(), 1000);
+                    }
+                    if (this.pageNeedsJobPolling()) {
+                        this.schedulePoller('jobs', () => this.fetchJobs(), this.JOB_POLL_INTERVAL_MS);
+                    }
+                    if (this.tickBreakdownGenerationElapsed) {
+                        this.schedulePoller('breakdown-elapsed', () => this.tickBreakdownGenerationElapsed(), 1000);
+                    }
                     this.initBeforeUnload();
                 },
 

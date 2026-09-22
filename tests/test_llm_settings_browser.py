@@ -1033,3 +1033,83 @@ def test_admin_config_initialization_fetches_llm_settings() -> None:
             "/api/hongguo/drama/settings",
         }
         browser.close()
+
+
+def test_workspace_job_poller_does_not_overlap_and_pauses_while_hidden() -> None:
+    """A pending poll must suppress the next tick and page lifecycle must stop it."""
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content("<main></main>")
+        page.add_script_tag(path=TASKS_SCRIPT)
+        result = page.evaluate(
+            """async () => {
+                let hidden = false;
+                let nextTimerId = 0;
+                const timers = new Map();
+                let calls = 0;
+                let resolveFetch;
+                Object.defineProperty(document, 'hidden', {
+                    configurable: true,
+                    get: () => hidden,
+                });
+                window.setTimeout = (callback, delay) => {
+                    const id = ++nextTimerId;
+                    timers.set(id, {callback, delay});
+                    return id;
+                };
+                window.clearTimeout = id => timers.delete(id);
+                const runNextTimer = () => {
+                    const [id, timer] = timers.entries().next().value;
+                    timers.delete(id);
+                    timer.callback();
+                };
+
+                const app = appData();
+                app.initPollerLifecycle();
+                app.fetchJobs = () => new Promise(resolve => {
+                    calls += 1;
+                    resolveFetch = resolve;
+                });
+                app.schedulePoller('jobs', () => app.fetchJobs(), 1000, true);
+                runNextTimer();
+                await Promise.resolve();
+                const callsWhilePending = calls;
+
+                hidden = true;
+                document.dispatchEvent(new Event('visibilitychange'));
+                resolveFetch();
+                await Promise.resolve();
+                await Promise.resolve();
+                const hiddenTimerCount = timers.size;
+
+                hidden = false;
+                document.dispatchEvent(new Event('visibilitychange'));
+                runNextTimer();
+                await Promise.resolve();
+                const callsAfterResume = calls;
+
+                window.dispatchEvent(new Event('pagehide'));
+                const pollerCountAfterPagehide = app.pollers.size;
+                resolveFetch();
+                await Promise.resolve();
+                await Promise.resolve();
+                return {
+                    callsWhilePending,
+                    hiddenTimerCount,
+                    callsAfterResume,
+                    pollerCountAfterPagehide,
+                    timerCountAfterPagehide: timers.size,
+                };
+            }"""
+        )
+
+        assert result == {
+            "callsWhilePending": 1,
+            "hiddenTimerCount": 0,
+            "callsAfterResume": 2,
+            "pollerCountAfterPagehide": 0,
+            "timerCountAfterPagehide": 0,
+        }
+        browser.close()

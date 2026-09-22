@@ -23,12 +23,35 @@ llama.cpp 安装进 AIWorker 主环境，也不会替代现有剧本审核 API�
 哈希为 `13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983`；
 启动时仍会重新计算本地文件并拒绝不一致的模型。
 
+以下示例把虚拟环境、uv 缓存、Hugging Face 缓存和模型全部放在 D 盘；
+仓库本身可以继续保留在 C 盘。先在仓库根目录执行安装：
+
 ```powershell
-uv sync --project deploy/semif
-$env:SEMIF_GGUF_PATH = "D:\models\Qwen_Qwen3.5-4B-Q4_K_M.gguf"
-$env:SEMIF_GGUF_SHA256 = (Get-FileHash $env:SEMIF_GGUF_PATH -Algorithm SHA256).Hash.ToLower()
-uv run --project deploy/semif aiworker-semif
+$env:UV_PROJECT_ENVIRONMENT = "D:\AiWorker\SemIf\.venv"
+$env:UV_CACHE_DIR = "D:\AiWorker\uv-cache"
+$env:HF_HOME = "D:\AiWorker\huggingface-cache"
+$env:HF_HUB_CACHE = "D:\AiWorker\huggingface-cache\hub"
+
+uv sync --frozen --project deploy/semif
 ```
+
+把模型放到 `D:\AiWorker\SemIf\models` 后，在同一个 PowerShell 窗口启动服务：
+
+```powershell
+$env:UV_PROJECT_ENVIRONMENT = "D:\AiWorker\SemIf\.venv"
+$env:UV_CACHE_DIR = "D:\AiWorker\uv-cache"
+$env:HF_HOME = "D:\AiWorker\huggingface-cache"
+$env:HF_HUB_CACHE = "D:\AiWorker\huggingface-cache\hub"
+$env:SEMIF_GGUF_PATH = "D:\AiWorker\SemIf\models\Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+$env:SEMIF_GGUF_SHA256 = "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983"
+$env:SEMIF_LLAMA_THREADS = "6"
+
+uv run --frozen --project deploy/semif aiworker-semif
+```
+
+服务就绪后，`Invoke-RestMethod http://127.0.0.1:8765/health` 应返回
+`status: ok`、`backend: llamacpp` 和 `n_gpu_layers: 0`。当前上游实现即使机器有
+NVIDIA 显卡也只使用 CPU；环境、缓存和模型均在 D 盘不代表模型会使用 GPU。
 
 模型首次启动还需要下载固定 revision 的参考 tokenizer。生产环境应预先缓存，
 并把实际 GGUF SHA-256 纳入部署记录。

@@ -16,9 +16,11 @@ import config
 
 from analysis.llm import (
     LLMOutputTruncatedError,
+    LLMTimeoutError,
     apply_reasoning_effort_override,
     create_llm_provider_from_config,
     get_llm_usage_snapshot,
+    reasoning_efforts_for_model,
 )
 from core.job import CrawlJob
 from creative.free_mode_service import FreeCreativeModeService
@@ -35,7 +37,9 @@ from creative.script_service import (
 )
 from creative.script_series import (
     SCRIPT_SERIES_MAX_CONCURRENCY,
+    is_read_timeout_exception,
     resolve_script_series_chunk_size,
+    run_bisecting_script_batch,
     run_ordered_script_windows,
 )
 
@@ -64,9 +68,24 @@ def _create_generation_provider(extra: dict[str, Any]) -> Any:
         )
     else:
         provider = create_llm_provider_from_config(config)
-    apply_reasoning_effort_override(
-        provider, str(extra.get("reasoning_effort") or "")
+    requested_effort = str(extra.get("reasoning_effort") or "").strip().lower()
+    is_script_series = (
+        str(extra.get("action") or "") == "script" and bool(extra.get("series"))
     )
+    if (
+        is_script_series
+        and not requested_effort
+        and reasoning_efforts_for_model(str(getattr(provider, "model", "") or ""))
+    ):
+        requested_effort = "high"
+    apply_reasoning_effort_override(provider, requested_effort)
+    if is_script_series:
+        try:
+            provider.retry_read_timeouts = False
+        except (AttributeError, TypeError):
+            # Test doubles and alternate providers may intentionally expose no
+            # retry policy; the concrete LLM provider carries this setting.
+            pass
     return provider
 
 
@@ -498,76 +517,122 @@ async def _run_free_episode_series(
             }
             for episode_number in range(1, total + 1)
         ]
+        script_request_semaphore = asyncio.Semaphore(
+            SCRIPT_SERIES_MAX_CONCURRENCY
+        )
+        script_serial_lock = asyncio.Lock()
+        script_serial_mode = False
+
+        async def request_script_group(
+            episode_numbers: list[int],
+        ) -> tuple[list[tuple[int, dict[str, Any]]], dict[str, Any]]:
+            await _wait_if_paused(job, emit)
+            first_number = episode_numbers[0]
+            first = prepared[first_number]
+            request_provider = _create_generation_provider(extra)
+            job._llm_usage_providers.append(request_provider)
+
+            async def generate_request() -> tuple[
+                list[tuple[int, dict[str, Any]]], dict[str, Any]
+            ]:
+                try:
+                    return await generate_episode_script_chunk(
+                        request_provider,
+                        first["project"],
+                        first["batch_brief"],
+                        [
+                            prepared[number]["outline"]
+                            for number in episode_numbers
+                        ],
+                        first["characters"],
+                        first["relationships"],
+                        {
+                            number: prepared[number]["beats"]
+                            for number in episode_numbers
+                        },
+                        continuity_ledger=build_continuity_ledger(
+                            [
+                                item
+                                for item in continuity_beats
+                                if int(item["episode_number"]) < first_number
+                            ]
+                        ),
+                        prompt_snapshot=first["prompt_snapshot"],
+                    )
+                except LLMOutputTruncatedError as exc:
+                    if len(episode_numbers) == 1:
+                        raise LLMOutputTruncatedError(
+                            f"第 {first_number} 集自由场次剧本生成仍达到模型输出上限；"
+                            "请提高模型输出上限或减少单集正文长度",
+                            finish_reason=exc.finish_reason,
+                            returned_chars=exc.returned_chars,
+                        ) from exc
+                    raise
+                except LLMTimeoutError as exc:
+                    if len(episode_numbers) == 1 and is_read_timeout_exception(exc):
+                        raise LLMTimeoutError(
+                            f"第 {first_number} 集自由场次剧本生成读取响应超时；"
+                            "该请求未在 provider 层原样重试"
+                        ) from exc
+                    raise
+
+            if script_serial_mode:
+                async with script_serial_lock:
+                    async with script_request_semaphore:
+                        return await generate_request()
+            async with script_request_semaphore:
+                return await generate_request()
+
+        async def report_script_split(payload: dict[str, object]) -> None:
+            split_items = list(payload["split_items"])
+            left_items = list(payload["left_items"])
+            right_items = list(payload["right_items"])
+            reason_text = (
+                "输出达到上限"
+                if payload["split_reason"] == "output_truncated"
+                else "读取模型响应超时"
+            )
+            emit(
+                job,
+                "progress",
+                f"第 {split_items[0]}-{split_items[-1]} 集自由场次剧本"
+                f"{reason_text}，自动拆分为第 {left_items[0]}-{left_items[-1]} 集和"
+                f"第 {right_items[0]}-{right_items[-1]} 集",
+                level="warning",
+                payload={
+                    "stage": stage,
+                    "completed": len(episode_ids),
+                    "total": total,
+                    "split_start": split_items[0],
+                    "split_end": split_items[-1],
+                    "left_start": left_items[0],
+                    "left_end": left_items[-1],
+                    "right_start": right_items[0],
+                    "right_end": right_items[-1],
+                    **{
+                        key: value
+                        for key, value in payload.items()
+                        if key
+                        not in {"split_items", "left_items", "right_items"}
+                    },
+                },
+            )
 
         async def generate_script_group(
             episode_numbers: list[int],
         ) -> list[
             tuple[list[int], list[tuple[int, dict[str, Any]]], dict[str, Any]]
         ]:
-            await _wait_if_paused(job, emit)
-            first_number = episode_numbers[0]
-            last_number = episode_numbers[-1]
-            first = prepared[first_number]
-            request_provider = _create_generation_provider(extra)
-            job._llm_usage_providers.append(request_provider)
-            try:
-                rows, meta = await generate_episode_script_chunk(
-                    request_provider,
-                    first["project"],
-                    first["batch_brief"],
-                    [prepared[number]["outline"] for number in episode_numbers],
-                    first["characters"],
-                    first["relationships"],
-                    {
-                        number: prepared[number]["beats"]
-                        for number in episode_numbers
-                    },
-                    continuity_ledger=build_continuity_ledger(
-                        [
-                            item
-                            for item in continuity_beats
-                            if int(item["episode_number"]) < first_number
-                        ]
-                    ),
-                    prompt_snapshot=first["prompt_snapshot"],
-                )
-            except LLMOutputTruncatedError as exc:
-                if len(episode_numbers) == 1:
-                    raise LLMOutputTruncatedError(
-                        f"第 {first_number} 集自由场次剧本生成仍达到模型输出上限；"
-                        "请提高模型输出上限或减少单集正文长度",
-                        finish_reason=exc.finish_reason,
-                        returned_chars=exc.returned_chars,
-                    ) from exc
-                midpoint = len(episode_numbers) // 2
-                left = episode_numbers[:midpoint]
-                right = episode_numbers[midpoint:]
-                emit(
-                    job,
-                    "progress",
-                    f"第 {first_number}-{last_number} 集自由场次剧本输出达到上限，"
-                    f"自动拆分为第 {left[0]}-{left[-1]} 集和"
-                    f"第 {right[0]}-{right[-1]} 集",
-                    level="warning",
-                    payload={
-                        "stage": stage,
-                        "completed": len(episode_ids),
-                        "total": total,
-                        "split_start": first_number,
-                        "split_end": last_number,
-                        "left_start": left[0],
-                        "left_end": left[-1],
-                        "right_start": right[0],
-                        "right_end": right[-1],
-                        "finish_reason": exc.finish_reason,
-                        "returned_chars": exc.returned_chars,
-                    },
-                )
-                return [
-                    *await generate_script_group(left),
-                    *await generate_script_group(right),
-                ]
-            return [(episode_numbers, rows, meta)]
+            checkpoints = await run_bisecting_script_batch(
+                episode_numbers,
+                generate=request_script_group,
+                on_split=report_script_split,
+                parallel_splits=lambda: not script_serial_mode,
+            )
+            return [
+                (checkpoint_numbers, rows, meta)
+                for checkpoint_numbers, (rows, meta) in checkpoints
+            ]
 
         async def persist_script_group(
             _episode_numbers: list[int],
@@ -590,10 +655,12 @@ async def _run_free_episode_series(
                     )
 
         def report_parallel_downgrade(exc: Exception) -> None:
+            nonlocal script_serial_mode
+            script_serial_mode = True
             emit(
                 job,
                 "progress",
-                "自由创作并行生成遇到模型限流或网络波动，已自动降为串行续跑",
+                "自由创作并行生成遇到模型限流，已自动降为串行续跑",
                 level="warning",
                 payload={
                     "stage": stage,

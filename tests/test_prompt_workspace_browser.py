@@ -31,7 +31,9 @@ def _modal(surface: str) -> str:
     ).render(prompt_library_surface=surface)
 
 
-def _install_workspace_runtime(page: Page) -> list[str]:
+def _install_workspace_runtime(
+    page: Page, marketplace_data: dict | None = None
+) -> list[str]:
     page_errors: list[str] = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
     template = {
@@ -53,19 +55,28 @@ def _install_workspace_runtime(page: Page) -> list[str]:
                 "expression": "口语化",
             },
             "shared_dna": "开场快速建立未完成动作。",
-            "parameters": {},
+            "parameters": {"max_beats": 5, "strong_ending_hook": True},
             "stage_rules": {
                 "brief": {
                     "single": "生成 Brief",
                     "series": "生成多个 Brief",
                     "rewrite": "改写 Brief",
                     "repair": "修复 Brief",
+                },
+                "script": {
+                    "single": "生成场次剧本",
+                    "series": "批量生成场次剧本",
                 }
             },
             "examples": [],
         },
     }
-    page.add_script_tag(content=f"window.__promptTemplate = {json.dumps(template, ensure_ascii=False)};")
+    page.add_script_tag(
+        content=(
+            f"window.__promptTemplate = {json.dumps(template, ensure_ascii=False)};"
+            f"window.__marketplaceData = {json.dumps(marketplace_data, ensure_ascii=False)};"
+        )
+    )
     page.add_script_tag(
         content="""
         window.bootstrap = {
@@ -85,7 +96,7 @@ def _install_workspace_runtime(page: Page) -> list[str]:
           if (url.includes('/recommendations')) return Promise.resolve({ok: true, json: async () => ({items: []})});
           if (url.includes('/governance')) return Promise.resolve({ok: true, json: async () => ({items: [], policy: [], can_manage: true})});
           if (url.includes('/observability')) return Promise.resolve({ok: true, json: async () => ({summary: {}, coverage: {}, versions: [], alerts: [], watch_items: []})});
-          if (url.includes('/prompt-marketplace')) return Promise.resolve({ok: true, json: async () => ({items: [], own_submissions: [], moderation_queue: [], licenses: [], source_types: [], policy: [], can_review: false, can_install: true})});
+          if (url.includes('/prompt-marketplace')) return Promise.resolve({ok: true, json: async () => (window.__marketplaceData || {official_items: [], items: [], own_submissions: [], moderation_queue: [], source_types: [], policy: [], can_review: false, can_install: true})});
           return Promise.resolve({ok: true, json: async () => ({})});
         }};
         """
@@ -134,6 +145,82 @@ def test_prompt_center_and_effects_open_focused_panels_without_browser_errors():
         browser.close()
 
 
+def test_marketplace_cards_preview_one_stage_at_a_time():
+    content = {
+        "shared_dna": "市场模板共享 DNA",
+        "stage_rules": {
+            "brief": {"single": "市场 Brief 规则"},
+            "script": {"single": "市场场次剧本规则"},
+        },
+    }
+    marketplace_data = {
+        "official_items": [
+            {
+                "id": "official-1",
+                "template_key": "official-1",
+                "title": "官方多阶段模板",
+                "description": "官方模板说明",
+                "tags": ["官方"],
+                "compatibility": {"supported_stages": ["brief", "script"]},
+                "content": content,
+            }
+        ],
+        "items": [
+            {
+                "id": "community-1",
+                "title": "社区多阶段模板",
+                "description": "社区模板说明",
+                "tags": ["社区"],
+                "attribution_name": "测试作者",
+                "install_count": 0,
+                "rating": {"average": None, "count": 0},
+                "installation": None,
+                "is_owner": False,
+                "source_url": "",
+                "compatibility": {"supported_stages": ["brief", "script"]},
+                "content": content,
+            }
+        ],
+        "own_submissions": [],
+        "moderation_queue": [],
+        "source_types": [],
+        "policy": [],
+        "can_review": False,
+        "can_install": True,
+    }
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            '<main x-data="appData()" '
+            'x-init="creativeWorkspace.project = {id: 9, target_episode_count: 20}; '
+            "creativeWorkspace.promptLibrary.stage = 'brief'\">"
+            '<button id="open-marketplace" @click="openPromptWorkspacePanel(\'marketplace\')">打开模板市场</button>'
+            f"{_modal('center')}</main>"
+        )
+        page_errors = _install_workspace_runtime(page, marketplace_data)
+        page.locator("#open-marketplace").click()
+        page.get_by_text("官方多阶段模板", exact=True).wait_for()
+
+        official = page.locator("article").filter(has_text="官方多阶段模板")
+        official.locator("summary").click()
+        assert official.locator('[role="tab"]').all_inner_texts() == ["Brief", "场次剧本"]
+        assert "市场 Brief 规则" in official.inner_text()
+        assert "市场场次剧本规则" not in official.inner_text()
+        official.locator('[role="tab"]').filter(has_text="场次剧本").click()
+        assert "市场场次剧本规则" in official.inner_text()
+        assert "市场 Brief 规则" not in official.inner_text()
+
+        community = page.locator(".card").filter(has_text="社区多阶段模板")
+        community.locator("summary").click()
+        assert community.locator('[role="tab"]').all_inner_texts() == ["Brief", "场次剧本"]
+        community.locator('[role="tab"]').filter(has_text="场次剧本").click()
+        assert "市场场次剧本规则" in community.inner_text()
+        assert "市场 Brief 规则" not in community.inner_text()
+        assert page_errors == [], "\n".join(page_errors)
+        browser.close()
+
+
 def test_prompt_picker_card_click_selects_template_and_reveals_full_details():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -161,6 +248,28 @@ def test_prompt_picker_card_click_selects_template_and_reveals_full_details():
         assert "我的强钩子模板" in details.inner_text()
         assert "开场快速建立未完成动作。" in details.inner_text()
         assert "生成 Brief" in details.inner_text()
+        assert "生成场次剧本" not in details.inner_text()
+        assert page.locator('[role="tab"]').all_inner_texts() == ["Brief", "场次剧本"]
+        page.locator('[role="tab"]').filter(has_text="场次剧本").click()
+        assert "生成场次剧本" in details.inner_text()
+        assert "生成 Brief" not in details.inner_text()
+
+        details.get_by_text("查看模板参数和示例", exact=True).click()
+        details.get_by_text("节拍数量上限", exact=True).wait_for()
+        assert details.get_by_text("5", exact=True).is_visible()
+        assert details.get_by_text("强化结尾钩子", exact=True).is_visible()
+        assert details.get_by_text("开启", exact=True).is_visible()
+        raw_parameters = details.locator(".prompt-raw-parameters")
+        raw_json = raw_parameters.locator(".prompt-parameter-json")
+        assert not raw_parameters.evaluate("element => element.open")
+        assert not raw_json.is_visible()
+        raw_parameters.locator("summary").click()
+        assert raw_json.is_visible()
+        assert '"max_beats": 5' in raw_json.inner_text()
+        assert raw_json.evaluate(
+            "element => getComputedStyle(element).backgroundColor"
+        ) != "rgb(255, 255, 255)"
+        assert details.locator('input[readonly], textarea[readonly]').count() == 0
         assert page_errors == [], "\n".join(page_errors)
 
         browser.close()

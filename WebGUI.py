@@ -3495,10 +3495,11 @@ async def list_jobs(
     principal: Principal = Depends(current_principal),
     request: Request = None,
 ):
+    jobs = await asyncio.to_thread(job_manager.list_jobs)
     return {
         "jobs": [
             _public_job(job, principal)
-            for job in job_manager.list_jobs()
+            for job in jobs
             if _can_read_job(job, principal, request)
         ]
     }

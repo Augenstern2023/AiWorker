@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from datetime import datetime, timezone
 
 import pytest
@@ -32,6 +33,9 @@ from creative.database_schema import (
 )
 from creative.free_mode_service import FreeCreativeModeService
 from creative.production_export import (
+    _digest,
+    _fingerprint_payload,
+    _row,
     export_production_package,
     preview_production_package,
 )
@@ -44,6 +48,15 @@ from creative.video_parameter_recommendation import (
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode()).hexdigest()
+
+
+def test_snapshot_row_normalizes_postgresql_uuid_for_fingerprinting():
+    project_uid = uuid.uuid4()
+
+    row = _row({"id": 26, "project_uid": project_uid, "name": "自由创作项目"})
+
+    assert row["project_uid"] == str(project_uid)
+    assert len(_digest(_fingerprint_payload({"project": row}))) == 64
 
 
 def _outline_content(number: int) -> dict:

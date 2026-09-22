@@ -613,9 +613,20 @@ def test_writing_episode_workspaces_can_show_and_download_selected_or_all_episod
     assert "多集/全集下载" in beats
     assert "多集/全集下载" in scripts
     assert "selectedEpisodes" in modal
+    assert "templateOptions" in modal
+    assert "在线预览" in modal
+    assert 'value="md"' in modal
+    assert 'value="pdf"' in modal
+    assert 'value="docx"' in modal
+    assert 'aria-live="polite"' in modal
     assert "downloadSelectedEpisodes()" in creative
+    assert "loadScreenplayExportTemplates" in creative
+    assert "previewSelectedEpisodes" in creative
+    assert "params.set('template', state.templateId)" in creative
     assert "episodeView === 'all'" in tasks
     assert '"/projects/{project_id}/episodes/download"' in api
+    assert '"/projects/{project_id}/episodes/export/templates"' in api
+    assert '"/projects/{project_id}/episodes/export/preview"' in api
 
 
 def test_brief_and_characters_navigation_hide_episode_selector():
@@ -1142,7 +1153,7 @@ def test_draft_breakdowns_are_visible_but_not_project_eligible():
     breakdowns = _source("static/js/selection/breakdowns.js")
     assert "topicProjectEligible(topic)" in breakdowns
     assert "return !!topic?.locked_breakdown_id;" in breakdowns
-    assert "aiworkerApi.request('/api/creative/topics?status=adopted&limit=500')" in html
+    assert "aiworkerApi.request('/api/creative/topics?status=adopted&limit=500&include_lifecycle=false')" in html
     assert ':disabled="!topic.locked_breakdown_id"' in html
     assert 'x-text="creativeTopicOptionLabel(topic)"' in html
 
@@ -1467,12 +1478,14 @@ def test_outline_page_exposes_beats_and_script_update_records_per_episode():
     assert "查看 Beats 与剧本更新记录" in outline
 
 
-def test_scene_script_workspace_distinguishes_merged_and_single_episode_downloads():
+def test_scene_script_workspace_routes_all_download_scopes_through_template_picker():
     scripts = _source("templates/common/workspace/project_scripts.html")
 
-    assert "mergedScriptDownloadUrl()" in scripts
-    assert "剧本下载" in scripts
+    assert "mergedScriptDownloadUrl()" not in scripts
+    assert "generated-content/download" not in scripts
+    assert "openEpisodeDownload('script', {forceAll: true})" in scripts
     assert "本集下载" in scripts
+    assert "全集下载" in scripts
 
 
 def test_scene_script_page_uses_the_writing_workspace_layout():
@@ -1595,14 +1608,28 @@ def test_scene_script_actions_stop_before_navigation_without_locked_beats():
     assert '@click="openProjectScriptWorkspace"' in beats
 
 
-def test_scene_script_workspace_hides_scripts_tied_to_superseded_beats():
+def test_scene_script_workspace_keeps_superseded_scripts_out_of_current_version():
     creative = _source("static/js/common/creative.js")
     scripts = _source("templates/common/workspace/project_scripts.html")
 
-    assert "return this.projectEpisodeScript(this.creativeWorkspace.selectedEpisode);" in creative
+    assert "return this.projectEpisodeScript(episodeNumber);" in creative
     assert "scriptWorkspaceEmptyMessage()" in creative
     assert "当前仅有基于 Beats v${olderScriptBeatsVersion || '未知'} 的旧场次剧本；当前 Beats 为 v${currentBeats.version}" in creative
     assert 'x-text="scriptWorkspaceEmptyMessage()"' in scripts
+
+
+def test_scene_script_workspace_can_preview_superseded_versions_read_only():
+    creative = _source("static/js/common/creative.js")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "projectEpisodeScriptVersions(episodeNumber)" in creative
+    assert "projectEpisodeHistoricalScripts(episodeNumber)" in creative
+    assert "projectScriptEpisodeLabel(episodeNumber)" in creative
+    assert "selectedProjectScriptIsHistorical()" in creative
+    assert "selectedProjectScriptEditable()" in creative
+    assert 'x-model="creativeWorkspace.selectedScriptVersionId"' in scripts
+    assert "历史版本仅供查看" in scripts
+    assert "creativeGeneratedDownloadUrl('script', 'txt')" in scripts
 
 
 def test_scene_script_workspace_calls_generation_a_regeneration_when_locked_beats_changed():
@@ -1628,7 +1655,8 @@ def test_scene_script_workspace_locks_standard_and_free_mode_versions():
     assert "/scripts/lock`" in creative
     assert '@click="completeProjectScriptsBatch"' in scripts
     assert "批量完成并锁定" in scripts
-    assert 'x-show="!isFreeCreativeProject()" :href="mergedScriptDownloadUrl()"' in scripts
+    assert 'x-show="!isFreeCreativeProject()" :href="mergedScriptDownloadUrl()"' not in scripts
+    assert "openEpisodeDownload('script', {forceAll: true})" in scripts
     assert "selectedProjectScript().version" in scripts
 
 
@@ -2349,19 +2377,151 @@ def test_breakdown_task_log_opens_inside_the_generation_modal():
     assert "window.location.assign(`/tasks" not in script
 
 
-def test_creative_generation_task_log_opens_inside_the_progress_modal():
+def test_creative_generation_log_is_inline_and_can_reopen_from_project_progress():
     modal = _source("templates/common/workspace/creative_progress_modal.html")
     progress = _source("templates/common/workspace/project_progress.html")
     script = _source("static/js/common/creative.js")
 
     assert 'id="creativeGenerationLogPane"' in modal
     assert "creativeWorkspace.jobLogs" in modal
-    assert '@click="openCreativeTaskLog"' in modal
+    assert '@click="openCreativeTaskLog"' not in modal
     assert '@click="openCreativeTaskLog"' in progress
     assert "syncCreativeJobLogs" in script
     assert "aiworkerApi.request(`/api/jobs/${jobId}/logs`)" in script
     assert "/tasks?job_id=" not in modal
     assert "/tasks?job_id=" not in progress
+
+
+def test_standard_and_free_generation_show_and_fetch_logs_as_soon_as_job_starts():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+const requests = [];
+global.window = {
+  aiworkerModules: [],
+  aiworkerUi: {requestKey: async (_key, request) => request(undefined)},
+};
+global.aiworkerApi = {
+  request: async (url) => {
+    requests.push(url);
+    if (url.endsWith('/beats/generate')) {
+      const mode = url.includes('/free/') ? 'free' : 'sequential';
+      const state = {
+        job_id: `creative-beats-${mode}`, status: 'running',
+        progress: {completed: 0, total: 1}, log_count: 1,
+      };
+      return {
+        ok: true,
+        json: async () => ({
+          job: mode === 'free'
+            ? {job: {job_id: state.job_id}, status: state.status, progress: state.progress, log_count: state.log_count}
+            : state,
+        }),
+      };
+    }
+    if (url.startsWith('/api/jobs/creative-beats-') && url.endsWith('/logs')) {
+      return {ok: true, json: async () => ({logs: ['[INFO] Beats generation started']})};
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  },
+  isAbortError: () => false,
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+
+const createComponent = workflowMode => {
+  const component = window.aiworkerModules[0]();
+  Object.assign(component, {
+    creativeWorkspace: {
+      project: {id: 7, workflow_mode: workflowMode}, selectedEpisode: 1,
+      jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '',
+      jobLogs: [], jobLogCount: 0, showJobLogs: false,
+    },
+    creativeGenerationProgressModal: {show: () => {}},
+    fetchJobs: async () => {},
+    showCreativeNotice: () => {},
+  });
+  return component;
+};
+
+(async () => {
+  for (const mode of ['sequential', 'free']) {
+    const component = createComponent(mode);
+    const segment = mode === 'free' ? '/free' : '';
+    await component.startCreativeGeneration(
+      `/api/creative/projects/7${segment}/beats/generate`, {}, 'beats',
+      mode === 'sequential' ? {modelConfirmed: true} : {}
+    );
+    assert.equal(component.creativeWorkspace.showJobLogs, true, mode);
+    assert.deepEqual(
+      component.creativeWorkspace.jobLogs,
+      ['[INFO] Beats generation started'],
+      mode
+    );
+    assert.ok(requests.includes(`/api/jobs/creative-beats-${mode}/logs`), mode);
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_creative_logs_keep_syncing_when_job_summary_is_temporarily_missing():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+const requests = [];
+global.window = {aiworkerModules: []};
+global.aiworkerApi = {
+  request: async url => {
+    requests.push(url);
+    return {
+      ok: true,
+      json: async () => ({logs: ['[INFO] 后台已经开始生成场次', '[INFO] 正在调用模型']}),
+    };
+  },
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+const component = window.aiworkerModules[0]();
+Object.assign(component, {
+  jobs: [],
+  creativeWorkspace: {
+    project: {id: 20, episodes: []},
+    jobId: 'creative-script-20', jobStatus: 'running', jobMessage: '',
+    jobProgress: {}, jobLogs: [], jobLogCount: 2, showJobLogs: true,
+    activeAction: 'script', activeEpisode: 1, activeSeriesGeneration: false,
+  },
+});
+
+(async () => {
+  await component.syncCreativeJobProgress();
+  assert.ok(requests.includes('/api/jobs/creative-script-20/logs'));
+  assert.deepEqual(component.creativeWorkspace.jobLogs, [
+    '[INFO] 后台已经开始生成场次', '[INFO] 正在调用模型',
+  ]);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_creative_generation_progress_shows_current_batch_and_slow_request_warning():
@@ -3303,10 +3463,29 @@ def test_jobs_polling_is_scoped_to_pages_that_consume_job_state():
     assert "if (this.pageNeedsJobPolling())" in tasks
 
 
+def test_initial_job_scan_does_not_block_page_data_loading():
+    tasks = _source("static/js/common/tasks.js")
+    api = _source("WebGUI.py")
+    assert "initialJobsRequest = this.fetchJobs()" in tasks
+    assert "if (this.pageNeedsJobPolling()) await this.fetchJobs();" not in tasks
+    assert "await asyncio.to_thread(job_manager.list_jobs)" in api
+
+
+def test_project_list_does_not_block_other_page_requests():
+    api = _source("creative/api.py")
+    assert "await asyncio.to_thread(repository.list_projects" in api
+
+
+def test_workspace_initialization_runs_only_once():
+    base = _source("templates/layouts/base.html")
+    assert 'x-data="appData()"' in base
+    assert 'x-init="init()"' not in base
+
+
 def test_dashboard_no_longer_uses_limit_500():
     dashboard = _source("static/js/selection/dashboard.js")
     assert "limit=500" not in dashboard
-    assert "limit=50" in dashboard
+    assert "limit=50&include_lifecycle=false" in dashboard
     assert "requestKey" in dashboard
 
 
@@ -3315,6 +3494,7 @@ def test_dashboard_uses_independent_requests():
     assert "overviewKey" in dashboard
     assert "analyticsKey" in dashboard
     assert "isAbortError" in dashboard
+    assert "Promise.all" in dashboard
 
 
 def test_dashboard_template_has_skeleton():

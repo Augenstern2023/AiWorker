@@ -425,7 +425,42 @@
                                         <div class="card-body">
                                             <div class="d-flex justify-content-between gap-2"><div><div class="fw-semibold" x-text="item.title"></div><div class="small text-muted" x-text="item.description || '无模板说明'"></div></div><span class="badge text-bg-primary align-self-start">官方内置</span></div>
                                             <div class="d-flex flex-wrap gap-1 mt-2"><template x-for="tag in (item.tags || [])" :key="tag"><span class="badge text-bg-secondary" x-text="tag"></span></template></div>
-                                            <details class="mt-3"><summary class="small">查看模板与兼容阶段</summary><div class="small text-muted mt-1" x-text="`兼容：${(item.compatibility?.supported_stages || []).map(stage => promptStageLabel(stage)).join('、')}`"></div><div class="small mt-2" x-text="item.content?.shared_dna"></div></details>
+                                            <details class="mt-3" x-data="{ marketPreviewStage: promptMarketplaceDefaultPreviewStage(item) }">
+                                                <summary class="small">查看模板与阶段预览</summary>
+                                                <div class="small text-muted mt-2" x-text="`兼容：${(item.compatibility?.supported_stages || []).map(stage => promptStageLabel(stage)).join('、')}`"></div>
+                                                <div class="small mt-2 text-break" style="white-space:pre-wrap" x-text="item.content?.shared_dna || '未设置共享作品 DNA'"></div>
+                                                <div class="prompt-stage-preview mt-3" x-show="promptPreviewStages(item).length">
+                                                    <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                                                        <div class="small fw-semibold">阶段规则预览</div>
+                                                        <div class="small text-muted" x-text="`${promptPreviewStages(item).length} 个阶段`"></div>
+                                                    </div>
+                                                    <div class="prompt-stage-preview-nav nav nav-pills" role="tablist" :aria-label="`${item.title}阶段预览`">
+                                                        <template x-for="stage in promptPreviewStages(item)" :key="`official-preview-tab-${item.id}-${stage}`">
+                                                            <button type="button"
+                                                                    class="nav-link"
+                                                                    role="tab"
+                                                                    :id="`official-preview-tab-${item.id}-${stage}`"
+                                                                    :class="marketPreviewStage === stage ? 'active' : ''"
+                                                                    :aria-selected="marketPreviewStage === stage"
+                                                                    :aria-controls="`official-preview-panel-${item.id}-${stage}`"
+                                                                    @click="marketPreviewStage = stage"
+                                                                    x-text="promptStageLabel(stage)"></button>
+                                                        </template>
+                                                    </div>
+                                                    <div class="prompt-stage-preview-panel mt-2"
+                                                         role="tabpanel"
+                                                         :id="`official-preview-panel-${item.id}-${marketPreviewStage}`"
+                                                         :aria-labelledby="`official-preview-tab-${item.id}-${marketPreviewStage}`">
+                                                        <div class="small fw-semibold mb-2" x-text="`${promptStageLabel(marketPreviewStage)}阶段规则`"></div>
+                                                        <template x-for="mode in ['single','series','rewrite','repair']" :key="`official-preview-mode-${item.id}-${marketPreviewStage}-${mode}`">
+                                                            <div class="mt-2" x-show="item.content?.stage_rules?.[marketPreviewStage]?.[mode]">
+                                                                <div class="small text-muted" x-text="promptModeLabel(mode, marketPreviewStage)"></div>
+                                                                <div class="small text-break" style="white-space:pre-wrap" x-text="item.content?.stage_rules?.[marketPreviewStage]?.[mode]"></div>
+                                                            </div>
+                                                        </template>
+                                                    </div>
+                                                </div>
+                                            </details>
                                         </div>
                                         <div class="card-footer d-flex flex-wrap justify-content-between align-items-center gap-2">
                                             <span class="small text-muted">不复制、不安装、不修改默认设置</span>
@@ -449,7 +484,43 @@
                                         <div><div class="fw-semibold" x-text="item.title"></div><div class="small text-muted" x-text="item.description || '无模板说明'"></div></div>
                                         <div class="d-flex flex-wrap gap-1 mt-2"><template x-for="tag in item.tags" :key="tag"><span class="badge text-bg-secondary" x-text="tag"></span></template></div>
                                         <div class="row g-2 small mt-2"><div class="col-6"><span class="text-muted">模板署名</span><div x-text="item.attribution_name"></div></div><div class="col-3"><span class="text-muted">安装</span><div x-text="item.install_count || 0"></div></div><div class="col-3"><span class="text-muted">评分</span><div x-text="item.rating?.average === null ? '暂无' : `${item.rating.average} / 5（${item.rating.count}）`"></div></div></div>
-                                        <details class="mt-3"><summary class="small">查看模板与兼容性</summary><div class="small text-muted mt-1" x-text="`兼容：${(item.compatibility?.supported_stages || []).map(stage => promptStageLabel(stage)).join('、')}`"></div><div class="small mt-2" x-text="item.content?.shared_dna"></div><a class="small" x-show="item.source_url" :href="item.source_url" target="_blank" rel="noopener noreferrer">查看声明来源</a></details>
+                                        <details class="mt-3" x-data="{ marketPreviewStage: promptMarketplaceDefaultPreviewStage(item) }">
+                                            <summary class="small">查看模板与阶段预览</summary>
+                                            <div class="small text-muted mt-2" x-text="`兼容：${(item.compatibility?.supported_stages || []).map(stage => promptStageLabel(stage)).join('、')}`"></div>
+                                            <div class="small mt-2 text-break" style="white-space:pre-wrap" x-text="item.content?.shared_dna || '未设置共享作品 DNA'"></div>
+                                            <a class="small d-inline-block mt-2" x-show="item.source_url" :href="item.source_url" target="_blank" rel="noopener noreferrer">查看声明来源</a>
+                                            <div class="prompt-stage-preview mt-3" x-show="promptPreviewStages(item).length">
+                                                <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                                                    <div class="small fw-semibold">阶段规则预览</div>
+                                                    <div class="small text-muted" x-text="`${promptPreviewStages(item).length} 个阶段`"></div>
+                                                </div>
+                                                <div class="prompt-stage-preview-nav nav nav-pills" role="tablist" :aria-label="`${item.title}阶段预览`">
+                                                    <template x-for="stage in promptPreviewStages(item)" :key="`community-preview-tab-${item.id}-${stage}`">
+                                                        <button type="button"
+                                                                class="nav-link"
+                                                                role="tab"
+                                                                :id="`community-preview-tab-${item.id}-${stage}`"
+                                                                :class="marketPreviewStage === stage ? 'active' : ''"
+                                                                :aria-selected="marketPreviewStage === stage"
+                                                                :aria-controls="`community-preview-panel-${item.id}-${stage}`"
+                                                                @click="marketPreviewStage = stage"
+                                                                x-text="promptStageLabel(stage)"></button>
+                                                    </template>
+                                                </div>
+                                                <div class="prompt-stage-preview-panel mt-2"
+                                                     role="tabpanel"
+                                                     :id="`community-preview-panel-${item.id}-${marketPreviewStage}`"
+                                                     :aria-labelledby="`community-preview-tab-${item.id}-${marketPreviewStage}`">
+                                                    <div class="small fw-semibold mb-2" x-text="`${promptStageLabel(marketPreviewStage)}阶段规则`"></div>
+                                                    <template x-for="mode in ['single','series','rewrite','repair']" :key="`community-preview-mode-${item.id}-${marketPreviewStage}-${mode}`">
+                                                        <div class="mt-2" x-show="item.content?.stage_rules?.[marketPreviewStage]?.[mode]">
+                                                            <div class="small text-muted" x-text="promptModeLabel(mode, marketPreviewStage)"></div>
+                                                            <div class="small text-break" style="white-space:pre-wrap" x-text="item.content?.stage_rules?.[marketPreviewStage]?.[mode]"></div>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                        </details>
                                     </div>
                                     <div class="card-footer d-flex flex-wrap justify-content-end gap-2">
                                         <span class="small text-success me-auto align-self-center" x-show="item.installation">已安装为项目独立副本</span>
@@ -627,32 +698,58 @@
                                         <div class="small fw-semibold">共享作品 DNA</div>
                                         <div class="small mt-1 text-break" style="white-space:pre-wrap" x-text="selectedPromptTemplate().content?.shared_dna || '未设置'"></div>
                                     </div>
-                                    <div class="mt-3">
-                                        <div class="small fw-semibold" x-text="`${promptStageLabel(creativeWorkspace.promptLibrary.stage)}阶段规则`"></div>
-                                        <template x-for="mode in ['single','series','rewrite','repair']" :key="`prompt-detail-mode-${mode}`">
-                                            <div class="mt-2" x-show="selectedPromptTemplate().content?.stage_rules?.[creativeWorkspace.promptLibrary.stage]?.[mode]">
-                                                <div class="small text-muted" x-text="promptModeLabel(mode, creativeWorkspace.promptLibrary.stage)"></div>
-                                                <div class="small text-break" style="white-space:pre-wrap" x-text="selectedPromptTemplate().content?.stage_rules?.[creativeWorkspace.promptLibrary.stage]?.[mode]"></div>
-                                            </div>
-                                        </template>
-                                    </div>
-                                    <details class="mt-3">
-                                        <summary class="small fw-semibold">查看全部阶段规则、参数和示例</summary>
-                                        <div class="mt-2">
-                                            <template x-for="stageEntry in Object.entries(selectedPromptTemplate().content?.stage_rules || {})" :key="`prompt-detail-stage-${stageEntry[0]}`">
-                                                <div class="border-top pt-2 mt-2">
-                                                    <div class="small fw-semibold" x-text="promptStageLabel(stageEntry[0])"></div>
-                                                    <template x-for="modeEntry in Object.entries(stageEntry[1] || {})" :key="`prompt-detail-stage-${stageEntry[0]}-${modeEntry[0]}`">
-                                                        <div class="mt-2">
-                                                            <div class="small text-muted" x-text="promptModeLabel(modeEntry[0], stageEntry[0])"></div>
-                                                            <div class="small text-break" style="white-space:pre-wrap" x-text="modeEntry[1]"></div>
-                                                        </div>
-                                                    </template>
+                                    <div class="prompt-stage-preview mt-3" x-show="promptPreviewStages().length">
+                                        <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                                            <div class="small fw-semibold">阶段规则预览</div>
+                                            <div class="small text-muted" x-text="`${promptPreviewStages().length} 个阶段`"></div>
+                                        </div>
+                                        <div class="prompt-stage-preview-nav nav nav-pills" role="tablist" aria-label="模板阶段预览">
+                                            <template x-for="stage in promptPreviewStages()" :key="`prompt-preview-tab-${stage}`">
+                                                <button type="button"
+                                                        class="nav-link"
+                                                        role="tab"
+                                                        :id="`prompt-preview-tab-${stage}`"
+                                                        :class="creativeWorkspace.promptLibrary.previewStage === stage ? 'active' : ''"
+                                                        :aria-selected="creativeWorkspace.promptLibrary.previewStage === stage"
+                                                        :aria-controls="`prompt-preview-panel-${stage}`"
+                                                        @click="selectPromptPreviewStage(stage)"
+                                                        x-text="promptStageLabel(stage)"></button>
+                                            </template>
+                                        </div>
+                                        <div class="prompt-stage-preview-panel mt-2"
+                                             role="tabpanel"
+                                             :id="`prompt-preview-panel-${creativeWorkspace.promptLibrary.previewStage}`"
+                                             :aria-labelledby="`prompt-preview-tab-${creativeWorkspace.promptLibrary.previewStage}`">
+                                            <div class="small fw-semibold mb-2" x-text="`${promptStageLabel(creativeWorkspace.promptLibrary.previewStage)}阶段规则`"></div>
+                                            <template x-for="mode in ['single','series','rewrite','repair']" :key="`prompt-preview-mode-${creativeWorkspace.promptLibrary.previewStage}-${mode}`">
+                                                <div class="mt-2" x-show="selectedPromptTemplate().content?.stage_rules?.[creativeWorkspace.promptLibrary.previewStage]?.[mode]">
+                                                    <div class="small text-muted" x-text="promptModeLabel(mode, creativeWorkspace.promptLibrary.previewStage)"></div>
+                                                    <div class="small text-break" style="white-space:pre-wrap" x-text="selectedPromptTemplate().content?.stage_rules?.[creativeWorkspace.promptLibrary.previewStage]?.[mode]"></div>
                                                 </div>
                                             </template>
                                         </div>
+                                    </div>
+                                    <details class="mt-3">
+                                        <summary class="small fw-semibold">查看模板参数和示例</summary>
                                         <div class="small fw-semibold mt-3">模板参数</div>
-                                        <pre class="small bg-body-tertiary border rounded p-2 mt-1 mb-0 text-wrap" x-text="JSON.stringify(selectedPromptTemplate().content?.parameters || {}, null, 2)"></pre>
+                                        <div class="prompt-parameter-list mt-2" x-show="promptParameterEntries().length">
+                                            <template x-for="parameter in promptParameterEntries()" :key="`prompt-parameter-${parameter.key}`">
+                                                <div class="prompt-parameter-item">
+                                                    <div class="min-w-0">
+                                                        <div class="small fw-semibold" x-text="parameter.label"></div>
+                                                        <div class="small text-muted" x-text="parameter.description"></div>
+                                                    </div>
+                                                    <span class="badge prompt-parameter-value"
+                                                          :class="parameter.isBoolean ? (parameter.enabled ? 'text-bg-success' : 'text-bg-secondary') : ''"
+                                                          x-text="parameter.displayValue"></span>
+                                                </div>
+                                            </template>
+                                        </div>
+                                        <div class="small text-muted mt-2" x-show="!promptParameterEntries().length">该模板没有额外参数</div>
+                                        <details class="prompt-raw-parameters mt-3">
+                                            <summary class="small text-muted">高级：查看原始参数</summary>
+                                            <pre class="prompt-parameter-json small mt-2 mb-0" x-text="JSON.stringify(selectedPromptTemplate().content?.parameters || {}, null, 2)"></pre>
+                                        </details>
                                         <div class="small fw-semibold mt-3">模板示例</div>
                                         <div class="small text-muted mt-1" x-show="!(selectedPromptTemplate().content?.examples || []).length">未提供示例</div>
                                         <template x-for="(example, index) in (selectedPromptTemplate().content?.examples || [])" :key="`prompt-detail-example-${index}`">

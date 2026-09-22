@@ -163,7 +163,7 @@ def process_file(file_path: str, project_root: str, dry_run: bool = False) -> Tu
 
         # 如果已经有版权声明，跳过
         if has_copyright_header(content):
-            return False, f"✓ Already has copyright header: {file_path}"
+            return False, f"[OK] Already has copyright header: {file_path}"
 
         # 获取相对路径
         relative_path = get_file_relative_path(file_path, project_root)
@@ -202,12 +202,12 @@ def process_file(file_path: str, project_root: str, dry_run: bool = False) -> Tu
         if not dry_run:
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.writelines(new_lines)
-            return True, f"✓ Updated: {file_path}"
+            return True, f"[OK] Updated: {file_path}"
         else:
-            return True, f"→ Would update: {file_path}"
+            return True, f"[WOULD UPDATE] {file_path}"
 
     except Exception as e:
-        return False, f"✗ Error processing {file_path}: {str(e)}"
+        return False, f"[Error] Processing {file_path}: {str(e)}"
 
 
 def find_python_files(root_dir: str, exclude_patterns: List[str] = None) -> List[str]:

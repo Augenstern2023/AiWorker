@@ -131,6 +131,7 @@ class PromptStore:
             raise TypeError("PromptStore requires a PostgreSQL creative repository")
         self.repository = backend
         self.seed_builtin_templates()
+        self._hide_legacy_builtin_aliases()
         self._backfill_governance_approved_revisions()
         self._ensure_enabled_project_stage_binding("brief")
         self._ensure_enabled_project_stage_binding("characters")
@@ -214,6 +215,35 @@ class PromptStore:
                             now,
                         ),
                     )
+
+    def _hide_legacy_builtin_aliases(self) -> None:
+        """Hide migrated aliases when their canonical built-in exists.
+
+        Legacy project imports namespace every template key to avoid identity
+        collisions.  Built-in templates therefore survive as ``legacy:*``
+        aliases beside the canonical ``system:*`` rows.  Existing bindings may
+        keep using those immutable aliases, but they must not appear as a
+        second selectable system template.
+        """
+
+        now = time.time()
+        with self._connect() as conn:
+            for item in builtin_templates():
+                canonical_id = f"system:{item['key']}"
+                canonical = conn.execute(
+                    "SELECT 1 FROM creative_prompt_templates "
+                    "WHERE id = ? AND owner_scope = 'system'",
+                    (canonical_id,),
+                ).fetchone()
+                if canonical is None:
+                    continue
+                conn.execute(
+                    "UPDATE creative_prompt_templates "
+                    "SET catalog_visible = FALSE, updated_at = ? "
+                    "WHERE owner_scope = 'system' AND id != ? "
+                    "AND template_key LIKE ? AND catalog_visible = TRUE",
+                    (now, canonical_id, f"legacy:%:{item['key']}"),
+                )
 
     def _backfill_governance_approved_revisions(self) -> None:
         with self._connect() as conn:
@@ -334,8 +364,21 @@ class PromptStore:
                 params,
             ).fetchall()
             result: list[dict[str, Any]] = []
+            canonical_system_keys = {
+                str(row["template_key"])
+                for row in rows
+                if row["owner_scope"] == "system"
+                and not str(row["template_key"]).startswith("legacy:")
+            }
             for row in rows:
                 template = self._template_row(row)
+                template_key = str(template["template_key"])
+                if (
+                    template["owner_scope"] == "system"
+                    and template_key.startswith("legacy:")
+                    and template_key.rsplit(":", 1)[-1] in canonical_system_keys
+                ):
+                    continue
                 revision = self.get_revision(template["id"])
                 template["revision"] = revision["revision"]
                 template["content"] = revision["content"]

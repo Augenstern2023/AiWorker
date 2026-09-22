@@ -98,6 +98,7 @@ def test_template_registry_exposes_four_previewable_templates() -> None:
     assert all({"md", "pdf", "docx"} <= set(item.formats) for item in templates)
     assert all(item.scene_header and item.episode_header for item in templates)
     assert all(item.block_rendering and item.page_margins_mm for item in templates)
+    assert all(item.color_rules()["dialogue"] == "#1D4ED8" for item in templates)
 
 
 def test_normalize_selects_current_heads_sorts_and_deduplicates() -> None:
@@ -197,6 +198,12 @@ def test_markdown_and_html_share_order_and_escape_active_content(template_id: st
     assert markdown.index("主角推门") < markdown.index("你终于来了")
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "<script>alert(1)</script>" not in html
+    assert (
+        '<span style="color: #1D4ED8; font-weight: 600;">'
+        in markdown
+    )
+    assert ".script-block.dialogue { color: #1D4ED8; font-weight: 600; }" in html
+    assert 'class="script-block dialogue"' in html
     assert "{'" not in markdown
 
 
@@ -210,6 +217,11 @@ def test_docx_is_a_readable_template_specific_document(template_id: str) -> None
     text = "\n".join(paragraph.text for paragraph in reopened.paragraphs)
     assert "裂缝初现" in text
     assert "主角推门" in text
+    dialogue_paragraph = next(
+        paragraph for paragraph in reopened.paragraphs if "你终于来了" in paragraph.text
+    )
+    assert str(dialogue_paragraph.runs[0].font.color.rgb) == "1D4ED8"
+    assert dialogue_paragraph.runs[0].bold is True
 
 
 def test_pdf_is_readable_and_uses_a4_pages() -> None:

@@ -14,6 +14,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 
+_DIALOGUE_COLOR = "#1D4ED8"
+
+
 @dataclass(frozen=True, slots=True)
 class TemplateSpec:
     """Semantic and page-layout rules consumed by every renderer."""
@@ -110,7 +113,12 @@ _TEMPLATES = (
         page_margins_mm=(22, 20, 22, 20),
         header_text="{drama}",
         footer_text="场次剧本",
-        colors=(("text", "#1f2937"), ("muted", "#6b7280"), ("accent", "#334155")),
+        colors=(
+            ("text", "#1f2937"),
+            ("muted", "#6b7280"),
+            ("accent", "#334155"),
+            ("dialogue", _DIALOGUE_COLOR),
+        ),
         include_video_appendix=True,
     ),
     TemplateSpec(
@@ -135,7 +143,12 @@ _TEMPLATES = (
         page_margins_mm=(24, 22, 24, 22),
         header_text="",
         footer_text="{drama}",
-        colors=(("text", "#111111"), ("muted", "#555555"), ("accent", "#111111")),
+        colors=(
+            ("text", "#111111"),
+            ("muted", "#555555"),
+            ("accent", "#111111"),
+            ("dialogue", _DIALOGUE_COLOR),
+        ),
     ),
     TemplateSpec(
         id="character_outsource",
@@ -159,7 +172,12 @@ _TEMPLATES = (
         page_margins_mm=(23, 21, 23, 21),
         header_text="《{drama}》剧本",
         footer_text="",
-        colors=(("text", "#161616"), ("muted", "#606060"), ("accent", "#202020")),
+        colors=(
+            ("text", "#161616"),
+            ("muted", "#606060"),
+            ("accent", "#202020"),
+            ("dialogue", _DIALOGUE_COLOR),
+        ),
     ),
     TemplateSpec(
         id="scholar_beggar",
@@ -183,7 +201,12 @@ _TEMPLATES = (
         page_margins_mm=(25, 22, 25, 22),
         header_text="",
         footer_text="EP{first_number_02}-{last_number_02}",
-        colors=(("text", "#101010"), ("muted", "#505050"), ("accent", "#101010")),
+        colors=(
+            ("text", "#101010"),
+            ("muted", "#505050"),
+            ("accent", "#101010"),
+            ("dialogue", _DIALOGUE_COLOR),
+        ),
     ),
 )
 

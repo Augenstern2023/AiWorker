@@ -106,12 +106,25 @@ def test_state_builder_splits_long_block_without_losing_text() -> None:
     assert all(left["end"] == right["start"] for left, right in zip(refs, refs[1:]))
 
 
-def test_state_builder_refuses_oversized_fixed_context_instead_of_truncating() -> None:
-    source = _source("短正文")
+def test_state_builder_compacts_oversized_context_without_losing_script() -> None:
+    original = "短正文" * 200
+    source = _source(original)
     source["brief"]["content"]["very_long"] = "背景" * 1_000
 
-    with pytest.raises(ValueError, match="固定上下文已超过"):
-        build_semif_state_windows(source, target_tokens=300)
+    windows = build_semif_state_windows(source, target_tokens=300)
+
+    assert windows
+    assert all(window.estimated_tokens <= 300 for window in windows)
+    serialized = [json.dumps(window.state, ensure_ascii=False) for window in windows]
+    assert all(window.state["context_compacted"] is True for window in windows)
+    assert all("very_long" not in item for item in serialized)
+    assert any("episode.outline.core_event" in item for item in serialized)
+    reconstructed = "".join(
+        segment["text"]
+        for window in windows
+        for segment in window.state["script_segments"]
+    )
+    assert reconstructed == original
 
 
 @pytest.mark.asyncio

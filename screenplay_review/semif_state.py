@@ -19,7 +19,7 @@ from typing import Any
 from .strategy import estimate_tokens
 
 
-STATE_PACKAGE_VERSION = "screenplay-semif-state-v1"
+STATE_PACKAGE_VERSION = "screenplay-semif-state-v2"
 DEFAULT_STATE_TARGET_TOKENS = 3_000
 
 
@@ -49,22 +49,23 @@ def build_semif_state_windows(
     """Split scripts into complete state windows under a conservative budget."""
     budget = int(target_tokens)
     if budget < 256:
-        raise ValueError("SemIf state token budget must be at least 256")
+        raise ValueError("本地初审状态包预算不能低于 256")
     episodes = [item for item in source.get("episodes") or [] if isinstance(item, dict)]
     if not episodes:
-        raise ValueError("审核来源没有可供 SemIf 评分的剧本")
+        raise ValueError("审核来源没有可供本地初审的剧本")
 
     result: list[SemIfStateWindow] = []
     for episode in episodes:
         number = int(episode.get("episode_number") or 0)
         if number < 1:
-            raise ValueError("SemIf 剧本分集缺少有效集号")
+            raise ValueError("本地初审的剧本分集缺少有效集号")
         context = _episode_context(source, episode)
         empty_state = _state(context, [])
         if estimate_tokens(empty_state) >= budget:
-            raise ValueError(
-                f"第 {number} 集固定上下文已超过 SemIf 输入预算，请精简 Brief、人物或大纲"
-            )
+            context = _compact_episode_context(context, budget)
+            empty_state = _state(context, [])
+            if estimate_tokens(empty_state) >= budget:
+                raise ValueError(f"第 {number} 集基础信息超过本地初审输入预算")
         segments = _episode_segments(episode)
         expanded = [
             piece
@@ -88,7 +89,7 @@ def build_semif_state_windows(
             estimated = estimate_tokens(state)
             if estimated > budget:
                 raise ValueError(
-                    f"第 {number} 集状态包 {index} 超过 SemIf 输入预算，无法无损提交"
+                    f"第 {number} 集状态包 {index} 超过本地初审输入预算，无法提交"
                 )
             state_hash = _digest(state)
             result.append(
@@ -196,6 +197,113 @@ def _episode_segments(
     ]
 
 
+def _compact_episode_context(
+    context: dict[str, Any], budget: int
+) -> dict[str, Any]:
+    """Keep high-signal background fields while reserving space for script text."""
+    episode = context.get("episode") or {}
+    compact = {
+        "package_version": STATE_PACKAGE_VERSION,
+        "project": context.get("project") or {},
+        "episode": {
+            "number": episode.get("number"),
+            "script_resource": episode.get("script_resource") or {},
+        },
+        "context_compacted": True,
+        "context_segments": [],
+    }
+    target = max(1, int(budget * 0.4))
+    candidates = _context_summary_candidates(context)
+    selected: list[dict[str, Any]] = compact["context_segments"]
+    for candidate in candidates:
+        trial = [*selected, candidate]
+        if estimate_tokens(_state({**compact, "context_segments": trial}, [])) <= target:
+            selected.append(candidate)
+    return compact
+
+
+def _context_summary_candidates(context: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+
+    def append(path: str, value: Any) -> None:
+        if value in (None, "", [], {}):
+            return
+        text = (
+            value
+            if isinstance(value, str)
+            else json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        candidates.append({"path": path, "text": text})
+
+    def append_fields(path: str, value: Any, fields: tuple[str, ...]) -> None:
+        if not isinstance(value, dict):
+            return
+        for field in fields:
+            append(f"{path}.{field}", value.get(field))
+
+    append("review_focus", context.get("review_focus"))
+    episode = context.get("episode") or {}
+    append_fields(
+        "episode.outline",
+        episode.get("outline"),
+        (
+            "core_event",
+            "conflict",
+            "reversal",
+            "cliffhanger",
+            "highlight",
+            "character_progress",
+        ),
+    )
+    beats = episode.get("beats") or {}
+    for index, beat in enumerate(beats.get("beats") or []):
+        append_fields(
+            f"episode.beats[{index}]",
+            beat,
+            (
+                "scene",
+                "goal",
+                "obstacle",
+                "turn",
+                "hook",
+                "state_change",
+                "characters",
+            ),
+        )
+    for index, character in enumerate(context.get("characters") or []):
+        append_fields(
+            f"characters[{index}]",
+            character,
+            ("name", "identity", "desire", "action_goal", "dialogue_style"),
+        )
+    for index, relationship in enumerate(context.get("relationships") or []):
+        append_fields(
+            f"relationships[{index}]",
+            relationship,
+            ("from", "to", "relation", "conflict", "change_arc"),
+        )
+    append_fields(
+        "brief",
+        context.get("brief"),
+        (
+            "theme",
+            "logline",
+            "main_goal",
+            "core_conflict",
+            "protagonist",
+            "protagonist_desire",
+            "main_opposition",
+            "story_engine",
+        ),
+    )
+    return candidates
+
+
 def _split_segment(
     context: dict[str, Any],
     item: tuple[dict[str, Any], dict[str, Any]],
@@ -206,7 +314,7 @@ def _split_segment(
         return [item]
     text = str(segment.get("text") or "")
     if not text:
-        raise ValueError("SemIf 非文本状态片段超过输入预算")
+        raise ValueError("本地初审的非文本状态片段超过输入预算")
 
     pieces: list[tuple[dict[str, Any], dict[str, Any]]] = []
     offset = 0
@@ -226,7 +334,7 @@ def _split_segment(
             else:
                 high = middle - 1
         if accepted < 1:
-            raise ValueError("SemIf 固定上下文过大，无法无损切分正文")
+            raise ValueError("本地初审的基础信息过大，无法切分正文")
         end = offset + accepted
         piece_text = text[offset:end]
         piece_segment = {

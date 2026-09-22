@@ -24,7 +24,7 @@ from .semif_rules import OPTION_LABELS, RULES, RULES_BY_ID, criteria
 from .semif_state import STATE_PACKAGE_VERSION, build_semif_state_windows
 
 
-SEMIF_REPORT_VERSION = "screenplay-semif-report-v1"
+SEMIF_REPORT_VERSION = "screenplay-semif-report-v2"
 _OPTION_RANK = {
     "excellent": 0,
     "passed": 0,
@@ -119,10 +119,16 @@ def _build_report(
     completed = len(states)
     total = len(windows)
     status = "部分状态包已评分" if partial else "全部状态包已评分"
+    context_was_compacted = any(
+        bool(getattr(window, "state", {}).get("context_compacted"))
+        for window in windows
+    )
     summary = (
         f"本地初审{status}（{completed}/{total}）。结果仅表示给定选项之间的条件评分，"
         "尚未经过剧本业务校准，必须由人工复核；系统未生成因果解释或原句证据。"
     )
+    if context_was_compacted:
+        summary += " 辅助背景已自动精简，剧本正文未裁剪。"
     return {
         "ai_verdict": "建议修改",
         "summary": summary,
@@ -141,6 +147,7 @@ def _build_report(
             "state_count": total,
             "completed_state_count": completed,
             "source_was_truncated": False,
+            "context_was_compacted": context_was_compacted,
         },
         "semif": {
             "report_version": SEMIF_REPORT_VERSION,

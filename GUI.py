@@ -2158,7 +2158,11 @@ class DataBrowser(ttk.Toplevel):
 
         except Exception as e:
             self.review_window.after(0, self.update_review_log, f"[FATAL] 复查过程发生错误: {str(e)}")
-            self.review_window.after(0, lambda: messagebox.showerror("错误", f"复查失败: {str(e)}"))
+            error_message = f"复查失败: {e}"
+            self.review_window.after(
+                0,
+                lambda message=error_message: messagebox.showerror("错误", message),
+            )
 
     def download_file(self, file_info):
         """下载文件"""
@@ -2783,7 +2787,11 @@ class DataBrowser(ttk.Toplevel):
 
             except Exception as e:
                 self.comment_crawler_window.after(0, update_log, f"[错误] 启动爬虫失败: {e}")
-                self.comment_crawler_window.after(0, lambda: messagebox.showerror("错误", f"启动爬虫失败: {e}"))
+                error_message = f"启动爬虫失败: {e}"
+                self.comment_crawler_window.after(
+                    0,
+                    lambda message=error_message: messagebox.showerror("错误", message),
+                )
 
         # 启动线程执行命令
         threading.Thread(target=execute_command, daemon=True).start()

@@ -525,6 +525,16 @@ window.aiworkerModules.push(() => ({
                     ).trim();
                 },
 
+                selectSequentialGenerationModel() {
+                    const state = this.creativeWorkspace.sequentialGeneration;
+                    state.unavailableModelRecordId = '';
+                    state.unavailableReasoningEffort = '';
+                    state.reasoningEffort = '';
+                    state.error = '';
+                    this.syncGenerationReasoningEfforts(state);
+                    this.persistSequentialGenerationPreference();
+                },
+
                 async loadSequentialGenerationModels() {
                     const state = this.creativeWorkspace.sequentialGeneration;
                     state.loading = true;
@@ -537,20 +547,39 @@ window.aiworkerModules.push(() => ({
                         const availableModelIds = new Set(
                             state.modelOptions.map(item => String(item.id))
                         );
-                        if (state.modelRecordId && !availableModelIds.has(String(state.modelRecordId))) {
-                            state.modelRecordId = '';
-                            state.reasoningEffort = '';
-                        }
-                        this.syncGenerationReasoningEfforts(
-                            state, data.default_model_record_id
+                        state.defaultModelRecordId = String(
+                            data.default_model_record_id || ''
                         );
-                        this.persistSequentialGenerationPreference();
+                        const rememberedModelRecordId = String(
+                            state.modelRecordId || ''
+                        ).trim();
+                        if (rememberedModelRecordId
+                            && !availableModelIds.has(rememberedModelRecordId)) {
+                            state.unavailableModelRecordId = rememberedModelRecordId;
+                            state.unavailableReasoningEffort = String(
+                                state.reasoningEffort || ''
+                            );
+                            state.reasoningEffortOptions = [];
+                        } else {
+                            state.unavailableModelRecordId = '';
+                            state.unavailableReasoningEffort = '';
+                            this.syncGenerationReasoningEfforts(state);
+                            this.persistSequentialGenerationPreference();
+                        }
                     } catch (error) {
-                        state.modelRecordId = '';
                         state.defaultModelRecordId = '';
-                        state.reasoningEffort = '';
                         state.reasoningEffortOptions = [];
-                        state.error = `${error.message || '读取可用模型失败'}；可继续使用全局默认模型`;
+                        if (state.modelRecordId) {
+                            state.unavailableModelRecordId = String(state.modelRecordId);
+                            state.unavailableReasoningEffort = String(
+                                state.reasoningEffort || ''
+                            );
+                            state.error = `${error.message || '读取可用模型失败'}；无法确认上次使用的模型是否可用`;
+                        } else {
+                            state.unavailableModelRecordId = '';
+                            state.unavailableReasoningEffort = '';
+                            state.error = `${error.message || '读取可用模型失败'}；可继续使用全局默认模型`;
+                        }
                     } finally {
                         state.loading = false;
                     }
@@ -564,6 +593,7 @@ window.aiworkerModules.push(() => ({
                         modelRecordId: preference.modelRecordId || '',
                         defaultModelRecordId: '', modelOptions: [],
                         reasoningEffort: preference.reasoningEffort || '',
+                        unavailableModelRecordId: '', unavailableReasoningEffort: '',
                         reasoningEffortOptions: [], error: '', loading: true,
                     });
                     this.sequentialGenerationModelModal?.show();
@@ -574,6 +604,11 @@ window.aiworkerModules.push(() => ({
                     const state = this.creativeWorkspace.sequentialGeneration;
                     const pending = state.pending;
                     if (!pending || state.loading) return;
+                    if (state.unavailableModelRecordId
+                        && String(state.modelRecordId || '') === String(state.unavailableModelRecordId)) {
+                        state.error = '上次使用的模型当前不可用，请恢复提供商凭据或重新选择模型';
+                        return;
+                    }
                     const reasoningEffort = String(state.reasoningEffort || '').trim();
                     const modelRecordId = reasoningEffort
                         ? this.selectedGenerationModelRecordId(state)
@@ -4175,6 +4210,22 @@ window.aiworkerModules.push(() => ({
 
                 async cancelCreativeJob() {
                     if (!confirm('确定取消当前创作任务吗？尚未完成的版本不会写入项目。')) return;
+                    const currentJob = (this.jobs || []).find(
+                        item => item.job_id === this.creativeWorkspace.jobId
+                    );
+                    const currentExtra = currentJob?.job?.extra || {};
+                    const generationState = this.creativeWorkspace.sequentialGeneration;
+                    if (generationState && currentJob) {
+                        generationState.modelRecordId = String(
+                            currentExtra.llm_model_record_id || ''
+                        );
+                        generationState.reasoningEffort = String(
+                            currentExtra.reasoning_effort || ''
+                        );
+                        generationState.unavailableModelRecordId = '';
+                        generationState.unavailableReasoningEffort = '';
+                        this.persistSequentialGenerationPreference();
+                    }
                     await aiworkerApi.request(`/api/jobs/${this.creativeWorkspace.jobId}/stop`, {method: 'POST'});
                     await this.fetchJobs();
                 },

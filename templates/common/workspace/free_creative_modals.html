@@ -6,13 +6,17 @@
         </div>
         <div class="modal-body">
             <label class="form-label" for="sequentialGenerationRunModel">本次使用模型</label>
-            <select id="sequentialGenerationRunModel" class="form-select" x-model="creativeWorkspace.sequentialGeneration.modelRecordId" @change="creativeWorkspace.sequentialGeneration.reasoningEffort = ''; syncGenerationReasoningEfforts(creativeWorkspace.sequentialGeneration); persistSequentialGenerationPreference()" :disabled="creativeWorkspace.sequentialGeneration.loading">
+            <select id="sequentialGenerationRunModel" class="form-select" x-model="creativeWorkspace.sequentialGeneration.modelRecordId" @change="selectSequentialGenerationModel()" :disabled="creativeWorkspace.sequentialGeneration.loading">
                 <option value="">使用全局默认模型</option>
+                <template x-if="creativeWorkspace.sequentialGeneration.unavailableModelRecordId">
+                    <option :value="creativeWorkspace.sequentialGeneration.unavailableModelRecordId" disabled>上次使用的模型当前不可用</option>
+                </template>
                 <template x-for="item in (creativeWorkspace.sequentialGeneration.modelOptions || [])" :key="`run-model-${item.id}`">
                     <option :value="item.id" x-text="item.is_default ? `${item.label}（全局默认）` : item.label"></option>
                 </template>
             </select>
             <div class="small text-muted mt-2">会记住本次选择，下次生成时自动复用。</div>
+            <div class="small text-warning mt-2" role="alert" x-show="creativeWorkspace.sequentialGeneration.unavailableModelRecordId">上次使用的模型当前不可用。请恢复对应提供商凭据，或明确选择全局默认/其他可用模型后再生成。</div>
             <fieldset class="mt-3" x-show="(creativeWorkspace.sequentialGeneration.reasoningEffortOptions || []).length" :disabled="creativeWorkspace.sequentialGeneration.loading">
                 <legend class="form-label fs-6 mb-2">本次推理档位（单选）</legend>
                 <div class="d-flex flex-wrap gap-3" role="radiogroup" aria-label="本次推理档位">
@@ -29,13 +33,13 @@
                 </div>
                 <div class="small text-muted mt-2">显式选择后将原样发送，不会自动升档或降档。</div>
             </fieldset>
-            <div class="small text-muted mt-2" x-show="!creativeWorkspace.sequentialGeneration.loading && !(creativeWorkspace.sequentialGeneration.reasoningEffortOptions || []).length">当前模型不支持推理档位参数，本次请求不会发送该参数。</div>
+            <div class="small text-muted mt-2" x-show="!creativeWorkspace.sequentialGeneration.loading && !creativeWorkspace.sequentialGeneration.unavailableModelRecordId && !(creativeWorkspace.sequentialGeneration.reasoningEffortOptions || []).length">当前模型不支持推理档位参数，本次请求不会发送该参数。</div>
             <div class="small text-muted mt-2" x-show="creativeWorkspace.sequentialGeneration.loading">正在读取可用模型…</div>
             <div class="small text-danger mt-2" role="alert" x-show="creativeWorkspace.sequentialGeneration.error" x-text="creativeWorkspace.sequentialGeneration.error"></div>
         </div>
         <div class="modal-footer">
             <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
-            <button type="button" class="btn btn-primary" @click="submitSequentialGeneration" :disabled="creativeWorkspace.sequentialGeneration.loading || !creativeWorkspace.sequentialGeneration.pending">开始生成</button>
+            <button type="button" class="btn btn-primary" @click="submitSequentialGeneration" :disabled="creativeWorkspace.sequentialGeneration.loading || !creativeWorkspace.sequentialGeneration.pending || creativeWorkspace.sequentialGeneration.unavailableModelRecordId">开始生成</button>
         </div>
     </div></div>
 </div>

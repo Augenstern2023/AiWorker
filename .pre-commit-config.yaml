@@ -23,6 +23,14 @@ repos:
         pass_filenames: true
         stages: [pre-commit]
 
+      - id: ruff-check
+        name: Check Python with Ruff
+        entry: uv run ruff check --force-exclude
+        language: system
+        types: [python]
+        pass_filenames: true
+        stages: [pre-commit]
+
       - id: check-alembic-repository
         name: Check Alembic migration graph
         entry: uv run python tools/check_alembic_integrity.py repository

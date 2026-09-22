@@ -3509,6 +3509,17 @@ def test_jobs_polling_is_scoped_to_pages_that_consume_job_state():
     assert "if (this.pageNeedsJobPolling())" in tasks
 
 
+def test_workspace_polling_pauses_when_hidden_and_stops_on_pagehide():
+    tasks = _source("static/js/common/tasks.js")
+    assert "pollers: new Map()" in tasks
+    assert "schedulePoller(name" in tasks
+    assert "clearPollers()" in tasks
+    assert "document.addEventListener('visibilitychange'" in tasks
+    assert "window.addEventListener('pagehide'" in tasks
+    assert "setInterval(() => this.fetchLogs(), 1000)" not in tasks
+    assert "setInterval(() => this.fetchJobs()" not in tasks
+
+
 def test_initial_job_scan_does_not_block_page_data_loading():
     tasks = _source("static/js/common/tasks.js")
     api = _source("WebGUI.py")

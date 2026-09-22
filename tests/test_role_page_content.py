@@ -206,7 +206,9 @@ def test_creative_route_modules_register_before_alpine_init():
             )
             assert page.evaluate("window.registeredModuleCount") == expected_count, template
             assert "selectCreativeProject" in keys
-            assert ("openTopicReviewCapture" in keys) == (page_name in {"selection-topics", "selection-hits"})
+            assert ("openTopicReviewCapture" in keys) == (
+                page_name in {"selection-topics", "selection-hits", "selection-dramas"}
+            )
             assert ("downloadSelectedEpisodes" in keys) == (page_name in {"writing-outlines", "writing-beats", "writing-scripts"})
             assert ("openPromptLibrary" in keys) == (page_name.startswith("planning-") or page_name.startswith("prompt-") or page_name in {"writing-outlines", "writing-beats", "writing-scripts"})
             assert ("openFreeCreativeGeneration" in keys) == (page_name.startswith("planning-") or page_name in {"writing-outlines", "writing-beats", "writing-scripts"})
@@ -526,8 +528,12 @@ def test_selection_drama_page_only_references_loaded_methods():
     html = _read("templates/common/workspace/selection_dramas.html")
     if 'include "common/workspace/selection_modals.html"' in page:
         html += _read("templates/common/workspace/selection_modals.html")
-    source = _read("static/js/common/tasks.js") + _read(
-        "static/js/selection/dramas.js"
+    script_paths = re.findall(
+        r'src="(/static/js/[^"?]+)',
+        page,
+    )
+    source = _read("static/js/common/tasks.js") + "".join(
+        _read(path.removeprefix("/")) for path in script_paths
     )
     calls = set(
         re.findall(r"(?<![.\w])([A-Za-z_$][A-Za-z0-9_$]*)\(", html)
@@ -548,6 +554,85 @@ def test_selection_drama_page_only_references_loaded_methods():
 
     assert "selection_modals.html" not in page
     assert calls - definitions - {"Number", "calc"} == set()
+
+
+def test_selection_drama_review_capture_uses_its_real_route_scripts():
+    page_template = _read("templates/selection/dramas.html")
+    script_paths = re.findall(r'src="(/static/js/[^"?]+)', page_template)
+    assert script_paths == [
+        "/static/js/common/creative.js",
+        "/static/js/selection/drama_reviews.js",
+        "/static/js/selection/dramas.js",
+    ]
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content('<body data-workspace-page="selection-dramas"></body>')
+        page.evaluate(
+            """() => {
+                window.requests = [];
+                window.aiworkerApi = {
+                    async request(url, options = {}) {
+                        window.requests.push({
+                            url,
+                            method: options.method || 'GET',
+                            body: options.body ? JSON.parse(options.body) : null,
+                        });
+                        return {
+                            ok: true,
+                            status: 200,
+                            async text() {
+                                return JSON.stringify({
+                                    job: {status: 'completed', review_count: 0, source_total: 0},
+                                    reviews: [],
+                                });
+                            },
+                        };
+                    },
+                };
+            }"""
+        )
+        page.add_script_tag(path=ROOT / "static/js/common/tasks.js")
+        for script_path in script_paths:
+            page.add_script_tag(path=ROOT / script_path.removeprefix("/"))
+
+        result = page.evaluate(
+            """async () => {
+                const app = appData();
+                app.dramaReviews.title = '测试短剧';
+                let thrown = '';
+                try {
+                    await app.startDramaReviewCapture();
+                } catch (error) {
+                    thrown = error.message;
+                }
+                return {
+                    thrown,
+                    loading: app.dramaReviews.loading,
+                    error: app.dramaReviews.error,
+                    requests: window.requests,
+                };
+            }"""
+        )
+
+        assert result == {
+            "thrown": "",
+            "loading": False,
+            "error": "",
+            "requests": [
+                {
+                    "url": "/api/hongguo/reviews/capture",
+                    "method": "POST",
+                    "body": {
+                        "title": "测试短剧",
+                        "limit": 100,
+                        "all_reviews": False,
+                    },
+                }
+            ],
+        }
+        browser.close()
 
 
 def test_selection_download_modal_gets_byte_formatter_from_loaded_module():

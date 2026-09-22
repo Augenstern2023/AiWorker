@@ -46,7 +46,7 @@ def test_creative_modules_are_route_scoped():
     routes = {
         "selection/topics.html": [core, reviews],
         "selection/hits.html": [core, reviews],
-        "selection/dramas.html": [core],
+        "selection/dramas.html": [core, reviews],
         "planning/projects.html": [core, prompt, generation],
         "planning/brief.html": [core, prompt, generation],
         "planning/characters.html": [core, prompt, generation],

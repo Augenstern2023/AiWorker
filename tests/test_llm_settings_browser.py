@@ -1035,21 +1035,23 @@ def test_admin_config_initialization_fetches_llm_settings() -> None:
         browser.close()
 
 
-def test_workspace_job_poller_does_not_overlap_and_pauses_while_hidden() -> None:
-    """A pending poll must suppress the next tick and page lifecycle must stop it."""
+def test_alpine_reactive_workspace_poller_preserves_its_lifecycle() -> None:
+    """Reactive pollers run repeatedly without overlap and honor page lifecycle."""
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         page.set_content("<main></main>")
         page.add_script_tag(path=TASKS_SCRIPT)
+        page.add_script_tag(path=ALPINE_SCRIPT)
         result = page.evaluate(
             """async () => {
                 let hidden = false;
                 let nextTimerId = 0;
                 const timers = new Map();
                 let calls = 0;
-                let resolveFetch;
+                let replacementCalls = 0;
+                const pendingResolves = [];
                 Object.defineProperty(document, 'hidden', {
                     configurable: true,
                     get: () => hidden,
@@ -1065,23 +1067,39 @@ def test_workspace_job_poller_does_not_overlap_and_pauses_while_hidden() -> None
                     timers.delete(id);
                     timer.callback();
                 };
+                const flushPromises = async () => {
+                    await Promise.resolve();
+                    await Promise.resolve();
+                };
 
-                const app = appData();
+                const app = Alpine.reactive(appData());
                 app.initPollerLifecycle();
                 app.fetchJobs = () => new Promise(resolve => {
                     calls += 1;
-                    resolveFetch = resolve;
+                    pendingResolves.push(resolve);
                 });
                 app.schedulePoller('jobs', () => app.fetchJobs(), 1000, true);
                 runNextTimer();
                 await Promise.resolve();
-                const callsWhilePending = calls;
+                const firstRoundCalls = calls;
+
+                await app.pollers.get('jobs').run();
+                const callsAfterOverlappingAttempt = calls;
+
+                const resolveFirst = pendingResolves.shift();
+                if (!resolveFirst) {
+                    return {firstRoundCalls, callsAfterOverlappingAttempt};
+                }
+                resolveFirst();
+                await flushPromises();
+                runNextTimer();
+                await Promise.resolve();
+                const callsAfterLaterRound = calls;
 
                 hidden = true;
                 document.dispatchEvent(new Event('visibilitychange'));
-                resolveFetch();
-                await Promise.resolve();
-                await Promise.resolve();
+                pendingResolves.shift()();
+                await flushPromises();
                 const hiddenTimerCount = timers.size;
 
                 hidden = false;
@@ -1090,15 +1108,25 @@ def test_workspace_job_poller_does_not_overlap_and_pauses_while_hidden() -> None
                 await Promise.resolve();
                 const callsAfterResume = calls;
 
+                app.schedulePoller('jobs', async () => {
+                    replacementCalls += 1;
+                }, 1000, true);
+                runNextTimer();
+                await flushPromises();
+                pendingResolves.shift()();
+                await flushPromises();
+                const timersAfterReplacement = timers.size;
+
                 window.dispatchEvent(new Event('pagehide'));
                 const pollerCountAfterPagehide = app.pollers.size;
-                resolveFetch();
-                await Promise.resolve();
-                await Promise.resolve();
                 return {
-                    callsWhilePending,
+                    firstRoundCalls,
+                    callsAfterOverlappingAttempt,
+                    callsAfterLaterRound,
                     hiddenTimerCount,
                     callsAfterResume,
+                    replacementCalls,
+                    timersAfterReplacement,
                     pollerCountAfterPagehide,
                     timerCountAfterPagehide: timers.size,
                 };
@@ -1106,9 +1134,13 @@ def test_workspace_job_poller_does_not_overlap_and_pauses_while_hidden() -> None
         )
 
         assert result == {
-            "callsWhilePending": 1,
+            "firstRoundCalls": 1,
+            "callsAfterOverlappingAttempt": 1,
+            "callsAfterLaterRound": 2,
             "hiddenTimerCount": 0,
-            "callsAfterResume": 2,
+            "callsAfterResume": 3,
+            "replacementCalls": 1,
+            "timersAfterReplacement": 1,
             "pollerCountAfterPagehide": 0,
             "timerCountAfterPagehide": 0,
         }

@@ -41,6 +41,7 @@
                 page: document.body.dataset.workspacePage || '',
                 JOB_POLL_INTERVAL_MS: 5000,
                 pollers: new Map(),
+                pollerGeneration: 0,
                 pageNeedsJobPolling() {
                     return this.page === 'admin-jobs'
                         || ['selection-hits', 'selection-topics', 'selection-dramas'].includes(this.page)
@@ -345,17 +346,25 @@
 
                 schedulePoller(name, callback, intervalMs, immediate = false) {
                     this.stopPoller(name);
-                    const poller = {callback, intervalMs, timer: null, running: false};
+                    const generation = ++this.pollerGeneration;
+                    const poller = {callback, intervalMs, timer: null, running: false, generation};
                     this.pollers.set(name, poller);
                     const run = async () => {
                         poller.timer = null;
-                        if (document.hidden || poller.running || this.pollers.get(name) !== poller) return;
+                        if (
+                            document.hidden
+                            || poller.running
+                            || this.pollers.get(name)?.generation !== generation
+                        ) return;
                         poller.running = true;
                         try {
                             await callback();
                         } finally {
                             poller.running = false;
-                            if (!document.hidden && this.pollers.get(name) === poller) {
+                            if (
+                                !document.hidden
+                                && this.pollers.get(name)?.generation === generation
+                            ) {
                                 poller.timer = window.setTimeout(run, poller.intervalMs);
                             }
                         }

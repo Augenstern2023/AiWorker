@@ -248,12 +248,17 @@ async def test_semif_review_keeps_raw_scores_and_requires_manual_review() -> Non
             )
 
     checkpoints = []
+    requests = []
     report = await review_source_with_semif(
         Client(),
         _source(),
         on_checkpoint=lambda item: checkpoints.append(item),
+        on_request=lambda item: requests.append(item),
     )
 
+    assert requests[0]["episode_number"] == 1
+    assert requests[0]["state_index"] == 1
+    assert requests[0]["state_total"] == 1
     assert checkpoints[-1]["partial"] is True
     assert report["engine"] == "semif"
     assert report["quality_status"] == "manual_review"
@@ -325,7 +330,16 @@ async def test_worker_uses_semif_inside_existing_review_lifecycle(
         def fail_script_review(self, _review_id, error):
             raise AssertionError(error)
 
-    async def fake_semif(*_args, **_kwargs):
+    async def fake_semif(*_args, **kwargs):
+        kwargs["on_request"](
+            {
+                "kind": "semif_state",
+                "episode_number": 1,
+                "state_index": 1,
+                "state_total": 2,
+            }
+        )
+        kwargs["on_progress"](1, 2)
         return {
             "ai_verdict": "建议修改",
             "engine": "semif",
@@ -339,11 +353,18 @@ async def test_worker_uses_semif_inside_existing_review_lifecycle(
         raise AssertionError("Legacy should not run")
 
     repository = Repository()
+    events = []
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SCREENPLAY_REVIEW_ENGINE", "semif")
     monkeypatch.setattr(worker, "_run_semif_review", fake_semif)
     monkeypatch.setattr(worker, "_run_legacy_review", reject_legacy)
-    monkeypatch.setattr(worker, "emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "emit",
+        lambda _job, event, message, *args, **kwargs: events.append(
+            (event, message)
+        ),
+    )
 
     await _run_with_repository(
         SimpleNamespace(job_id="semif-job", extra={"review_id": 9}),
@@ -351,6 +372,8 @@ async def test_worker_uses_semif_inside_existing_review_lifecycle(
     )
 
     assert repository.completed["engine"] == "semif"
+    assert ("progress", "正在初审第 1 集（状态包 1/2）") in events
+    assert ("progress", "已完成本地初审状态包 1/2") in events
     assert (tmp_path / "data" / "script_reviews" / "semif-job" / "report.json").exists()
 
 

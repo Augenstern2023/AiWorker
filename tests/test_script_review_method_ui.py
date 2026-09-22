@@ -33,8 +33,12 @@ def test_review_page_uses_writer_facing_method_choices() -> None:
 
 
 def test_review_page_remembers_and_submits_method_per_task() -> None:
+    page = read("templates/review/scripts.html")
     script = read("static/js/review/scripts.js")
 
+    assert 'id="script-review-progress-logs"' in page
+    assert 'id="script-review-progress-log-count"' in page
+    assert "等待日志" in page
     assert "aiworker.scriptReview.method" in script
     assert "/api/script-reviews/capabilities" in script
     assert "/api/script-reviews/local-runtime/start" in script
@@ -42,3 +46,5 @@ def test_review_page_remembers_and_submits_method_per_task() -> None:
     assert "'X-Review-Method': reviewMethod" in script
     assert "是否改用完整审核" in script
     assert "reviewMethodValue(review) === 'local'" in script
+    assert "/api/jobs/${encodeURIComponent(jobId)}/logs" in script
+    assert "syncReviewProgressLogs(review)" in script

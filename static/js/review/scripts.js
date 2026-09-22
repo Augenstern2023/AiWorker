@@ -23,6 +23,8 @@
     const reviewProgressBar = document.getElementById('script-review-progress-bar');
     const reviewProgressElapsed = document.getElementById('script-review-progress-elapsed');
     const reviewProgressError = document.getElementById('script-review-progress-error');
+    const reviewProgressLogs = document.getElementById('script-review-progress-logs');
+    const reviewProgressLogCount = document.getElementById('script-review-progress-log-count');
     const reviewProgressViewReport = document.getElementById('script-review-progress-view-report');
     const optimizationProgressElement = document.getElementById('scriptOptimizationProgressModal');
     const optimizationProgressScope = document.getElementById('script-optimization-progress-scope');
@@ -39,7 +41,7 @@
     let selectedProject = null;
     const optimizationTimers = new Map();
     const reviewPollTimers = new Map();
-    const reviewProgress = { reviewId: null, startedAt: 0, elapsedTimer: null };
+    const reviewProgress = { reviewId: null, jobId: null, startedAt: 0, elapsedTimer: null, logs: [], logLoading: false };
     const optimizationProgress = { optimizationId: null, startedAt: 0, elapsedTimer: null };
     const reviewMethodStorageKey = 'aiworker.scriptReview.method';
     let localReviewCapability = { available: false, installed: false, state: 'checking', message: '正在检查本地初审' };
@@ -180,10 +182,75 @@
         reviewProgressElapsed.textContent = `已等待 ${formatReviewElapsed(Date.now() - reviewProgress.startedAt)}`;
     }
 
+    function resetReviewProgressLogs() {
+        reviewProgress.jobId = null;
+        reviewProgress.logs = [];
+        reviewProgress.logLoading = false;
+        if (reviewProgressLogCount) reviewProgressLogCount.textContent = '';
+        if (reviewProgressLogs) {
+            const empty = document.createElement('div');
+            empty.className = 'text-muted p-2';
+            empty.textContent = '等待日志...';
+            reviewProgressLogs.replaceChildren(empty);
+        }
+    }
+
+    function renderReviewProgressLogs(logs) {
+        if (!reviewProgressLogs) return;
+        const normalized = Array.isArray(logs) ? logs.map((line) => String(line)) : [];
+        if (reviewProgressLogCount) reviewProgressLogCount.textContent = normalized.length ? `共 ${normalized.length} 条` : '';
+        if (normalized.length === reviewProgress.logs.length && normalized.every((line, index) => line === reviewProgress.logs[index])) return;
+        const nearBottom = reviewProgressLogs.scrollHeight - reviewProgressLogs.scrollTop - reviewProgressLogs.clientHeight < 32;
+        const prefixMatches = reviewProgress.logs.length <= normalized.length
+            && reviewProgress.logs.every((line, index) => line === normalized[index]);
+        const additions = prefixMatches ? normalized.slice(reviewProgress.logs.length) : normalized;
+        if (!prefixMatches) reviewProgressLogs.replaceChildren();
+        if (!normalized.length) {
+            const empty = document.createElement('div');
+            empty.className = 'text-muted p-2';
+            empty.textContent = '等待日志...';
+            reviewProgressLogs.replaceChildren(empty);
+        } else {
+            if (!reviewProgress.logs.length && prefixMatches) reviewProgressLogs.replaceChildren();
+            additions.forEach((line) => {
+                const row = document.createElement('div');
+                row.className = `log-line${line.includes('[ERROR]') ? ' text-danger' : line.includes('[WARNING]') ? ' text-warning' : ''}`;
+                row.textContent = line;
+                reviewProgressLogs.append(row);
+            });
+        }
+        reviewProgress.logs = normalized;
+        if (nearBottom || !prefixMatches) reviewProgressLogs.scrollTop = reviewProgressLogs.scrollHeight;
+    }
+
+    async function syncReviewProgressLogs(review) {
+        const jobId = String(review?.job_id || reviewProgress.jobId || '');
+        if (!jobId || reviewProgress.logLoading) return;
+        if (reviewProgress.jobId !== jobId) {
+            resetReviewProgressLogs();
+            reviewProgress.jobId = jobId;
+        }
+        reviewProgress.logLoading = true;
+        try {
+            const payload = await readJson(await aiworkerApi.request(`/api/jobs/${encodeURIComponent(jobId)}/logs`));
+            renderReviewProgressLogs(payload.logs || []);
+        } catch (_error) {
+            if (!reviewProgress.logs.length && reviewProgressLogs) {
+                const unavailable = document.createElement('div');
+                unavailable.className = 'text-warning p-2';
+                unavailable.textContent = '暂时无法读取运行日志，审核任务仍会继续。';
+                reviewProgressLogs.replaceChildren(unavailable);
+            }
+        } finally {
+            reviewProgress.logLoading = false;
+        }
+    }
+
     function showReviewProgress(scope = '') {
         if (!reviewProgressModal) return;
         reviewProgress.reviewId = null;
         reviewProgress.startedAt = Date.now();
+        resetReviewProgressLogs();
         if (reviewProgressScope) reviewProgressScope.textContent = scope;
         if (reviewProgressStatus) {
             reviewProgressStatus.className = 'alert alert-info py-2';
@@ -208,6 +275,7 @@
 
     function updateReviewProgress(review, message = '') {
         if (!reviewProgressModal || reviewProgress.reviewId !== review.id) return;
+        if (review.job_id) reviewProgress.jobId = String(review.job_id);
         const isRunning = ['queued', 'running'].includes(review.status);
         const completed = review.status === 'pending_confirmation';
         const cancelled = review.status === 'cancelled';
@@ -1194,6 +1262,7 @@
             const review = await readJson(await aiworkerApi.request(`/api/script-reviews/${reviewId}`));
             if (review.id === activeReviewId) renderReview(review);
             updateReviewProgress(review);
+            await syncReviewProgressLogs(review);
             if (['queued', 'running'].includes(review.status)) {
                 const timer = window.setTimeout(() => {
                     reviewPollTimers.delete(reviewId);

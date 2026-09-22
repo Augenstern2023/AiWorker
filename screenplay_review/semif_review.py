@@ -48,7 +48,7 @@ async def review_source_with_semif(
     windows = build_semif_state_windows(source)
     saved = _saved_states(initial_report)
     completed: list[dict[str, Any]] = []
-    for window in windows:
+    for state_index, window in enumerate(windows, start=1):
         previous = saved.get(window.id)
         if previous and previous.get("state_sha256") == window.to_manifest()["state_sha256"]:
             completed.append(previous)
@@ -60,6 +60,8 @@ async def review_source_with_semif(
                 "engine": "semif",
                 "episode_number": window.episode_number,
                 "state_id": window.id,
+                "state_index": state_index,
+                "state_total": len(windows),
             },
         )
         request = SemIfScoreRequest(

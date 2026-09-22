@@ -86,19 +86,23 @@ async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
         raise ValueError("审核记录不存在")
     repository.start_script_review(review_id)
     emit(job, "job_started", "开始剧本审核")
+    active_request: dict[str, Any] = {}
 
     def progress(completed: int, total: int) -> None:
+        message = (
+            f"已完成本地初审状态包 {completed}/{total}"
+            if active_request.get("kind") == "semif_state"
+            else f"已审核 {completed}/{total} 个剧本范围"
+        )
         emit(
             job,
             "progress",
-            f"已审核 {completed}/{total} 个剧本范围",
+            message,
             payload={"stage": "script_review", "completed": completed, "total": total},
         )
 
     def checkpoint(report: dict[str, Any]) -> None:
         repository.checkpoint_script_review(review_id, report)
-
-    active_request: dict[str, Any] = {}
 
     def request_started(request: dict[str, Any]) -> None:
         active_request.clear()
@@ -109,10 +113,17 @@ async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
             "final_summary": "正在生成审核总评",
             "semif_state": "正在执行本地规则初审",
         }
+        message = labels.get(str(request.get("kind") or ""), "正在执行剧本审核")
+        if request.get("kind") == "semif_state":
+            message = (
+                f"正在初审第 {int(request.get('episode_number') or 0)} 集"
+                f"（状态包 {int(request.get('state_index') or 0)}/"
+                f"{int(request.get('state_total') or 0)}）"
+            )
         emit(
             job,
             "progress",
-            labels.get(str(request.get("kind") or ""), "正在执行剧本审核"),
+            message,
             payload={
                 "stage": "script_review",
                 **request,

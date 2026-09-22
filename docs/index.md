@@ -57,7 +57,12 @@ uv run python scripts/migrate_role_workflow.py --admin-user-id <bootstrap-admin-
 cd MediaCrawler
 
 # 使用 uv 保证 Python 版本和依赖一致性
-uv sync
+uv sync --locked --group dev
+```
+
+如果外部系统必须接收 requirements 文件，请即时导出，不要将其作为项目安装入口：
+```shell
+uv export --locked --no-dev --format requirements-txt > requirements.generated.txt
 ```
 
 ### 3. 安装 Playwright 浏览器驱动
@@ -87,34 +92,7 @@ uv run main.py --platform xhs --lt qrcode --type search --save_data_option db
 uv run main.py --help
 ```
 
-## 备选：Python 原生 venv（不推荐）
-> 如果爬取抖音或知乎，需要提前安装 Node.js，版本 `>= 16`。
-```shell
-# 进入项目根目录
-cd MediaCrawler
-
-# 创建虚拟环境（示例 Python 版本：3.11，requirements 基于该版本）
-python -m venv venv
-
-# macOS & Linux 激活虚拟环境
-source venv/bin/activate
-
-# Windows 激活虚拟环境
-venv\Scripts\activate
-```
-```shell
-# 安装依赖与驱动
-pip install -r requirements.txt
-playwright install
-```
-```shell
-# 运行爬虫程序（venv 环境）
-python main.py --platform xhs --lt qrcode --type search
-python main.py --platform xhs --lt qrcode --type detail
-python main.py --platform xhs --lt qrcode --type search --save_data_option sqlite
-python main.py --platform xhs --lt qrcode --type search --save_data_option db
-python main.py --help
-```
+项目统一使用 uv 安装和锁定依赖，不提供其他安装入口。
 
 ## 💾 数据存储
 

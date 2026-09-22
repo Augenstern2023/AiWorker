@@ -115,7 +115,13 @@ El proyecto depende de Node.js, por favor descargue e instale desde el sitio web
 cd MediaCrawler
 
 # Usar el comando uv sync para asegurar la consistencia de la versión de python y paquetes de dependencias relacionados
-uv sync
+uv sync --locked --group dev
+```
+
+Si un sistema externo debe recibir un archivo de requirements, expórtelo bajo demanda en lugar de usarlo como entrada de instalación del proyecto:
+
+```shell
+uv export --locked --no-dev --format requirements-txt > requirements.generated.txt
 ```
 
 ### 🌐 Instalación de Controlador de Navegador
@@ -123,6 +129,12 @@ uv sync
 ```shell
 # Instalar controlador de navegador
 uv run playwright install
+```
+
+### ✅ Verificar la instalación
+
+```shell
+uv run main.py --help
 ```
 
 ## 🖥️ Interfaz GUI
@@ -141,62 +153,8 @@ python GUI.py      # GUI de escritorio
 python WebGUI.py   # Interfaz web (predeterminado http://localhost:8080)
 ```
 
-> Nota: WebGUI depende de FastAPI y uvicorn. Asegúrese de haber ejecutado `uv sync` para instalar dependencias.
+> Nota: WebGUI depende de FastAPI y uvicorn. Asegúrese de haber ejecutado `uv sync --locked --group dev` para instalar dependencias.
 
-<details>
-<summary>🔗 <strong>Usando gestión de entorno venv nativo de Python (No recomendado)</strong></summary>
-
-#### Crear y activar entorno virtual de Python
-
-> Si rastrea Douyin y Zhihu, necesita instalar el entorno nodejs con anticipación, versión mayor o igual a: `16`
-
-```shell
-# Entrar al directorio raíz del proyecto
-cd MediaCrawler
-
-# Crear entorno virtual
-# Requisito de versión de Python: 3.11, las librerías en requirements.txt están basadas en esta versión
-# Si usa otras versiones de python, las librerías en requirements.txt pueden no ser compatibles, por favor resuelva por su cuenta
-python -m venv venv
-
-# macOS & Linux activar entorno virtual
-source venv/bin/activate
-
-# Windows activar entorno virtual
-venv\Scripts\activate
-```
-
-#### Instalar librerías de dependencias
-
-```shell
-pip install -r requirements.txt
-```
-
-#### Instalar controlador de navegador playwright
-
-```shell
-playwright install
-```
-
-#### Ejecutar programa rastreador (entorno nativo)
-
-```shell
-# El proyecto no habilita el modo de rastreo de comentarios por defecto. Si necesita comentarios, por favor modifique la variable ENABLE_GET_COMMENTS en config/base_config.py
-# Otras opciones soportadas también pueden verse en config/base_config.py con comentarios en chino
-
-# Leer palabras clave del archivo de configuración para buscar publicaciones relacionadas y rastrear información de publicaciones y comentarios
-python main.py --platform xhs --lt qrcode --type search
-
-# Leer lista de ID de publicaciones específicas del archivo de configuración para obtener información e información de comentarios de publicaciones específicas
-python main.py --platform xhs --lt qrcode --type detail
-
-# Abrir la APP correspondiente para escanear código QR para login
-
-# Para ejemplos de uso de rastreador de otras plataformas, ejecute el siguiente comando para ver
-python main.py --help
-```
-
-</details>
 
 
 ## 💾 Almacenamiento de Datos

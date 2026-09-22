@@ -114,7 +114,13 @@ The project depends on Node.js, please download and install from the official we
 cd MediaCrawler
 
 # Use uv sync command to ensure consistency of python version and related dependency packages
-uv sync
+uv sync --locked --group dev
+```
+
+If an external system must receive a requirements file, export it on demand instead of using it as a project installation entry:
+
+```shell
+uv export --locked --no-dev --format requirements-txt > requirements.generated.txt
 ```
 
 ### 🌐 Browser Driver Installation
@@ -122,6 +128,12 @@ uv sync
 ```shell
 # Install browser driver
 uv run playwright install
+```
+
+### ✅ Verify the installation
+
+```shell
+uv run main.py --help
 ```
 
 ## 🖥️ GUI Interface
@@ -140,62 +152,8 @@ python GUI.py      # Desktop GUI
 python WebGUI.py   # Web interface (default http://localhost:8080)
 ```
 
-> Note: WebGUI depends on FastAPI and uvicorn. Ensure you have run `uv sync` to install dependencies.
+> Note: WebGUI depends on FastAPI and uvicorn. Ensure you have run `uv sync --locked --group dev` to install dependencies.
 
-<details>
-<summary>🔗 <strong>Using Python native venv environment management (Not recommended)</strong></summary>
-
-#### Create and activate Python virtual environment
-
-> If crawling Douyin and Zhihu, you need to install nodejs environment in advance, version greater than or equal to: `16`
-
-```shell
-# Enter project root directory
-cd MediaCrawler
-
-# Create virtual environment
-# Python version requirement: 3.11, the libraries in requirements.txt are based on this version
-# If using other python versions, the libraries in requirements.txt may not be compatible, please resolve on your own
-python -m venv venv
-
-# macOS & Linux activate virtual environment
-source venv/bin/activate
-
-# Windows activate virtual environment
-venv\Scripts\activate
-```
-
-#### Install dependency libraries
-
-```shell
-pip install -r requirements.txt
-```
-
-#### Install playwright browser driver
-
-```shell
-playwright install
-```
-
-#### Run crawler program (native environment)
-
-```shell
-# The project does not enable comment crawling mode by default. If you need comments, please modify the ENABLE_GET_COMMENTS variable in config/base_config.py
-# Other supported options can also be viewed in config/base_config.py with Chinese comments
-
-# Read keywords from configuration file to search related posts and crawl post information and comments
-python main.py --platform xhs --lt qrcode --type search
-
-# Read specified post ID list from configuration file to get information and comment information of specified posts
-python main.py --platform xhs --lt qrcode --type detail
-
-# Open corresponding APP to scan QR code for login
-
-# For other platform crawler usage examples, execute the following command to view
-python main.py --help
-```
-
-</details>
 
 
 ## 💾 Data Storage

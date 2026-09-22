@@ -17,14 +17,10 @@ MediaCrawler now supports exporting crawled data to formatted Excel files (.xlsx
 
 ## Installation
 
-Excel export requires the `openpyxl` library:
+The `openpyxl` library is declared in `pyproject.toml`. Install it with the project's locked dependencies:
 
 ```bash
-# Using uv (recommended)
-uv sync
-
-# Or using pip
-pip install openpyxl
+uv sync --locked
 ```
 
 ## Usage
@@ -157,10 +153,7 @@ Contains creator/author information:
 ### "openpyxl not installed" error
 
 ```bash
-# Install openpyxl
-uv add openpyxl
-# or
-pip install openpyxl
+uv sync --locked
 ```
 
 ### Excel file not created

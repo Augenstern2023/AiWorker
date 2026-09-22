@@ -1903,17 +1903,20 @@ window.aiworkerModules.push(() => ({
                         });
                         const data = await res.json();
                         if (!res.ok || data.status === 'error') throw new Error(data.detail || data.message || '创建生成任务失败');
+                        const job = data.job || {};
+                        const jobId = job.job_id || job.job?.job_id;
+                        if (!jobId) throw new Error('创建生成任务失败：响应缺少任务 ID');
                         const promptStage = this.promptStageForGenerationAction(action);
                         if (promptStage && body.prompt_template_key) {
                             this.clearPromptRunSelection(promptStage);
                         }
-                        this.creativeWorkspace.jobId = data.job.job_id;
-                        this.creativeWorkspace.jobStatus = data.job.status;
+                        this.creativeWorkspace.jobId = jobId;
+                        this.creativeWorkspace.jobStatus = job.status;
                         this.creativeWorkspace.jobMessage = this.creativeGenerationStartedMessage(action);
-                        this.creativeWorkspace.jobProgress = data.job.progress || {};
-                        this.creativeWorkspace.jobLogCount = Number(data.job.log_count || 0);
-                        if (Number(data.job.started_at || 0) > 0) {
-                            this.creativeWorkspace.jobStartedAt = Number(data.job.started_at) * 1000;
+                        this.creativeWorkspace.jobProgress = job.progress || {};
+                        this.creativeWorkspace.jobLogCount = Number(job.log_count || 0);
+                        if (Number(job.started_at || 0) > 0) {
+                            this.creativeWorkspace.jobStartedAt = Number(job.started_at) * 1000;
                         }
                         await this.syncCreativeJobLogs();
                         await this.fetchJobs();
@@ -3988,6 +3991,7 @@ window.aiworkerModules.push(() => ({
 
                 async syncCreativeJobProgress() {
                     if (!this.creativeWorkspace.jobId) return;
+                    if (this.creativeWorkspace.showJobLogs) await this.syncCreativeJobLogs();
                     const job = this.jobs.find(item => item.job_id === this.creativeWorkspace.jobId);
                     if (!job) return;
                     this.creativeWorkspace.jobStatus = job.status;
@@ -3995,7 +3999,6 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.jobProgress = job.progress || {};
                     this.creativeWorkspace.paused = Boolean(job.paused);
                     this.creativeWorkspace.jobLogCount = Number(job.log_count || 0);
-                    if (this.creativeWorkspace.showJobLogs) await this.syncCreativeJobLogs();
                     if (Number(job.started_at || 0) > 0) {
                         this.creativeWorkspace.jobStartedAt = Number(job.started_at) * 1000;
                     }

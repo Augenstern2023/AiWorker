@@ -1866,6 +1866,26 @@ def build_creative_router(
         viewed["allowed_actions"] = []
         return viewed
 
+    def public_generation_job(state: Any) -> dict[str, Any]:
+        """Expose one stable job shape across sequential and free generation APIs."""
+        job = state.to_dict()
+        nested_job = job.get("job") if isinstance(job.get("job"), dict) else {}
+        state_job = getattr(state, "job", None)
+        extra = getattr(state_job, "extra", None)
+        if not isinstance(extra, dict):
+            extra = nested_job.get("extra") if isinstance(nested_job, dict) else {}
+        extra = extra if isinstance(extra, dict) else {}
+        job.update(
+            {
+                "job_id": getattr(state, "job_id", None) or nested_job.get("job_id"),
+                "platform": getattr(state, "platform", None) or nested_job.get("platform"),
+                "created_by_user_id": extra.get("created_by_user_id"),
+                "workflow_task_id": extra.get("workflow_task_id"),
+                "project_id": extra.get("project_id"),
+            }
+        )
+        return job
+
     def create_generation_job(
         project_id: int,
         action: str,
@@ -1990,16 +2010,7 @@ def build_creative_router(
             raise HTTPException(409, str(exc)) from exc
         if workflow_task_id:
             workflow_repository.link_task_job(workflow_task_id, state.job_id)
-        job = state.to_dict()
-        job.update(
-            {
-                "job_id": state.job_id,
-                "platform": state.platform,
-                "created_by_user_id": state.job.extra.get("created_by_user_id"),
-                "workflow_task_id": state.job.extra.get("workflow_task_id"),
-                "project_id": state.job.extra.get("project_id"),
-            }
-        )
+        job = public_generation_job(state)
         audit_service = getattr(request.app.state, "audit_service", None)
         if principal is not None and isinstance(audit_service, AuditService):
             audit_service.record(
@@ -4463,7 +4474,7 @@ def build_creative_router(
             created_by_user_id=principal.user_id,
             project_id=project_id,
         )
-        return {"status": "success", "job": state.to_dict()}
+        return {"status": "success", "job": public_generation_job(state)}
 
     def start_free_episode_series_generation_job(
         *,
@@ -4607,7 +4618,7 @@ def build_creative_router(
             created_by_user_id=principal.user_id,
             project_id=project_id,
         )
-        return {"status": "success", "job": state.to_dict()}
+        return {"status": "success", "job": public_generation_job(state)}
 
     @router.post("/projects/{project_id}/free/beats/generate-series")
     async def generate_free_beats_series(

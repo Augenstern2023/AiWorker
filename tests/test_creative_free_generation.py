@@ -387,6 +387,51 @@ def test_free_brief_batch_preserves_existing_direction_and_rolls_back_on_conflic
 
 
 @pytest.mark.asyncio
+async def test_free_generation_api_exposes_job_id_at_public_job_level(
+    tmp_path, postgres_creative,
+):
+    from unittest.mock import Mock
+
+    from creative.api import build_creative_router
+    from creative.schema import FreeCreativeGenerateRequest
+    from runtime.job_state import JobState
+
+    repository = postgres_creative
+    project = _free_project(repository)
+    state = JobState(CrawlJob(
+        job_id="free-generation-public-job-id",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={"created_by_user_id": "owner-1", "project_id": project["id"]},
+    ))
+    state.status = "running"
+
+    router = build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=Mock(),
+        application_service=Mock(assert_stage_write_access=Mock()),
+        job_manager=SimpleNamespace(create_job=lambda *_args, **_kwargs: state),
+    )
+    endpoint = next(
+        route.endpoint for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/free/{stage}/generate"
+    )
+
+    response = await endpoint(
+        project_id=project["id"],
+        stage="briefs",
+        episode_number=None,
+        payload=FreeCreativeGenerateRequest(operation_id="public-job-id"),
+        principal=SimpleNamespace(user_id="owner-1"),
+    )
+
+    assert response["job"]["job_id"] == state.job_id
+    assert response["job"]["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_free_brief_api_forwards_direction_count(tmp_path, postgres_creative):
     from types import SimpleNamespace
     from unittest.mock import Mock

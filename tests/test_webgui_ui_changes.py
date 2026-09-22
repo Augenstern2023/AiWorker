@@ -2407,13 +2407,16 @@ global.aiworkerApi = {
     requests.push(url);
     if (url.endsWith('/beats/generate')) {
       const mode = url.includes('/free/') ? 'free' : 'sequential';
+      const state = {
+        job_id: `creative-beats-${mode}`, status: 'running',
+        progress: {completed: 0, total: 1}, log_count: 1,
+      };
       return {
         ok: true,
         json: async () => ({
-          job: {
-            job_id: `creative-beats-${mode}`, status: 'running',
-            progress: {completed: 0, total: 1}, log_count: 1,
-          },
+          job: mode === 'free'
+            ? {job: {job_id: state.job_id}, status: state.status, progress: state.progress, log_count: state.log_count}
+            : state,
         }),
       };
     }
@@ -2457,6 +2460,55 @@ const createComponent = workflowMode => {
     );
     assert.ok(requests.includes(`/api/jobs/creative-beats-${mode}/logs`), mode);
   }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_creative_logs_keep_syncing_when_job_summary_is_temporarily_missing():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+const requests = [];
+global.window = {aiworkerModules: []};
+global.aiworkerApi = {
+  request: async url => {
+    requests.push(url);
+    return {
+      ok: true,
+      json: async () => ({logs: ['[INFO] 后台已经开始生成场次', '[INFO] 正在调用模型']}),
+    };
+  },
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+const component = window.aiworkerModules[0]();
+Object.assign(component, {
+  jobs: [],
+  creativeWorkspace: {
+    project: {id: 20, episodes: []},
+    jobId: 'creative-script-20', jobStatus: 'running', jobMessage: '',
+    jobProgress: {}, jobLogs: [], jobLogCount: 2, showJobLogs: true,
+    activeAction: 'script', activeEpisode: 1, activeSeriesGeneration: false,
+  },
+});
+
+(async () => {
+  await component.syncCreativeJobProgress();
+  assert.ok(requests.includes('/api/jobs/creative-script-20/logs'));
+  assert.deepEqual(component.creativeWorkspace.jobLogs, [
+    '[INFO] 后台已经开始生成场次', '[INFO] 正在调用模型',
+  ]);
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
     result = subprocess.run(

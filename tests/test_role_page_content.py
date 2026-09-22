@@ -229,16 +229,16 @@ def test_project_beats_uses_multiline_controls_for_long_content():
     beats = _read("templates/common/workspace/project_beats.html")
 
     fields = (
-        ("beat.scene", "beat.scene"),
-        ("listText(beat.characters)", "beat.characters"),
-        ("beat.goal", "beat.goal"),
-        ("beat.obstacle", "beat.obstacle"),
-        ("beat.emotion_change", "beat.emotion_change"),
-        ("beat.state_change", "beat.state_change"),
-        ("beat.cost", "beat.cost"),
-        ("beat.opposition_tactic", "beat.opposition_tactic"),
-        ("beat.turn", "beat.turn"),
-        ("beat.hook", "beat.hook"),
+        ("selectedProjectBeat().scene", "selectedProjectBeat().scene"),
+        ("listText(selectedProjectBeat().characters)", "selectedProjectBeat().characters"),
+        ("selectedProjectBeat().goal", "selectedProjectBeat().goal"),
+        ("selectedProjectBeat().obstacle", "selectedProjectBeat().obstacle"),
+        ("selectedProjectBeat().emotion_change", "selectedProjectBeat().emotion_change"),
+        ("selectedProjectBeat().state_change", "selectedProjectBeat().state_change"),
+        ("selectedProjectBeat().cost", "selectedProjectBeat().cost"),
+        ("selectedProjectBeat().opposition_tactic", "selectedProjectBeat().opposition_tactic"),
+        ("selectedProjectBeat().turn", "selectedProjectBeat().turn"),
+        ("selectedProjectBeat().hook", "selectedProjectBeat().hook"),
     )
     for row_source, field in fields:
         assert re.search(
@@ -253,9 +253,9 @@ def test_project_beats_exposes_story_change_cost_and_continuity_ledger():
     beats = _read("templates/common/workspace/project_beats.html")
 
     for label, field in (
-        ("局面变化", "beat.state_change"),
-        ("代价", "beat.cost"),
-        ("对抗策略", "beat.opposition_tactic"),
+        ("局面变化", "selectedProjectBeat().state_change"),
+        ("代价", "selectedProjectBeat().cost"),
+        ("对抗策略", "selectedProjectBeat().opposition_tactic"),
     ):
         assert label in beats
         assert field in beats
@@ -274,7 +274,7 @@ def test_project_beats_long_text_controls_wrap_without_clipping():
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 2048, "height": 900})
         page.set_content(f"<style>{bootstrap_css}{workspace_css}</style>{markup}")
-        controls = page.locator("tbody textarea")
+        controls = page.locator(".beats-focus-editor textarea")
         assert controls.count() == 10
         rows = max(2, (len(value) + 9) // 10)
         for index in range(controls.count()):

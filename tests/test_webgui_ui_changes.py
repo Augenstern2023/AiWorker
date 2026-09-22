@@ -667,6 +667,19 @@ def test_beats_workspace_offers_a_confirmed_batch_lock_for_full_current_drafts()
     assert "canBatchLockProjectBeats()" in creative
 
 
+def test_beats_workspace_uses_command_and_inspect_layout():
+    html = _source("templates/common/workspace/project_beats.html")
+    script = _source("static/js/writing/beats.js")
+
+    assert 'class="editor-command-bar' in html
+    assert 'class="beats-scene-rail' in html
+    assert 'class="beats-focus-editor' in html
+    assert 'class="beats-inspector' in html
+    assert "selectedBeatOrder" in script
+    assert "selectProjectBeat" in script
+    assert "selectedProjectBeat" in script
+
+
 def test_review_findings_render_outline_anchors_with_writer_facing_labels():
     review_script = _source("static/js/review/scripts.js")
 

@@ -217,7 +217,11 @@ def test_episode_workspace_all_view_and_multi_download_modal(
         )
 
         assert page.locator(visible_selector).count() >= 2
-        assert page.get_by_text(expected_text, exact=True).is_visible()
+        if stage == "beats":
+            page.locator(".beats-all-scenes").nth(1).locator("summary").click()
+            assert page.get_by_text(expected_text).is_visible()
+        else:
+            assert page.get_by_text(expected_text, exact=True).is_visible()
         page.get_by_role("button", name="多集/全集下载").first.click()
         page.wait_for_function(
             "document.getElementById('creativeEpisodeDownloadModal').classList.contains('show')"
@@ -583,5 +587,92 @@ def test_scene_script_history_selector_renders_old_script_read_only() -> None:
         assert page.get_by_role("button", name="完成并锁定", exact=True).is_disabled()
         assert title_input.is_disabled()
         assert page.get_by_role("link", name="下载此版本").is_visible()
+        assert not errors
+        browser.close()
+
+def test_beats_focus_editor_selects_and_updates_the_original_scene() -> None:
+    """Selecting a scene edits its original Alpine beat instead of a copied draft."""
+
+    template = (
+        ROOT / "templates/common/workspace/project_beats.html"
+    ).read_text(encoding="utf-8")
+    creative_script = ROOT / "static/js/common/creative.js"
+    beats_script = ROOT / "static/js/writing/beats.js"
+    alpine_script = ROOT / "static/js/alpine.min.js"
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.set_content(f'<main x-data="appData()">{template}</main>')
+        page.add_style_tag(path=ROOT / "static/css/bootstrap.min.css")
+        page.evaluate("window.aiworkerModules = []")
+        page.add_script_tag(path=creative_script)
+        page.add_script_tag(path=beats_script)
+        page.evaluate(
+            """
+            () => {
+              const methods = Object.assign(
+                {}, ...window.aiworkerModules.map(factory => factory())
+              );
+              const beats = {
+                id: 31, stage: 'beats', episode_number: 1, version: 1, status: 'draft',
+                content: {beats: [
+                  {order: 1, scene: '第一场', characters: ['甲'], goal: '第一场目标', obstacle: '', emotion_change: '', state_change: '', cost: '', opposition_tactic: '', turn: '', hook: '', continuity_updates: []},
+                  {order: 2, scene: '第二场', characters: ['乙'], goal: '第二场目标', obstacle: '', emotion_change: '', state_change: '', cost: '', opposition_tactic: '', turn: '', hook: '', continuity_updates: []}
+                ]}
+              };
+              window.appData = () => Object.assign({}, methods, {
+                creativeWorkspace: {
+                  project: {id: 9, target_episode_count: 1, workflow_mode: 'sequential', episodes: [beats]},
+                  selectedEpisode: 1, startingAction: '', activeAction: ''
+                },
+                selectedProjectBeats() { return beats; },
+                projectStageEpisodeItems() { return [beats]; },
+                projectBeatsGenerationProgress() { return {generated: 1, required: 1}; },
+                lockedProjectBeatsProgress() { return {locked: 0, required: 1}; },
+                projectBeatEpisodeLabel() { return '第 1 集'; },
+                projectBeatGenerationActionLabel() { return '生成 Beats'; },
+                seriesGenerationActionLabel() { return '全剧生成'; },
+                creativeWorkflowStatusLabel() { return '草稿'; },
+                creativeTemplateProvenance() { return ''; },
+                creativeActionDisabled() { return false; },
+                creativeActionRunning() { return false; },
+                creativeResourceEditable() { return true; },
+                canBatchLockProjectBeats() { return false; },
+                isFreeCreativeProject() { return false; },
+                freeStageCan() { return false; },
+                currentGeneratedResourceId() { return ''; },
+                creativeGeneratedDownloadUrl() { return ''; },
+                creativeProgressText() { return ''; },
+                creativeProgressPercent() { return 0; },
+                listText(value) { return Array.isArray(value) ? value.join('、') : String(value || ''); },
+                textareaRows() { return 2; },
+                setListField(target, field, value) { target[field] = value.split(/[，,、]/).filter(Boolean); },
+                projectContinuityLedger() { return []; },
+                generateProjectBeats() {}, generateProjectBeatsSeries() {},
+                completeProjectBeatsBatch() {}, completeProjectBeats() {},
+                openProjectScriptWorkspace() {}, saveProjectEpisode() {},
+                openPromptLibrary() {}, openEpisodeDownload() {},
+                createFreeBlankResource() {}, createFreeResourceRevision() {}
+              });
+            }
+            """
+        )
+        page.add_script_tag(path=alpine_script)
+        page.locator(".beats-focus-editor").wait_for(state="visible")
+
+        scene_rail = page.locator(".beats-scene-rail button")
+        scene_rail.nth(1).click()
+        goal = page.get_by_label("行动目标")
+        assert goal.input_value() == "第二场目标"
+        goal.fill("修改后的第二场目标")
+        assert page.evaluate(
+            "Alpine.$data(document.querySelector('main')).selectedProjectBeats().content.beats[1].goal"
+        ) == "修改后的第二场目标"
+
+        scene_rail.nth(0).click()
+        assert goal.input_value() == "第一场目标"
         assert not errors
         browser.close()

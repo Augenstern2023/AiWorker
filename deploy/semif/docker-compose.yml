@@ -1,0 +1,17 @@
+services:
+  semif:
+    image: "${SEMIF_IMAGE:?Set SEMIF_IMAGE to an approved immutable image}"
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${SEMIF_PORT:-18766}:18766"
+    environment:
+      SEMIF_MODEL_PROFILE: "${SEMIF_MODEL_PROFILE:-local-default}"
+      SEMIF_MODEL_DIR: /models
+    volumes:
+      - "${SEMIF_MODEL_DIR:?Set SEMIF_MODEL_DIR to an approved local model directory}:/models:ro"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18766/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 60s

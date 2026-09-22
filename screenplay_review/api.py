@@ -10,12 +10,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote
 
+import config
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from creative.repository import CreativeRepository
 from creative.project_prompt_service import ProjectPromptService
@@ -31,9 +32,12 @@ from .service import (
     source_fingerprint,
     validate_review_request,
 )
+from .semif_adapter import SemIfAdapter, SemIfError
 
 
 class ScriptReviewCreateRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     source_type: str
     mode: str
     project_id: int | None = None
@@ -42,6 +46,18 @@ class ScriptReviewCreateRequest(BaseModel):
     prompt_template_key: str | None = Field(None, min_length=1, max_length=120)
     prompt_template_revision: int | None = Field(None, ge=1)
     prompt_override: dict[str, Any] = Field(default_factory=dict)
+    engine: Literal["legacy", "semif"] | None = None
+    model_profile: str | None = Field(None, min_length=1, max_length=120)
+
+    @field_validator("model_profile")
+    @classmethod
+    def normalize_model_profile(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("model_profile 不能为空")
+        return normalized
 
 
 class ScriptReviewConfirmRequest(BaseModel):
@@ -49,10 +65,41 @@ class ScriptReviewConfirmRequest(BaseModel):
     confirmation_note: str = ""
 
 
+class ScriptReviewRerunRequest(BaseModel):
+    scope: Literal["failed_dimensions_only", "affected_episodes", "full"] = "full"
+    request_key: str = Field(min_length=8, max_length=120)
+
+    @field_validator("request_key")
+    @classmethod
+    def normalize_request_key(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 8:
+            raise ValueError("request_key 至少需要 8 个字符")
+        return normalized
+
+
 _TEXT_SCRIPT_EXTENSIONS = frozenset({
     ".txt", ".text", ".md", ".markdown", ".mdown", ".fountain", ".fd", ".rst",
 })
 _MAX_SCRIPT_UPLOAD_BYTES = 5 * 1024 * 1024
+
+
+async def _require_semif_available() -> None:
+    """Fail fast before enqueueing an explicitly requested SemIf review."""
+
+    adapter: SemIfAdapter | None = None
+    try:
+        adapter = SemIfAdapter(
+            str(config.SEMIF_BASE_URL),
+            timeout_seconds=min(5.0, max(0.1, float(config.SEMIF_TIMEOUT_SECONDS))),
+            max_retries=0,
+        )
+        await adapter.health()
+    except (SemIfError, ValueError) as exc:
+        raise HTTPException(503, "SemIf 评审服务当前不可用") from exc
+    finally:
+        if adapter is not None:
+            await adapter.close()
 
 
 def decode_script_upload(filename: str, content: bytes) -> tuple[str, str]:
@@ -82,6 +129,25 @@ def build_script_review_router(
 ) -> APIRouter:
     router = APIRouter(prefix="/api/script-reviews", tags=["script-reviews"])
     prompt_service = ProjectPromptService(repository)
+
+    def expose_report_fields(review: dict[str, Any]) -> dict[str, Any]:
+        """Project stable v2 result fields while retaining the nested report."""
+        result = dict(review)
+        report = review.get("report") if isinstance(review.get("report"), dict) else {}
+        if str(report.get("schema_version") or "") == "screenplay-review-report-v2":
+            for key in (
+                "quality_status",
+                "overall_score",
+                "hard_gate",
+                "dimensions",
+                "blocking_issues",
+                "revision_plan",
+                "review_version",
+                "engine",
+                "model",
+            ):
+                result[key] = report.get(key)
+        return result
 
     def assert_permission(principal: Principal, permission: str) -> None:
         if not principal.is_system_admin and permission not in principal.permissions:
@@ -187,9 +253,27 @@ def build_script_review_router(
         prompt_template_key: str | None = None,
         prompt_template_revision: int | None = None,
         prompt_override: dict[str, Any] | None = None,
+        engine: str | None = None,
+        model_profile: str | None = None,
+        execution_overrides: dict[str, Any] | None = None,
+        preserve_prompt_snapshot: bool = False,
     ) -> dict[str, Any]:
         source = dict(source)
-        if source_type == "project":
+        selected_engine = str(engine or config.SCREENPLAY_REVIEW_ENGINE or "legacy")
+        if selected_engine not in {"legacy", "semif"}:
+            raise ValueError("engine 必须是 legacy 或 semif")
+        selected_profile = (
+            str(model_profile or config.SEMIF_MODEL_PROFILE or "local-default").strip()
+            or "local-default"
+        )
+        execution_snapshot = {
+            "engine": selected_engine,
+            "model_profile": selected_profile,
+            "rule_package": "short-drama-semif-v1" if selected_engine == "semif" else "legacy",
+        }
+        execution_snapshot.update(dict(execution_overrides or {}))
+        source["execution_snapshot"] = execution_snapshot
+        if source_type == "project" and not preserve_prompt_snapshot:
             prompt_snapshot = prompt_service.resolve_generation_snapshot(
                 project_id=int(source["project_id"]),
                 stage="review",
@@ -202,15 +286,39 @@ def build_script_review_router(
             )
             if prompt_snapshot is not None:
                 source["prompt_snapshot"] = prompt_snapshot
-        review = repository.create_script_review(
-            source_type=source_type,
-            mode=str(source["mode"]),
-            project_id=source.get("project_id"),
-            episode_numbers=source["episode_numbers"],
-            source_fingerprint=source["fingerprint"],
-            source_payload=source,
-            created_by=principal.user_id,
-        )
+        create_once = getattr(repository, "create_script_review_rerun_once", None)
+        if (
+            callable(create_once)
+            and int(execution_snapshot.get("parent_review_id") or 0) > 0
+            and str(execution_snapshot.get("request_key") or "")
+        ):
+            review, created = create_once(
+                source_type=source_type,
+                mode=str(source["mode"]),
+                project_id=source.get("project_id"),
+                episode_numbers=source["episode_numbers"],
+                source_fingerprint=source["fingerprint"],
+                source_payload=source,
+                created_by=principal.user_id,
+                parent_review_id=int(execution_snapshot["parent_review_id"]),
+                request_key=str(execution_snapshot["request_key"]),
+                rerun_scope=str(execution_snapshot.get("rerun_scope") or "full"),
+            )
+            if not created:
+                return {
+                    "review": expose_report_fields(review),
+                    "job_id": str(review.get("job_id") or ""),
+                }
+        else:
+            review = repository.create_script_review(
+                source_type=source_type,
+                mode=str(source["mode"]),
+                project_id=source.get("project_id"),
+                episode_numbers=source["episode_numbers"],
+                source_fingerprint=source["fingerprint"],
+                source_payload=source,
+                created_by=principal.user_id,
+            )
         job_payload = {
             "platform": "creative",
             "crawler_type": "screenplay_review",
@@ -240,6 +348,8 @@ def build_script_review_router(
                     dict(source.get("prompt_snapshot") or {}).get("content_hash")
                     or ""
                 ),
+                "review_engine": selected_engine,
+                "semif_model_profile": selected_profile if selected_engine == "semif" else "",
             },
         }
         try:
@@ -251,7 +361,7 @@ def build_script_review_router(
             repository.fail_script_review(review["id"], str(exc))
             raise HTTPException(503, "无法创建剧本审核任务") from exc
         review = repository.set_script_review_job(review["id"], str(state.job_id))
-        return {"review": review, "job_id": state.job_id}
+        return {"review": expose_report_fields(review), "job_id": state.job_id}
 
     @router.post("", status_code=201)
     async def create_review(
@@ -278,6 +388,10 @@ def build_script_review_router(
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from exc
 
+        selected_engine = str(payload.engine or config.SCREENPLAY_REVIEW_ENGINE or "legacy")
+        if selected_engine == "semif":
+            await _require_semif_available()
+
         try:
             return queue_review(
                 data["source_type"],
@@ -286,6 +400,8 @@ def build_script_review_router(
                 prompt_template_key=payload.prompt_template_key,
                 prompt_template_revision=payload.prompt_template_revision,
                 prompt_override=payload.prompt_override,
+                engine=payload.engine,
+                model_profile=payload.model_profile,
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
@@ -304,7 +420,24 @@ def build_script_review_router(
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        return queue_review("text", build_text_source(text, source_filename=filename), principal)
+        engine = request.headers.get("X-Script-Review-Engine") or None
+        profile = request.headers.get("X-SemIf-Model-Profile") or None
+        if engine not in {None, "legacy", "semif"}:
+            raise HTTPException(400, "engine 必须是 legacy 或 semif")
+        if profile is not None and len(profile.strip()) > 120:
+            raise HTTPException(400, "model_profile 不能超过 120 个字符")
+        if str(engine or config.SCREENPLAY_REVIEW_ENGINE or "legacy") == "semif":
+            await _require_semif_available()
+        try:
+            return queue_review(
+                "text",
+                build_text_source(text, source_filename=filename),
+                principal,
+                engine=engine,
+                model_profile=profile,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @router.get("")
     async def list_reviews(
@@ -318,7 +451,7 @@ def build_script_review_router(
             if not bool((review.get("source_payload") or {}).get("audit_scope"))
             and can_read_review(request, principal, review)
         ]
-        return {"items": items}
+        return {"items": [expose_report_fields(item) for item in items]}
 
     @router.get("/{review_id}/export")
     async def export_review(
@@ -355,7 +488,7 @@ def build_script_review_router(
             raise HTTPException(403, "没有访问此审核记录的权限")
         if bool((review.get("source_payload") or {}).get("audit_scope")):
             raise HTTPException(409, "完整项目审核不属于正式审核流程")
-        return refresh_review(review)
+        return expose_report_fields(refresh_review(review))
 
     @router.post("/{review_id}/retry")
     async def retry_review(
@@ -385,7 +518,83 @@ def build_script_review_router(
             repository.fail_script_review(review_id, str(exc))
             raise HTTPException(503, "无法启动剧本审核续跑") from exc
         resumed = repository.set_script_review_job(review_id, str(state.job_id))
-        return {"review": resumed, "job_id": str(state.job_id)}
+        return {"review": expose_report_fields(resumed), "job_id": str(state.job_id)}
+
+    @router.post("/{review_id}/reruns", status_code=201)
+    async def rerun_review(
+        review_id: int,
+        payload: ScriptReviewRerunRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        """Create a new immutable review version; never overwrite the parent report."""
+        assert_permission(principal, "script.review.generate")
+        review = repository.get_script_review(review_id)
+        if not review:
+            raise HTTPException(404, "审核记录不存在")
+        if not can_read_review(request, principal, review):
+            raise HTTPException(403, "没有访问此审核记录的权限")
+        if bool((review.get("source_payload") or {}).get("audit_scope")):
+            raise HTTPException(409, "完整项目审核不属于正式审核流程")
+        report = review.get("report") if isinstance(review.get("report"), dict) else {}
+        if str(report.get("schema_version") or "") != "screenplay-review-report-v2":
+            raise HTTPException(409, "只有 SemIf v2 报告可以创建范围复审")
+        if review.get("status") in {"queued", "running", "failed"}:
+            raise HTTPException(409, "当前审核尚未形成可复审的最终报告")
+
+        for candidate in repository.list_script_reviews(created_by=principal.user_id):
+            execution = dict((candidate.get("source_payload") or {}).get("execution_snapshot") or {})
+            if (
+                str(execution.get("request_key") or "") == payload.request_key
+                and int(execution.get("parent_review_id") or 0) == review_id
+            ):
+                if str(execution.get("rerun_scope") or "") != payload.scope:
+                    raise HTTPException(409, "该幂等键已用于不同的复审范围")
+                return {
+                    "review": expose_report_fields(candidate),
+                    "job_id": str(candidate.get("job_id") or ""),
+                }
+
+        frozen = dict(review.get("source_payload") or {})
+        source = frozen
+        if review.get("source_type") == "project":
+            current = current_source(review)
+            changed = str(current.get("fingerprint") or "") != str(
+                review.get("source_fingerprint") or ""
+            )
+            if changed and payload.scope != "full":
+                raise HTTPException(409, "剧本已更新，局部复审不可复用旧决策，请执行完整复审")
+            if changed:
+                source = current
+                if frozen.get("prompt_snapshot"):
+                    source["prompt_snapshot"] = frozen["prompt_snapshot"]
+
+        previous_version = str(report.get("review_version") or "review-v001")
+        try:
+            version_number = int(previous_version.rsplit("v", 1)[-1]) + 1
+        except (TypeError, ValueError):
+            version_number = 2
+        old_execution = dict(frozen.get("execution_snapshot") or {})
+        await _require_semif_available()
+        try:
+            return queue_review(
+                str(review.get("source_type") or "project"),
+                source,
+                principal,
+                engine="semif",
+                model_profile=str(
+                    old_execution.get("model_profile") or config.SEMIF_MODEL_PROFILE
+                ),
+                execution_overrides={
+                    "parent_review_id": review_id,
+                    "review_version": f"review-v{version_number:03d}",
+                    "rerun_scope": payload.scope,
+                    "request_key": payload.request_key,
+                },
+                preserve_prompt_snapshot=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @router.delete("/{review_id}")
     async def delete_review(

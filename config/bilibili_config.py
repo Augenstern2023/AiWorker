@@ -154,6 +154,15 @@ VIDEO_PARAMETER_LLM_RETRY_READ_TIMEOUTS = _env_bool(
 VIDEO_PARAMETER_ANALYSIS_DEADLINE_SECONDS = _env_int(
     "VIDEO_PARAMETER_ANALYSIS_DEADLINE_SECONDS", 60
 )
+# SemIf is an optional local sidecar. Reviews remain on the legacy engine until
+# the caller explicitly freezes ``semif`` into the review execution snapshot.
+SCREENPLAY_REVIEW_ENGINE = _env_choice(
+    "SCREENPLAY_REVIEW_ENGINE", "legacy", {"legacy", "semif"}
+)
+SEMIF_BASE_URL = os.getenv("SEMIF_BASE_URL", "http://127.0.0.1:18766").rstrip("/")
+SEMIF_TIMEOUT_SECONDS = _env_int("SEMIF_TIMEOUT_SECONDS", 120)
+SEMIF_MAX_RETRIES = _env_int("SEMIF_MAX_RETRIES", 2)
+SEMIF_MODEL_PROFILE = os.getenv("SEMIF_MODEL_PROFILE", "local-default").strip() or "local-default"
 # 正式剧本审核按规模拆成逐集、批次汇总和最终总评。各请求使用独立短时限，
 # 已经等待到读取超时的请求不再重复提交；连接错误和网关错误仍可重试一次。
 SCREENPLAY_REVIEW_UNIT_LLM_REASONING_EFFORT = _env_choice(

@@ -1,0 +1,47 @@
+{
+  "schema_version": "script-package-v1",
+  "source_fingerprint": "fixture-source-001",
+  "project": {"project_id": "fixture-001", "title": "脱敏测试剧本"},
+  "characters": [],
+  "relationships": [],
+  "episodes": [
+    {
+      "episode_id": "ep-0001",
+      "episode_number": 1,
+      "resource_id": "script-1",
+      "version": 1,
+      "content_fingerprint": "fixture-content-001",
+      "title": "开局",
+      "outline": {},
+      "beats": {},
+      "scenes": [
+        {
+          "scene_id": "script-1:1:1",
+          "episode_id": "ep-0001",
+          "scene_number": "1",
+          "sequence_number": 1,
+          "resource_id": "script-1",
+          "version": 1,
+          "content_fingerprint": "fixture-content-001",
+          "text": "主角推门而入。",
+          "evidence": [
+            {
+              "source_ref": "script-1:1:1:0",
+              "episode_id": "ep-0001",
+              "scene_id": "script-1:1:1",
+              "resource_id": "script-1",
+              "version": 1,
+              "source_url": "/writing/projects/1/episodes/1/scripts",
+              "block_index": 0,
+              "start": 0,
+              "end": 7,
+              "text": "主角推门而入。",
+              "text_hash": "fixture-text-hash"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "insufficient_evidence": []
+}

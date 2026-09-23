@@ -600,6 +600,43 @@ window.aiworkerModules.push(() => ({
                     await this.loadSequentialGenerationModels();
                 },
 
+                async hideSequentialGenerationModelModal() {
+                    const modal = this.sequentialGenerationModelModal;
+                    const modalElement = typeof document === 'undefined'
+                        ? null : document.getElementById('sequentialGenerationModelModal');
+                    if (!modal) return;
+                    if (!modalElement) {
+                        modal.hide();
+                        return;
+                    }
+                    const blurFocusedElement = () => {
+                        if (modalElement.contains(document.activeElement)) {
+                            document.activeElement?.blur();
+                        }
+                    };
+                    const isHidden = () => (
+                        !modalElement.classList.contains('show')
+                        && modalElement.style.display === 'none'
+                    );
+                    const waitForHidden = () => new Promise(resolve => {
+                        let timeoutId = null;
+                        const finish = () => {
+                            if (timeoutId !== null) window.clearTimeout(timeoutId);
+                            modalElement.removeEventListener('hidden.bs.modal', finish);
+                            resolve(isHidden());
+                        };
+                        modalElement.addEventListener('hidden.bs.modal', finish);
+                        timeoutId = window.setTimeout(finish, 700);
+                    });
+                    for (let attempt = 0; attempt < 3; attempt += 1) {
+                        blurFocusedElement();
+                        const hidden = waitForHidden();
+                        modal.hide();
+                        if (await hidden) return;
+                    }
+                    throw new Error('模型选择弹窗未能关闭，请重试');
+                },
+
                 async submitSequentialGeneration() {
                     const state = this.creativeWorkspace.sequentialGeneration;
                     const pending = state.pending;
@@ -618,8 +655,16 @@ window.aiworkerModules.push(() => ({
                         return;
                     }
                     this.persistSequentialGenerationPreference();
+                    state.loading = true;
+                    try {
+                        await this.hideSequentialGenerationModelModal();
+                    } catch (error) {
+                        state.loading = false;
+                        state.error = error.message || '模型选择弹窗未能关闭，请重试';
+                        return;
+                    }
+                    state.loading = false;
                     state.pending = null;
-                    this.sequentialGenerationModelModal?.hide();
                     const body = modelRecordId
                         ? {...pending.body, llm_model_record_id: modelRecordId} : {...pending.body};
                     if (reasoningEffort) body.reasoning_effort = reasoningEffort;

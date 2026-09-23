@@ -213,4 +213,4 @@ uv run pytest tests/test_original_project_browser.py tests/test_episode_all_view
 - 契约测试改为渲染 Jinja include 后检查真实结构，并覆盖关键 ID、Alpine 属性与资源边界。
 - 已验证：`uv run pytest tests/test_frontend_performance_contract.py tests/test_page_authorization.py tests/test_role_page_content.py tests/test_episode_all_view_browser.py tests/test_original_project_browser.py tests/test_prompt_workspace_browser.py tests/test_prompt_marketplace_browser.py tests/test_role_page_access_browser.py tests/test_selection_dashboard_browser.py tests/test_selection_project_creation_browser.py -q`（123 passed）；`uv run ruff check .`、`uv lock --check`、75 个模板 Jinja 解析通过。
 - `tests/test_webgui_ui_changes.py` 仍受环境阻塞：系统数据库必须提供 `postgresql+psycopg://` 且处于 Alembic head；未修改业务代码绕过该前置条件。
-- 当前 CUA 浏览器面不可用，因此三种视口采用共享响应式 CSS、模板契约与 Playwright 相关测试间接验证；真实登录态视觉验收仍需在可用浏览器/数据库环境完成。
+- CUA 浏览器面不可用；已用 Playwright 对隔离端口登录入口做三种视口 smoke（1440×900、1024×768、390×844），页面级 `scrollWidth == innerWidth`。真实登录态工作台逐页视觉验收仍需在可用浏览器/数据库环境完成。

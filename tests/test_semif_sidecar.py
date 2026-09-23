@@ -12,7 +12,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from deploy.semif.semif_sidecar.app import create_app
-from deploy.semif.semif_sidecar.runtime import SEMIF_UPSTREAM_COMMIT
+from deploy.semif.semif_sidecar.runtime import RuntimeSettings, SEMIF_UPSTREAM_COMMIT
 
 
 class FakeRuntime:
@@ -93,3 +93,29 @@ def test_sidecar_rejects_duplicate_criterion_ids() -> None:
         )
 
     assert response.status_code == 422
+
+
+def test_runtime_settings_default_to_gpu_with_large_context(tmp_path, monkeypatch) -> None:
+    model = tmp_path / "model.gguf"
+    monkeypatch.setenv("SEMIF_GGUF_PATH", str(model))
+    monkeypatch.setenv("SEMIF_GGUF_SHA256", "a" * 64)
+    monkeypatch.delenv("SEMIF_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("SEMIF_LLAMA_GPU_LAYERS", raising=False)
+
+    settings = RuntimeSettings.from_environment()
+
+    assert settings.max_tokens == 24_576
+    assert settings.gpu_layers == -1
+
+
+def test_runtime_settings_allow_explicit_cpu_fallback(tmp_path, monkeypatch) -> None:
+    model = tmp_path / "model.gguf"
+    monkeypatch.setenv("SEMIF_GGUF_PATH", str(model))
+    monkeypatch.setenv("SEMIF_GGUF_SHA256", "b" * 64)
+    monkeypatch.setenv("SEMIF_MAX_TOKENS", "4096")
+    monkeypatch.setenv("SEMIF_LLAMA_GPU_LAYERS", "0")
+
+    settings = RuntimeSettings.from_environment()
+
+    assert settings.max_tokens == 4_096
+    assert settings.gpu_layers == 0

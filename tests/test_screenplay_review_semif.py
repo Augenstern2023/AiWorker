@@ -106,12 +106,25 @@ def test_state_builder_splits_long_block_without_losing_text() -> None:
     assert all(left["end"] == right["start"] for left, right in zip(refs, refs[1:]))
 
 
-def test_state_builder_refuses_oversized_fixed_context_instead_of_truncating() -> None:
-    source = _source("短正文")
+def test_state_builder_compacts_oversized_context_without_losing_script() -> None:
+    original = "短正文" * 200
+    source = _source(original)
     source["brief"]["content"]["very_long"] = "背景" * 1_000
 
-    with pytest.raises(ValueError, match="固定上下文已超过"):
-        build_semif_state_windows(source, target_tokens=300)
+    windows = build_semif_state_windows(source, target_tokens=300)
+
+    assert windows
+    assert all(window.estimated_tokens <= 300 for window in windows)
+    serialized = [json.dumps(window.state, ensure_ascii=False) for window in windows]
+    assert all(window.state["context_compacted"] is True for window in windows)
+    assert all("very_long" not in item for item in serialized)
+    assert any("episode.outline.core_event" in item for item in serialized)
+    reconstructed = "".join(
+        segment["text"]
+        for window in windows
+        for segment in window.state["script_segments"]
+    )
+    assert reconstructed == original
 
 
 @pytest.mark.asyncio
@@ -235,12 +248,17 @@ async def test_semif_review_keeps_raw_scores_and_requires_manual_review() -> Non
             )
 
     checkpoints = []
+    requests = []
     report = await review_source_with_semif(
         Client(),
         _source(),
         on_checkpoint=lambda item: checkpoints.append(item),
+        on_request=lambda item: requests.append(item),
     )
 
+    assert requests[0]["episode_number"] == 1
+    assert requests[0]["state_index"] == 1
+    assert requests[0]["state_total"] == 1
     assert checkpoints[-1]["partial"] is True
     assert report["engine"] == "semif"
     assert report["quality_status"] == "manual_review"
@@ -260,6 +278,17 @@ def test_worker_feature_flags_keep_legacy_default(monkeypatch) -> None:
 
     assert _screenplay_review_engine() == "legacy"
     assert _semif_fallback_engine() == "legacy"
+
+
+def test_task_review_method_overrides_process_default(monkeypatch) -> None:
+    monkeypatch.setenv("SCREENPLAY_REVIEW_ENGINE", "legacy")
+    local_review = {"source_payload": {"review_method": "local"}}
+    assert _screenplay_review_engine(local_review) == "semif"
+    assert _semif_fallback_engine(local_review) == "none"
+
+    monkeypatch.setenv("SCREENPLAY_REVIEW_ENGINE", "semif")
+    complete_review = {"source_payload": {"review_method": "complete"}}
+    assert _screenplay_review_engine(complete_review) == "legacy"
 
 
 def test_worker_rejects_unknown_engine(monkeypatch) -> None:
@@ -301,7 +330,16 @@ async def test_worker_uses_semif_inside_existing_review_lifecycle(
         def fail_script_review(self, _review_id, error):
             raise AssertionError(error)
 
-    async def fake_semif(*_args, **_kwargs):
+    async def fake_semif(*_args, **kwargs):
+        kwargs["on_request"](
+            {
+                "kind": "semif_state",
+                "episode_number": 1,
+                "state_index": 1,
+                "state_total": 2,
+            }
+        )
+        kwargs["on_progress"](1, 2)
         return {
             "ai_verdict": "建议修改",
             "engine": "semif",
@@ -315,11 +353,18 @@ async def test_worker_uses_semif_inside_existing_review_lifecycle(
         raise AssertionError("Legacy should not run")
 
     repository = Repository()
+    events = []
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SCREENPLAY_REVIEW_ENGINE", "semif")
     monkeypatch.setattr(worker, "_run_semif_review", fake_semif)
     monkeypatch.setattr(worker, "_run_legacy_review", reject_legacy)
-    monkeypatch.setattr(worker, "emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "emit",
+        lambda _job, event, message, *args, **kwargs: events.append(
+            (event, message)
+        ),
+    )
 
     await _run_with_repository(
         SimpleNamespace(job_id="semif-job", extra={"review_id": 9}),
@@ -327,6 +372,8 @@ async def test_worker_uses_semif_inside_existing_review_lifecycle(
     )
 
     assert repository.completed["engine"] == "semif"
+    assert ("progress", "正在初审第 1 集（状态包 1/2）") in events
+    assert ("progress", "已完成本地初审状态包 1/2") in events
     assert (tmp_path / "data" / "script_reviews" / "semif-job" / "report.json").exists()
 
 
@@ -392,4 +439,4 @@ async def test_worker_falls_back_to_legacy_when_sidecar_is_unavailable(
     )
 
     assert repository.completed["summary"] == "Legacy fallback"
-    assert any("切换 Legacy" in message for _event, message in events)
+    assert any("切换完整审核" in message for _event, message in events)

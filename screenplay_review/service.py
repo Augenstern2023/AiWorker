@@ -18,6 +18,7 @@ from .strategy import ReviewExecutionPlan, estimate_tokens, plan_review_executio
 
 
 REVIEW_MODES = frozenset({"single", "multiple", "collection"})
+REVIEW_METHODS = frozenset({"complete", "local"})
 SOURCE_TYPES = frozenset({"project", "text"})
 VERDICTS = frozenset({"通过", "建议修改"})
 SEVERITIES = frozenset({"P0", "P1", "P2"})
@@ -36,10 +37,13 @@ def validate_review_request(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize the small public request contract before source lookup."""
     source_type = str(payload.get("source_type") or "").strip()
     mode = str(payload.get("mode") or "").strip()
+    review_method = str(payload.get("review_method") or "complete").strip()
     if source_type not in SOURCE_TYPES:
         raise ValueError("source_type 必须是 project 或 text")
     if mode not in REVIEW_MODES:
         raise ValueError("mode 必须是 single、multiple 或 collection")
+    if review_method not in REVIEW_METHODS:
+        raise ValueError("review_method 必须是 complete 或 local")
 
     raw_numbers = payload.get("episode_numbers") or []
     if not isinstance(raw_numbers, list):
@@ -52,7 +56,13 @@ def validate_review_request(payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("粘贴文本仅支持单集审核")
         if not text:
             raise ValueError("请粘贴剧本文本")
-        return {"source_type": source_type, "mode": mode, "text": text, "episode_numbers": [1]}
+        return {
+            "source_type": source_type,
+            "mode": mode,
+            "review_method": review_method,
+            "text": text,
+            "episode_numbers": [1],
+        }
 
     project_id = int(payload.get("project_id") or 0)
     if project_id < 1:
@@ -64,6 +74,7 @@ def validate_review_request(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "source_type": source_type,
         "mode": mode,
+        "review_method": review_method,
         "project_id": project_id,
         "episode_numbers": episode_numbers,
     }
@@ -270,16 +281,22 @@ def build_review_markdown(review: dict[str, Any]) -> str:
         str(review.get("mode") or ""), "审核"
     )
     episodes = "、".join(f"第 {number} 集" for number in review.get("episode_numbers") or []) or "-"
+    review_method = (
+        "本地初审"
+        if payload.get("review_method") == "local" or report.get("engine") == "semif"
+        else "完整审核"
+    )
     lines = [
         f"# 剧本审核报告 #{review.get('id') or '-'}",
         "",
         f"- 来源：{_review_source_label(review)}",
+        f"- 审核方式：{review_method}",
         f"- 审核范围：{mode} · {episodes}",
         f"- 审核状态：{review.get('status') or '-'}",
         "",
         "## 审核结论",
         "",
-        f"AI 建议：{report.get('ai_verdict') or review.get('ai_verdict') or '-'}",
+        f"{'初审结论' if review_method == '本地初审' else 'AI 建议'}：{report.get('ai_verdict') or review.get('ai_verdict') or '-'}",
     ]
     if report.get("summary"):
         lines.extend(["", str(report["summary"]).strip()])

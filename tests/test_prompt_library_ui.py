@@ -411,13 +411,15 @@ def test_enabling_old_project_reloads_picker_without_changing_enabled_projects()
     assert result.returncode == 0, result.stderr
 
 
-def test_review_and_optimization_pages_send_single_run_template_selections():
+def test_review_page_keeps_templates_while_exposing_local_method_controls():
     page = _read("templates/review/scripts.html")
     script = _read("static/js/review/scripts.js")
 
     assert 'id="script-review-prompt-template"' in page
     assert 'id="script-review-prompt-requirements"' in page
     assert "loadPromptSelector(" in script
+    assert "reviewPromptTemplate" in script
+    assert "reviewPromptRequirements" in script
     assert "'review', reviewPromptTemplate" in script
     assert "'optimization', promptSelect" in script
     assert "prompt_template_key: select.value" in script

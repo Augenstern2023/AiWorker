@@ -16,8 +16,9 @@ llama.cpp 安装进 AIWorker 主环境，也不会替代现有剧本审核 API�
 ## 安装
 
 先从上游 README 指定的模型仓库取得
-`Qwen_Qwen3.5-4B-Q4_K_M.gguf`，然后计算文件 SHA-256。模型约 3 GB，当前
-上游 llama.cpp 实现固定 `n_gpu_layers=0`，只使用 CPU。
+`Qwen_Qwen3.5-4B-Q4_K_M.gguf`，然后计算文件 SHA-256。模型约 3 GB。sidecar
+使用 CUDA 12.4 版 llama.cpp，把模型全部层卸载到 NVIDIA GPU，并为剧本审核
+打开 24,576 token 上下文；当前配置针对 RTX 3060 12 GB。
 
 固定文件 revision 和预期 SHA-256 已记录在 `upstream-manifest.json`。当前预期
 哈希为 `13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983`；
@@ -35,42 +36,72 @@ $env:HF_HUB_CACHE = "D:\AiWorker\huggingface-cache\hub"
 uv sync --frozen --project deploy/semif
 ```
 
+CUDA wheel 的 CPU 辅助内核启用了 AVX-512，而 i5-12400F 只能稳定使用 AVX2。
+因此还需用同版本 CPU wheel 准备兼容内核，CUDA 权重和计算仍保留在 GPU：
+
+```powershell
+uv pip install --target "D:\AiWorker\SemIf\cpu-kernel" --no-deps `
+  "llama-cpp-python @ https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35/llama_cpp_python-0.3.35-py3-none-win_amd64.whl"
+
+$native = "D:\AiWorker\SemIf\native\llama-cpp-cu124-avx2"
+New-Item -ItemType Directory -Force $native | Out-Null
+Copy-Item "D:\AiWorker\SemIf\.venv\Lib\site-packages\llama_cpp\lib\*.dll" $native
+Copy-Item "D:\AiWorker\SemIf\cpu-kernel\llama_cpp\lib\ggml-cpu.dll" $native -Force
+```
+
 把模型放到 `D:\AiWorker\SemIf\models` 后，在同一个 PowerShell 窗口启动服务：
+
+也可以由仓库内启动器从固定的 Hugging Face revision 下载并校验模型（下载约
+3 GB；模型文件保存在 D 盘，不会进入 Git）：
+
+```powershell
+$env:HF_ENDPOINT = "https://hf-mirror.com"  # 网络可直连 Hugging Face 时可省略
+uv run python scripts/start_semif_pilot.py --download-model --check-only
+```
+
+如需使用其他安装根目录，先设置 `SCREENPLAY_REVIEW_SEMIF_ROOT`；启动器会将
+虚拟环境、可执行文件、模型和 native 目录统一解析到该根目录。
 
 ```powershell
 $env:UV_PROJECT_ENVIRONMENT = "D:\AiWorker\SemIf\.venv"
 $env:UV_CACHE_DIR = "D:\AiWorker\uv-cache"
 $env:HF_HOME = "D:\AiWorker\huggingface-cache"
 $env:HF_HUB_CACHE = "D:\AiWorker\huggingface-cache\hub"
+$env:SCREENPLAY_REVIEW_SEMIF_ROOT = "D:\AiWorker\SemIf"
 $env:SEMIF_GGUF_PATH = "D:\AiWorker\SemIf\models\Qwen_Qwen3.5-4B-Q4_K_M.gguf"
 $env:SEMIF_GGUF_SHA256 = "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983"
 $env:SEMIF_LLAMA_THREADS = "6"
+$env:SEMIF_LLAMA_GPU_LAYERS = "-1"
+$env:SEMIF_MAX_TOKENS = "24576"
+$env:LLAMA_CPP_LIB_PATH = "D:\AiWorker\SemIf\native\llama-cpp-cu124-avx2"
 
 uv run --frozen --project deploy/semif aiworker-semif
 ```
 
 服务就绪后，`Invoke-RestMethod http://127.0.0.1:8765/health` 应返回
-`status: ok`、`backend: llamacpp` 和 `n_gpu_layers: 0`。当前上游实现即使机器有
-NVIDIA 显卡也只使用 CPU；环境、缓存和模型均在 D 盘不代表模型会使用 GPU。
+`status: ok`、`backend: llamacpp`、`accelerator: cuda`、`n_gpu_layers: -1` 和
+`max_prompt_tokens: 24576`。sidecar 仍复用 SemIf 固定版本的提示构造、分词验证、
+共享状态评分和结果格式，只在加载时把上游默认的 CPU 层数改为全层 GPU 卸载。
 
 模型首次启动还需要下载固定 revision 的参考 tokenizer。生产环境应预先缓存，
 并把实际 GGUF SHA-256 纳入部署记录。
 
 ## 接入 AIWorker
 
-AIWorker 默认仍使用 Legacy 审核。仅在试点环境设置：
+用户不需要选择特殊启动脚本。使用普通 WebGUI，在“剧本审核”页面选择“完整审核”
+或“本地初审”即可；系统会把选择冻结到单条审核任务中。“本地初审”首次使用时会
+自动准备 D 盘 sidecar，未就绪时不会静默改用完整审核，而是让用户确认。
 
-Windows 本机安装完成后，可以先关闭正在运行的普通版 GUI，再双击仓库根目录的
-`启动Web程序-SemIf试点.bat` 或 `启动程序-SemIf试点.bat`。启动器会校验 D 盘
-模型哈希，自动复用或启动 sidecar，并且只给本次 GUI 进程设置以下开关：
+以下环境变量只用于调整本地服务地址和运行参数：
 
 ```powershell
-$env:SCREENPLAY_REVIEW_ENGINE = "semif"
 $env:SCREENPLAY_REVIEW_SEMIF_URL = "http://127.0.0.1:8765"
-$env:SCREENPLAY_REVIEW_SEMIF_FALLBACK = "legacy"
 $env:SCREENPLAY_REVIEW_SEMIF_TIMEOUT_SECONDS = "900"
 $env:SCREENPLAY_REVIEW_SEMIF_MAX_RETRIES = "0"
 ```
+
+仓库根目录的 `启动Web程序-SemIf试点.bat` 和 `启动程序-SemIf试点.bat` 仅作为
+维护入口保留，用于在打开 GUI 前预热 sidecar；它们不再全局改变审核方式。
 
 可在不启动 GUI 的情况下验证本机安装：
 

@@ -24,7 +24,7 @@ from .semif_rules import OPTION_LABELS, RULES, RULES_BY_ID, criteria
 from .semif_state import STATE_PACKAGE_VERSION, build_semif_state_windows
 
 
-SEMIF_REPORT_VERSION = "screenplay-semif-report-v1"
+SEMIF_REPORT_VERSION = "screenplay-semif-report-v3"
 _OPTION_RANK = {
     "excellent": 0,
     "passed": 0,
@@ -48,7 +48,7 @@ async def review_source_with_semif(
     windows = build_semif_state_windows(source)
     saved = _saved_states(initial_report)
     completed: list[dict[str, Any]] = []
-    for window in windows:
+    for state_index, window in enumerate(windows, start=1):
         previous = saved.get(window.id)
         if previous and previous.get("state_sha256") == window.to_manifest()["state_sha256"]:
             completed.append(previous)
@@ -60,6 +60,8 @@ async def review_source_with_semif(
                 "engine": "semif",
                 "episode_number": window.episode_number,
                 "state_id": window.id,
+                "state_index": state_index,
+                "state_total": len(windows),
             },
         )
         request = SemIfScoreRequest(
@@ -119,10 +121,16 @@ def _build_report(
     completed = len(states)
     total = len(windows)
     status = "部分状态包已评分" if partial else "全部状态包已评分"
+    context_was_compacted = any(
+        bool(getattr(window, "state", {}).get("context_compacted"))
+        for window in windows
+    )
     summary = (
-        f"SemIf {status}（{completed}/{total}）。结果仅表示给定选项之间的条件评分，"
+        f"本地初审{status}（{completed}/{total}）。结果仅表示给定选项之间的条件评分，"
         "尚未经过剧本业务校准，必须由人工复核；系统未生成因果解释或原句证据。"
     )
+    if context_was_compacted:
+        summary += " 辅助背景已自动精简，剧本正文未裁剪。"
     return {
         "ai_verdict": "建议修改",
         "summary": summary,
@@ -141,6 +149,7 @@ def _build_report(
             "state_count": total,
             "completed_state_count": completed,
             "source_was_truncated": False,
+            "context_was_compacted": context_was_compacted,
         },
         "semif": {
             "report_version": SEMIF_REPORT_VERSION,
@@ -265,7 +274,7 @@ def _episode_reviews(states: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     rule = RULES_BY_ID.get(str(score.get("id") or ""))
                     issue_labels.append(rule.label if rule else str(score.get("id") or ""))
         labels = "、".join(dict.fromkeys(issue_labels))
-        summary = "SemIf 未标记需复核维度。" if not labels else f"待人工复核：{labels}。"
+        summary = "本地初审未标记需复核维度。" if not labels else f"待人工复核：{labels}。"
         result.append({"episode_number": number, "summary": summary, "findings": []})
     return result
 

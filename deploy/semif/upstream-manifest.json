@@ -14,6 +14,15 @@
     "gguf_sha256": "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983",
     "gguf_repository_license": "Apache-2.0"
   },
-  "prompt_limit_tokens": 4096,
+  "runtime": {
+    "llama_cpp_python_version": "0.3.35",
+    "llama_cpp_python_wheel": "cu124-win_amd64",
+    "llama_cpp_python_wheel_sha256": "84f7218c1e9cf21014b9770c65064c5a3674dd2f4fbc312c5d6bb40cec0fb269",
+    "cuda_runtime_version": "12.4.127",
+    "cublas_version": "12.4.5.8",
+    "gpu_layers": "all"
+  },
+  "prompt_limit_tokens": 24576,
+  "state_target_tokens": 18000,
   "execution_mode": "shared"
 }

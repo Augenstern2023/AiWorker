@@ -16,8 +16,9 @@ llama.cpp 安装进 AIWorker 主环境，也不会替代现有剧本审核 API�
 ## 安装
 
 先从上游 README 指定的模型仓库取得
-`Qwen_Qwen3.5-4B-Q4_K_M.gguf`，然后计算文件 SHA-256。模型约 3 GB，当前
-上游 llama.cpp 实现固定 `n_gpu_layers=0`，只使用 CPU。
+`Qwen_Qwen3.5-4B-Q4_K_M.gguf`，然后计算文件 SHA-256。模型约 3 GB。sidecar
+使用 CUDA 12.4 版 llama.cpp，把模型全部层卸载到 NVIDIA GPU，并为剧本审核
+打开 24,576 token 上下文；当前配置针对 RTX 3060 12 GB。
 
 固定文件 revision 和预期 SHA-256 已记录在 `upstream-manifest.json`。当前预期
 哈希为 `13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983`；
@@ -35,6 +36,19 @@ $env:HF_HUB_CACHE = "D:\AiWorker\huggingface-cache\hub"
 uv sync --frozen --project deploy/semif
 ```
 
+CUDA wheel 的 CPU 辅助内核启用了 AVX-512，而 i5-12400F 只能稳定使用 AVX2。
+因此还需用同版本 CPU wheel 准备兼容内核，CUDA 权重和计算仍保留在 GPU：
+
+```powershell
+uv pip install --target "D:\AiWorker\SemIf\cpu-kernel" --no-deps `
+  "llama-cpp-python @ https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35/llama_cpp_python-0.3.35-py3-none-win_amd64.whl"
+
+$native = "D:\AiWorker\SemIf\native\llama-cpp-cu124-avx2"
+New-Item -ItemType Directory -Force $native | Out-Null
+Copy-Item "D:\AiWorker\SemIf\.venv\Lib\site-packages\llama_cpp\lib\*.dll" $native
+Copy-Item "D:\AiWorker\SemIf\cpu-kernel\llama_cpp\lib\ggml-cpu.dll" $native -Force
+```
+
 把模型放到 `D:\AiWorker\SemIf\models` 后，在同一个 PowerShell 窗口启动服务：
 
 ```powershell
@@ -45,13 +59,17 @@ $env:HF_HUB_CACHE = "D:\AiWorker\huggingface-cache\hub"
 $env:SEMIF_GGUF_PATH = "D:\AiWorker\SemIf\models\Qwen_Qwen3.5-4B-Q4_K_M.gguf"
 $env:SEMIF_GGUF_SHA256 = "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983"
 $env:SEMIF_LLAMA_THREADS = "6"
+$env:SEMIF_LLAMA_GPU_LAYERS = "-1"
+$env:SEMIF_MAX_TOKENS = "24576"
+$env:LLAMA_CPP_LIB_PATH = "D:\AiWorker\SemIf\native\llama-cpp-cu124-avx2"
 
 uv run --frozen --project deploy/semif aiworker-semif
 ```
 
 服务就绪后，`Invoke-RestMethod http://127.0.0.1:8765/health` 应返回
-`status: ok`、`backend: llamacpp` 和 `n_gpu_layers: 0`。当前上游实现即使机器有
-NVIDIA 显卡也只使用 CPU；环境、缓存和模型均在 D 盘不代表模型会使用 GPU。
+`status: ok`、`backend: llamacpp`、`accelerator: cuda`、`n_gpu_layers: -1` 和
+`max_prompt_tokens: 24576`。sidecar 仍复用 SemIf 固定版本的提示构造、分词验证、
+共享状态评分和结果格式，只在加载时把上游默认的 CPU 层数改为全层 GPU 卸载。
 
 模型首次启动还需要下载固定 revision 的参考 tokenizer。生产环境应预先缓存，
 并把实际 GGUF SHA-256 纳入部署记录。

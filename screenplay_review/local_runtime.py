@@ -139,6 +139,10 @@ class LocalReviewRuntimeManager:
         if (
             payload.get("backend") != "llamacpp"
             or gguf.get("sha256") != EXPECTED_GGUF_SHA256
+            or (payload.get("model") or {}).get("accelerator") != "cuda"
+            or int((payload.get("model") or {}).get("n_gpu_layers") or 0) != -1
+            or int((payload.get("model") or {}).get("max_prompt_tokens") or 0)
+            < 24_576
         ):
             return None
         return payload

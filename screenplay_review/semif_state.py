@@ -19,8 +19,8 @@ from typing import Any
 from .strategy import estimate_tokens
 
 
-STATE_PACKAGE_VERSION = "screenplay-semif-state-v2"
-DEFAULT_STATE_TARGET_TOKENS = 3_000
+STATE_PACKAGE_VERSION = "screenplay-semif-state-v3"
+DEFAULT_STATE_TARGET_TOKENS = 18_000
 
 
 @dataclass(frozen=True)

@@ -24,7 +24,7 @@ from .semif_rules import OPTION_LABELS, RULES, RULES_BY_ID, criteria
 from .semif_state import STATE_PACKAGE_VERSION, build_semif_state_windows
 
 
-SEMIF_REPORT_VERSION = "screenplay-semif-report-v2"
+SEMIF_REPORT_VERSION = "screenplay-semif-report-v3"
 _OPTION_RANK = {
     "excellent": 0,
     "passed": 0,

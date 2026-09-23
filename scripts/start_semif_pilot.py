@@ -29,12 +29,21 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SEMIF_ROOT = Path("D:/AiWorker/SemIf")
 SIDECAR_EXECUTABLE = SEMIF_ROOT / ".venv/Scripts/aiworker-semif.exe"
 MODEL_PATH = SEMIF_ROOT / "models/Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+NATIVE_LIBRARY_PATH = SEMIF_ROOT / "native/llama-cpp-cu124-avx2"
 MAIN_PYTHON = PROJECT_ROOT / ".venv/Scripts/python.exe"
 SIDECAR_URL = "http://127.0.0.1:8765"
 EXPECTED_COMMIT = "1f2dea3e25379f9dfc98cb83c324f00ab5deda37"
 EXPECTED_MODEL_SHA256 = (
     "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983"
 )
+NATIVE_LIBRARY_SHA256 = {
+    "ggml-base.dll": "c2154980606fc543ff29291e6a78186c4a644dfe92df5af3e2800c41bb6af3da",
+    "ggml-cpu.dll": "cd91f4ed375998da4da57fedaab1b0638fba8b2af88e74a2632bc046e7fa4850",
+    "ggml-cuda.dll": "86555e1c0b39d82691ba544e7f49402866c025236a27c83ce1f3899be429f187",
+    "ggml.dll": "7d34153480877d65a34806176df5295865b6789f8e3586d28b75c1396ea9d9b0",
+    "llama.dll": "91da16716d2d611cd4483c7ebca2c538278c88011616076fc3592008236ab7ff",
+    "mtmd.dll": "7ab69a92603a34b34a57ef5a130d3568cc4dd50f6caf93ee7455afe33fa68521",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,6 +78,9 @@ def verified_health() -> dict[str, Any] | None:
         or health.get("backend") != "llamacpp"
         or health.get("upstream_commit") != EXPECTED_COMMIT
         or gguf.get("sha256") != EXPECTED_MODEL_SHA256
+        or model.get("accelerator") != "cuda"
+        or int(model.get("n_gpu_layers") or 0) != -1
+        or int(model.get("max_prompt_tokens") or 0) < 24_576
     ):
         return None
     return health
@@ -91,6 +103,9 @@ def sidecar_environment() -> dict[str, str]:
             "SEMIF_GGUF_PATH": str(MODEL_PATH),
             "SEMIF_GGUF_SHA256": EXPECTED_MODEL_SHA256,
             "SEMIF_LLAMA_THREADS": "6",
+            "SEMIF_LLAMA_GPU_LAYERS": "-1",
+            "SEMIF_MAX_TOKENS": "24576",
+            "LLAMA_CPP_LIB_PATH": str(NATIVE_LIBRARY_PATH),
         }
     )
     return environment
@@ -160,9 +175,16 @@ def review_environment(base: dict[str, str]) -> dict[str, str]:
 
 def main() -> int:
     args = parse_args()
-    for required in (SIDECAR_EXECUTABLE, MODEL_PATH, MAIN_PYTHON):
+    native_libraries = tuple(
+        NATIVE_LIBRARY_PATH / name for name in NATIVE_LIBRARY_SHA256
+    )
+    for required in (SIDECAR_EXECUTABLE, MODEL_PATH, MAIN_PYTHON, *native_libraries):
         if not required.is_file():
             raise FileNotFoundError(f"Required file not found: {required}")
+    for library in native_libraries:
+        actual = file_sha256(library)
+        if actual != NATIVE_LIBRARY_SHA256[library.name]:
+            raise ValueError(f"SemIf native library SHA-256 mismatch: {library.name}")
     actual_sha256 = file_sha256(MODEL_PATH)
     if actual_sha256 != EXPECTED_MODEL_SHA256:
         raise ValueError(f"SemIf model SHA-256 mismatch: {actual_sha256}")
@@ -180,6 +202,8 @@ def main() -> int:
                 "model_sha256": model["gguf"]["sha256"],
                 "threads": model["threads"],
                 "n_gpu_layers": model["n_gpu_layers"],
+                "accelerator": model["accelerator"],
+                "max_prompt_tokens": model["max_prompt_tokens"],
             },
             ensure_ascii=False,
         ),

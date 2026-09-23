@@ -1,4 +1,8 @@
-<div id="project-generation-progress" class="border-bottom pb-3 mb-3" x-show="creativeWorkspace.startingAction || creativeWorkspace.jobId" x-cloak role="status" aria-live="polite">
+<aside class="workspace-inspector" aria-label="项目检查区">
+    <header class="workspace-inspector__header"><div><div class="workspace-section-label">Inspect</div><h6 class="mb-0">项目状态与后台任务</h6></div></header>
+    <div class="workspace-inspector__body">
+        <div class="small text-muted mb-3" x-show="creativeWorkspace.project" x-text="`当前模块：{{ creative_module }}；编辑、保存和锁定均以当前版本状态为准。`"></div>
+        <div id="project-generation-progress" class="border-bottom pb-3 mb-3" x-show="creativeWorkspace.startingAction || creativeWorkspace.jobId" x-cloak role="status" aria-live="polite">
                     <div class="d-flex justify-content-between align-items-center mb-1"><span class="small fw-semibold" x-text="creativeWorkspace.jobMessage || '后台生成中'"></span><span class="small text-muted" x-text="creativeProgressText()"></span></div>
                     <div class="small text-muted mb-2" x-text="creativeProgressElapsedText()"></div>
                     <div class="progress mb-2" style="height:8px" role="progressbar" :aria-valuenow="creativeProgressIndeterminate() ? null : creativeProgressPercent()"><div class="progress-bar" :class="{'progress-bar-striped progress-bar-animated': creativeProgressIndeterminate(), 'bg-danger': creativeWorkspace.jobStatus === 'failed'}" :style="`width:${creativeProgressIndeterminate() ? 100 : creativeProgressPercent()}%`"></div></div>
@@ -10,3 +14,7 @@
                         <button class="btn btn-sm btn-outline-secondary" @click="openCreativeTaskLog"><i class="bi bi-list-ul me-1"></i>任务日志</button>
                     </div>
                 </div>
+        </div>
+        <div class="small text-muted" x-show="!creativeWorkspace.startingAction && !creativeWorkspace.jobId">暂无正在执行的后台任务。生成、保存或锁定后的状态会在此处更新。</div>
+    </div>
+</aside>

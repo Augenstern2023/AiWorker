@@ -1,13 +1,26 @@
 <section>
-            <div class="d-flex align-items-center justify-content-between mb-3">
-                <h3 class="mb-0">剧目检索下载</h3>
+            <header class="workspace-page-header">
+                <div class="workspace-page-header__copy">
+                    <div class="workspace-page-header__eyebrow">Selection · Sources</div>
+                    <h3 class="mb-0">剧目检索下载</h3>
+                    <div class="small text-muted">检索来源、确认剧集并保留下载产物</div>
+                </div>
+            </header>
+            <div class="workspace-context-bar">
+                <div class="workspace-context-bar__primary"><strong>Filter</strong><span class="small text-muted ms-2">平台与剧名检索</span></div>
+                <div class="workspace-context-bar__meta"><span>Inspect</span><span class="small">来源结果与任务产物</span></div>
+            </div>
+            <div class="workspace-split workspace-split--inspect">
+              <div class="workspace-list-pane">
+                <div class="workspace-list-pane__header"><strong>检索结果</strong><span class="small text-muted">选择来源后查看详情</span></div>
+                <div class="workspace-list-pane__body">
             </div>
             <div class="row g-3">
                 <div class="col-12">
                     <div class="card mb-3">
                         <div class="card-header">检索并选择剧集</div>
                         <div class="card-body">
-                            <div class="position-relative mb-3">
+                            <div class="workspace-toolbar position-relative mb-3">
                                 <div class="input-group">
                                     <select class="form-select" style="max-width: 140px" x-model="dramaAnalysis.platform" @change="changeDramaSearchPlatform" aria-label="检索平台"><option value="hg">红果</option><option value="dy">抖音</option></select>
                                     <input class="form-control" x-model="dramaAnalysis.title" @keydown.enter="searchDrama" autocomplete="off" :placeholder="dramaAnalysis.platform === 'dy' ? '输入剧名，检索抖音视频' : '输入完整剧名，优先检索第三方剧目来源'">
@@ -17,7 +30,7 @@
                                 </div>
                             </div>
                             <div class="alert alert-info py-2" x-show="dramaAnalysis.platform === 'hg'" x-cloak role="status">优先检索第三方剧目来源，同时检索已抓包红果剧目；请手动确认来源后再读取集数。</div>
-                            <div class="alert alert-danger" x-show="dramaAnalysis.error" x-cloak x-text="dramaAnalysis.error"></div>
+                            <div class="workspace-state workspace-state--error mb-3" x-show="dramaAnalysis.error" x-cloak x-text="dramaAnalysis.error"></div>
                             <div class="alert alert-warning py-2" x-show="dramaAnalysis.thirdPartyError" x-cloak role="status"><span class="fw-semibold">第三方来源暂不可用：</span><span x-text="dramaAnalysis.thirdPartyError"></span></div>
                             <div class="alert alert-warning py-2" x-show="dramaAnalysis.captureError" x-cloak role="status"><span class="fw-semibold">抓包目录暂不可用：</span><span x-text="dramaAnalysis.captureError"></span></div>
                             <div class="alert alert-warning" x-show="isDouyinDramaSearch()" x-cloak>
@@ -25,7 +38,7 @@
                                 <div class="small" x-text="dramaAnalysis.fallbackReason"></div>
                                 <div class="small mt-1">请手动确认视频。候选可能是推广或片段，并非完整剧集。</div>
                             </div>
-                            <div x-show.important="dramaAnalysis.loading" x-cloak class="d-flex align-items-center gap-2 py-3" role="status" aria-live="polite"><span class="spinner-border spinner-border-sm"></span><span x-text="dramaAnalysis.loadingMessage"></span></div>
+                            <div x-show.important="dramaAnalysis.loading" x-cloak class="workspace-state workspace-state--loading d-flex align-items-center gap-2 py-3" role="status" aria-live="polite"><span class="spinner-border spinner-border-sm"></span><span x-text="dramaAnalysis.loadingMessage"></span></div>
                             <div x-show="!isDouyinDramaSearch() && !dramaAnalysis.loading && (dramaAnalysis.providers.length || dramaAnalysis.captureCandidates.length)" x-cloak class="mb-3">
                                 <template x-for="provider in dramaAnalysis.providers" :key="provider.provider_id">
                                     <section class="mb-3" :aria-label="`${provider.display_name || provider.provider_id} 搜索结果`">
@@ -115,5 +128,11 @@
                         </div>
                     </div>
                 </div>
+                </div>
+              </div>
+              <aside class="workspace-inspector">
+                <div class="workspace-inspector__header"><strong>Inspect</strong><span class="small text-muted">下载与剧评</span></div>
+                <div class="workspace-inspector__body small text-muted">选择检索结果后，使用现有集数、下载、在线播放和剧评操作；任务状态与产物仍显示在左侧结果区。</div>
+              </aside>
             </div>
         </section>

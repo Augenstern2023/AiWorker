@@ -2,8 +2,10 @@
 
 {% block content %}
 <h1 class="visually-hidden">今日爆款</h1>
+<div class="workspace-page-shell" data-workspace-layout="workspace-page-header workspace-context-bar workspace-toolbar workspace-split">
 {% include "common/workspace/selection_hits.html" %}
 {% include "common/workspace/selection_modals.html" %}
 {% include "common/workspace/breakdown_modals.html" %}
+</div>
 {% endblock %}
 {% block scripts %}<script src="/static/js/common/creative.js?v={{ asset_version }}"></script><script src="/static/js/selection/drama_reviews.js?v={{ asset_version }}"></script><script src="/static/js/selection/topics.js?v={{ asset_version }}"></script><script src="/static/js/selection/breakdowns.js?v={{ asset_version }}&download_modal=3"></script>{% endblock %}

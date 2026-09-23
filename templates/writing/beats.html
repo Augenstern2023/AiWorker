@@ -1,25 +1,28 @@
 {% extends "layouts/base.html" %}
 
 {% block page_header %}
-<div id="writing-beats-page-header" class="d-flex justify-content-between align-items-start gap-3 mb-3">
-    <div>
+<header id="writing-beats-page-header" class="workspace-page-header">
+    <div class="workspace-page-header__copy"><div class="workspace-page-header__eyebrow">Command / Inspect</div>
         <h3 class="mb-1">单集节拍表</h3>
         <div class="small text-muted" x-text="creativeWorkspace.selectedEpisode === 0 ? '项目 {{ project_id }} · 全集 · 场景目标、阻力、情绪变化与转折' : `项目 {{ project_id }} · 第 ${creativeWorkspace.selectedEpisode} 集 · 场景目标、阻力、情绪变化与转折`">项目 {{ project_id }} · 第 {{ episode_number }} 集 · 场景目标、阻力、情绪变化与转折</div>
     </div>
-    <div class="d-flex gap-2">
+    <div class="workspace-page-header__actions">
         {% include "common/workspace/project_list_back_link.html" %}
         <a id="optimization-draft-review-back-link" class="btn btn-outline-light btn-sm flex-shrink-0" hidden href="/review/scripts" title="返回审核" aria-label="返回审核">
             <i class="bi bi-arrow-left me-1" aria-hidden="true"></i><span>返回审核</span>
         </a>
     </div>
-</div>
+</header>
 {% endblock %}
 
 {% block content %}
 {% set creative_module = "beats" %}
+<section class="workspace-context-bar" x-show="creativeWorkspace.project" x-cloak aria-label="Beats 项目上下文"><div class="workspace-context-bar__primary"><div class="workspace-section-label">当前项目</div><strong x-text="creativeWorkspace.project?.name || '未命名项目'"></strong></div><div class="workspace-context-bar__meta"><span>单集 Beats</span><span x-text="creativeWorkspace.selectedEpisode === 0 ? '全集' : `第 ${creativeWorkspace.selectedEpisode} 集`"></span></div></section>
 {% include "common/workspace/project_module_navigation.html" %}
-{% include "common/workspace/project_progress.html" %}
-<template x-if="creativeWorkspace.project"><div>{% include "common/workspace/project_beats.html" %}</div></template>
+<div class="workspace-split workspace-split--inspect">
+    <template x-if="creativeWorkspace.project"><div class="workspace-editor-pane">{% include "common/workspace/project_beats.html" %}</div></template>
+    {% include "common/workspace/project_progress.html" %}
+</div>
 {% include "common/workspace/creative_progress_modal.html" %}
 {% include "common/workspace/free_creative_modals.html" %}
 {% include "common/workspace/creative_episode_download_modal.html" %}

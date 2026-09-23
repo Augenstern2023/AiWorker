@@ -1,10 +1,11 @@
 <section>
-            <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
-                <div>
+            <header class="workspace-page-header">
+                <div class="workspace-page-header__copy">
+                    <div class="workspace-page-header__eyebrow">Selection · Library</div>
                     <h3 class="mb-1">选题库</h3>
                     <div class="small text-muted">已采纳的爆款选题，作为后续创作的唯一入口</div>
                 </div>
-                <div class="d-flex align-items-center gap-2">
+                <div class="workspace-page-header__actions">
                     <div class="dropdown">
                         <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="导出选题库" aria-label="导出选题库">
                             <i class="bi bi-download"></i>
@@ -18,23 +19,29 @@
                         <i class="bi bi-arrow-clockwise"></i>
                     </button>
                 </div>
+            </header>
+            <div class="workspace-context-bar">
+                <div class="workspace-context-bar__primary"><strong>Filter</strong><span class="small text-muted ms-2">按平台、进度和拆解状态缩小选题范围</span></div>
+                <div class="workspace-context-bar__meta"><span>Inspect</span><span class="small">从结果行使用预览、下载或项目操作</span></div>
             </div>
-            <div class="card mb-3">
-                <div class="card-body">
+            <div class="workspace-toolbar" aria-label="选题库筛选">
                     <div class="row g-2 align-items-end">
-                        <div class="col-md-2"><label class="form-label small">平台</label><select class="form-select form-select-sm" x-model="topicLibrary.platform"><option value="">全部平台</option><option value="dy">抖音</option><option value="hg">红果</option></select></div>
+                        <div class="col-md-2 workspace-toolbar__group"><label class="form-label small">平台</label><select class="form-select form-select-sm" x-model="topicLibrary.platform"><option value="">全部平台</option><option value="dy">抖音</option><option value="hg">红果</option></select></div>
                         <div class="col-md-2"><label class="form-label small">进度</label><select class="form-select form-select-sm" x-model="topicLibrary.lifecycleStatus"><option value="">全部进度</option><option value="adopted">待下载</option><option value="pending_download">下载中</option><option value="downloaded">素材已就绪（已下载 X 集）</option><option value="pending_breakdown">待拆解/拆解草稿</option><option value="breakdown_completed">拆解已完成</option><option value="pending_imitation">待仿制</option><option value="imitation_generated">已仿制</option><option value="pending_character_relationships">人物关系待生成</option><option value="character_relationships_generated">人物关系已生成</option><option value="pending_episode_outlines">分集大纲待生成</option><option value="episode_outlines_generated">分集大纲已生成</option><option value="pending_beats">Beats脚本待生成</option><option value="beats_generated">Beats脚本已生成</option><option value="beats_exported">Beats脚本已导出</option><option value="pending_script">场次剧本待生成</option><option value="script_in_progress">场次剧本生成中</option><option value="script_generated">场次剧本已生成</option><option value="script_exported">场次剧本已导出</option><option value="archived">已归档</option></select></div>
                         <div class="col-md-2"><label class="form-label small">题材</label><input class="form-control form-control-sm" x-model="topicLibrary.category" placeholder="筛选题材"></div>
                         <div class="col-md-2"><label class="form-label small">最低推荐分</label><input class="form-control form-control-sm" type="number" min="0" max="100" x-model="topicLibrary.minScore" placeholder="0"></div>
                         <div class="col-md-2"><label class="form-label small">拆解版本</label><select class="form-select form-select-sm" x-model="topicLibrary.hasLocked"><option value="">全部</option><option value="true">已有锁定拆解</option><option value="false">无锁定拆解</option></select></div>
                         <div class="col-md-2 d-grid"><button class="btn btn-primary btn-sm" @click="fetchTopicLibrary()"><i class="bi bi-funnel me-1"></i>应用筛选</button></div>
                     </div>
-                </div>
             </div>
-            <div class="alert alert-danger" x-show="topicLibrary.error" x-text="topicLibrary.error"></div>
-            <div class="ui-skeleton" style="height:320px;width:100%;" x-show="topicLibrary.loading && topicLibrary.items.length === 0"></div>
+            <div class="workspace-split workspace-split--inspect">
+              <div class="workspace-list-pane">
+                <div class="workspace-list-pane__header"><strong>结果列表</strong><span class="small text-muted" x-text="`${topicLibrary.items.length} 条`"></span></div>
+                <div class="workspace-list-pane__body">
+            <div class="workspace-state workspace-state--error mb-3" x-show="topicLibrary.error" x-text="topicLibrary.error"></div>
+            <div class="workspace-state workspace-state--loading mb-3" x-show="topicLibrary.loading && topicLibrary.items.length === 0"><span class="ui-skeleton" style="height:320px;width:100%;"></span><span class="small">正在加载选题库</span></div>
             <div class="d-flex justify-content-between align-items-center mb-2 small text-muted" x-show="!topicLibrary.loading || topicLibrary.items.length > 0"><span x-text="`共 ${topicLibrary.items.length} 条选题`"></span><span>评分、来源和状态会持续保留</span></div>
-            <div class="creative-topic-table" x-show="!topicLibrary.loading || topicLibrary.items.length > 0">
+            <div class="creative-topic-table workspace-scroll-x" x-show="!topicLibrary.loading || topicLibrary.items.length > 0">
                 <table class="table table-sm table-hover align-middle mb-0">
                     <colgroup>
                         <col class="col-topic">
@@ -75,8 +82,15 @@
                                 </td>
                             </tr>
                         </template>
-                        <tr x-show="!topicLibrary.loading && topicLibrary.items.length === 0"><td colspan="9" class="text-center text-muted py-5">暂无符合条件的选题，请先在“今日爆款”生成候选</td></tr>
+                        <tr x-show="!topicLibrary.loading && topicLibrary.items.length === 0"><td colspan="9" class="workspace-empty text-center text-muted py-5">暂无符合条件的选题，请先在“今日爆款”生成候选</td></tr>
                     </tbody>
                 </table>
+            </div>
+                </div>
+              </div>
+              <aside class="workspace-inspector">
+                <div class="workspace-inspector__header"><strong>Inspect</strong><span class="small text-muted">选题详情</span></div>
+                <div class="workspace-inspector__body small text-muted">请使用结果行中的预览、下载、拆解或项目操作查看现有详情；业务详情仍由原有弹窗承载。</div>
+              </aside>
             </div>
         </section>

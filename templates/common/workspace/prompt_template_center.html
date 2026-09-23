@@ -1,12 +1,13 @@
 {% extends "layouts/base.html" %}
 
 {% block page_header %}
-<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
-    <div>
+<div class="workspace-page-header">
+    <div class="workspace-page-header__copy">
+        <div class="workspace-page-header__eyebrow">Step / Library</div>
         <h3 class="mb-1">模板中心</h3>
         <div class="small text-muted" x-text="creativeWorkspace.project ? `${creativeWorkspace.project.name || '项目'} · 管理可复用的创作模板` : '项目 {{ project_id }} · 管理可复用的创作模板'">项目 {{ project_id }} · 管理可复用的创作模板</div>
     </div>
-    {% include "common/workspace/project_list_back_link.html" %}
+    <div class="workspace-page-header__actions">{% include "common/workspace/project_list_back_link.html" %}</div>
 </div>
 {% endblock %}
 
@@ -14,69 +15,58 @@
 {% set creative_module = "prompt-center" %}
 {% include "common/workspace/project_module_navigation.html" %}
 
-<div class="alert alert-danger" x-show="creativeWorkspace.error" x-text="creativeWorkspace.error" x-cloak></div>
-<section class="card border-secondary mb-3" aria-labelledby="prompt-center-stage-title">
-    <div class="card-body">
-        <div class="row g-3 align-items-end">
-            <div class="col-lg-7">
-                <h5 id="prompt-center-stage-title" class="mb-1">先选择要管理的创作步骤</h5>
-                <div class="small text-muted">模板按创作步骤分别管理。切换步骤不会修改任何默认设置。</div>
-            </div>
-            <div class="col-sm-7 col-lg-3">
-                <label class="form-label small" for="prompt-center-stage">创作步骤</label>
-                <select id="prompt-center-stage" class="form-select" x-model="creativeWorkspace.promptLibrary.stage" @change="changePromptWorkspaceStage($event.target.value)">
-                    <option value="brief">Brief</option>
-                    <option value="characters">人物关系</option>
-                    <option value="outline">全剧大纲</option>
-                    <option value="beats">Beats</option>
-                    <option value="script">场次剧本</option>
-                </select>
-            </div>
-            <div class="col-sm-5 col-lg-2" x-show="['beats', 'script'].includes(creativeWorkspace.promptLibrary.stage)" x-cloak>
-                <label class="form-label small" for="prompt-center-episode">集数</label>
-                <select id="prompt-center-episode" class="form-select" x-model.number="creativeWorkspace.selectedEpisode" @change="changePromptWorkspaceEpisode($event.target.value)">
-                    <template x-for="number in Array.from({length: Number(creativeWorkspace.project?.target_episode_count || 1)}, (_, index) => index + 1)" :key="`prompt-center-episode-${number}`">
-                        <option :value="number" x-text="`第 ${number} 集`"></option>
-                    </template>
-                </select>
-            </div>
-        </div>
+<div class="workspace-state workspace-state--error mb-3" x-show="creativeWorkspace.error" x-text="creativeWorkspace.error" x-cloak role="alert"></div>
+<section class="workspace-context-bar" aria-labelledby="prompt-center-stage-title">
+    <div class="workspace-context-bar__primary">
+        <div class="workspace-section-label">当前上下文</div>
+        <h5 id="prompt-center-stage-title" class="mb-1">先选择要管理的创作步骤</h5>
+        <div class="small text-muted">模板按步骤管理；切换步骤不会修改默认设置。</div>
+    </div>
+    <div class="workspace-toolbar__group">
+        <label class="form-label" for="prompt-center-stage">创作步骤</label>
+        <select id="prompt-center-stage" class="form-select" x-model="creativeWorkspace.promptLibrary.stage" @change="changePromptWorkspaceStage($event.target.value)">
+            <option value="brief">Brief</option>
+            <option value="characters">人物关系</option>
+            <option value="outline">全剧大纲</option>
+            <option value="beats">Beats</option>
+            <option value="script">场次剧本</option>
+        </select>
+    </div>
+    <div class="workspace-toolbar__group workspace-toolbar__group--compact" x-show="['beats', 'script'].includes(creativeWorkspace.promptLibrary.stage)" x-cloak>
+        <label class="form-label" for="prompt-center-episode">集数</label>
+        <select id="prompt-center-episode" class="form-select" x-model.number="creativeWorkspace.selectedEpisode" @change="changePromptWorkspaceEpisode($event.target.value)">
+            <template x-for="number in Array.from({length: Number(creativeWorkspace.project?.target_episode_count || 1)}, (_, index) => index + 1)" :key="`prompt-center-episode-${number}`">
+                <option :value="number" x-text="`第 ${number} 集`"></option>
+            </template>
+        </select>
     </div>
 </section>
-
-<div class="row g-3" aria-label="模板中心功能">
-    <div class="col-lg-4">
-        <section class="card h-100 border-info-subtle">
-            <div class="card-body d-flex flex-column">
-                <div class="d-flex align-items-center gap-2 mb-2"><i class="bi bi-person-lines-fill fs-4 text-info" aria-hidden="true"></i><h5 class="mb-0">我的模板</h5></div>
-                <p class="text-muted">只有你能编辑。适合整理个人写作方法、导入外部提示词，或基于现有模板创建自己的版本。</p>
-                <ul class="small text-muted ps-3 mb-4"><li>不会影响其他项目成员</li><li>可提交到模板市场审核</li></ul>
-                <button class="btn btn-info mt-auto" type="button" @click="openPromptWorkspacePanel('personal')">管理我的模板</button>
-            </div>
-        </section>
-    </div>
-    <div class="col-lg-4">
-        <section class="card h-100 border-primary-subtle">
-            <div class="card-body d-flex flex-column">
-                <div class="d-flex align-items-center gap-2 mb-2"><i class="bi bi-people fs-4 text-primary" aria-hidden="true"></i><h5 class="mb-0">项目模板</h5></div>
-                <p class="text-muted">项目成员共同使用的模板。这里查看当前状态和使用影响；项目负责人负责批准、弃用或归档。</p>
-                <ul class="small text-muted ps-3 mb-4"><li>修改后先进入待审核状态</li><li>归档前会检查正在使用的绑定</li></ul>
-                <button class="btn btn-primary mt-auto" type="button" @click="openPromptWorkspacePanel('project')">查看项目模板</button>
-            </div>
-        </section>
-    </div>
-    <div class="col-lg-4">
-        <section class="card h-100 border-warning-subtle">
-            <div class="card-body d-flex flex-column">
-                <div class="d-flex align-items-center gap-2 mb-2"><i class="bi bi-shop fs-4 text-warning" aria-hidden="true"></i><h5 class="mb-0">模板市场</h5></div>
-                <p class="text-muted">发现官方内置模板和其他创作者公开分享的模板。</p>
-                <ul class="small text-muted ps-3 mb-4"><li>官方模板无需安装即可使用</li><li>社区模板经过审核后上架</li></ul>
-                <button class="btn btn-outline-warning mt-auto" type="button" @click="openPromptWorkspacePanel('marketplace')">进入模板市场</button>
-            </div>
-        </section>
-    </div>
+<div class="workspace-split workspace-split--inspect prompt-center-launchpad" aria-label="模板中心功能">
+    <nav class="workspace-list-pane" aria-label="模板资源导航">
+        <div class="workspace-list-pane__header"><div><div class="workspace-section-label">Library</div><h5 class="mb-0">选择资源域</h5></div></div>
+        <div>
+            <button class="workspace-list-pane__item" type="button" @click="openPromptWorkspacePanel('personal')">
+                <span class="d-block fw-semibold">我的模板</span><span class="small text-muted">整理个人方法、导入或创建副本</span>
+            </button>
+            <button class="workspace-list-pane__item" type="button" @click="openPromptWorkspacePanel('project')">
+                <span class="d-block fw-semibold">项目模板</span><span class="small text-muted">查看共享状态与治理影响</span>
+            </button>
+            <button class="workspace-list-pane__item" type="button" @click="openPromptWorkspacePanel('marketplace')">
+                <span class="d-block fw-semibold">模板市场</span><span class="small text-muted">发现官方与社区模板</span>
+            </button>
+        </div>
+    </nav>
+    <section class="workspace-inspector" aria-labelledby="prompt-center-next-title">
+        <div class="workspace-inspector__header"><div><div class="workspace-section-label">Next action</div><h5 id="prompt-center-next-title" class="mb-0">从当前步骤开始</h5></div><i class="bi bi-arrow-up-right text-info" aria-hidden="true"></i></div>
+        <div class="workspace-inspector__body">
+            <p class="mb-3">先整理个人模板；需要团队共用时，再提交为项目模板。所有操作都只影响之后的新生成。</p>
+            <div class="workspace-divider"></div>
+            <div class="small text-muted">当前步骤</div>
+            <div class="fw-semibold mt-1" x-text="promptStageLabel(creativeWorkspace.promptLibrary.stage)">Brief</div>
+            <div class="small text-muted mt-3">变更会通过右侧资源面板完成，模板版本和绑定关系保持可追溯。</div>
+        </div>
+    </section>
 </div>
-
 <section class="card border-secondary mt-3">
     <div class="card-body py-3">
         <div class="small fw-semibold mb-2">最简单的使用顺序</div>

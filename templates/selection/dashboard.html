@@ -1,12 +1,16 @@
 {% extends "layouts/base.html" %}
 
 {% block page_header %}
-<div class="d-flex align-items-center justify-content-between mb-3">
-    <div>
+<header class="workspace-page-header">
+    <div class="workspace-page-header__copy">
+        <div class="workspace-page-header__eyebrow">Selection · Overview</div>
         <h3 class="mb-1">选品工作概览</h3>
         <div class="small text-muted">榜单、候选选题、采纳进度与项目状态</div>
     </div>
-    <div class="d-flex gap-2">
+    <div class="workspace-page-header__actions">
+        <a class="btn btn-outline-light btn-sm" href="/selection/dashboard">
+            <i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i>刷新概览
+        </a>
         <a class="btn btn-outline-light btn-sm" href="/selection/ranks">
             <i class="bi bi-trophy me-1"></i>今日榜单
         </a>
@@ -14,74 +18,80 @@
             <i class="bi bi-stars me-1"></i>今日爆款
         </a>
     </div>
-</div>
+</header>
 {% endblock %}
 
 {% block content %}
-<div id="selection-dashboard" data-can-read-analytics="{{ 'true' if principal.is_system_admin or 'analytics.read' in principal.permissions else 'false' }}">
-<div class="row g-3" id="dashboard-overview-section" aria-live="polite" aria-atomic="true">
-    <div class="col-md-4">
-        <div class="card metric-card">
-            <div class="card-body">
-                <div class="small text-muted">候选选题</div>
-                <div class="display-6 ui-skeleton" style="width:60px;height:36px;" id="stat-candidates" role="text" aria-label="候选选题数量加载中"></div>
-                <div class="small"><a href="/selection/hits" class="text-reset">前往今日爆款 →</a></div>
-            </div>
+<div id="selection-dashboard" class="workspace-page-shell" data-workspace-layout="workspace-page-header workspace-context-bar workspace-split" data-can-read-analytics="{{ 'true' if principal.is_system_admin or 'analytics.read' in principal.permissions else 'false' }}">
+    <section class="workspace-context-bar" aria-label="选品概览上下文">
+        <div class="workspace-context-bar__primary">
+            <div class="workspace-section-label">工作台概览</div>
+            <div class="small text-muted">先查看候选和采纳进度，再进入榜单、爆款或选题库继续处理。</div>
         </div>
-    </div>
-    <div class="col-md-4">
-        <div class="card metric-card">
-            <div class="card-body">
-                <div class="small text-muted">选题库</div>
-                <div class="display-6 ui-skeleton" style="width:60px;height:36px;" id="stat-library" role="text" aria-label="选题库数量加载中"></div>
-                <div class="small"><a href="/selection/topics" class="text-reset">前往选题库 →</a></div>
+        <div class="workspace-context-bar__meta"><span>统计数据会独立加载</span></div>
+    </section>
+
+    <div id="dashboard-error" class="workspace-state workspace-state--error d-none mb-3" role="alert" aria-live="assertive"></div>
+
+    <div class="workspace-split workspace-split--inspect">
+        <section class="workspace-editor-pane" aria-labelledby="dashboard-overview-heading">
+            <div class="d-flex align-items-start justify-content-between gap-3 mb-3">
+                <div><div class="workspace-section-label">Overview</div><h4 class="h5 mb-0" id="dashboard-overview-heading">选品与素材状态</h4></div>
+                <span class="small text-muted">可用数据会优先显示</span>
             </div>
-        </div>
-    </div>
-    <div class="col-md-4">
-        <div class="card metric-card">
-            <div class="card-body">
-                <div class="small text-muted">已采纳选题</div>
-                <div class="display-6 ui-skeleton" style="width:60px;height:36px;" id="stat-adopted" role="text" aria-label="已采纳选题数量加载中"></div>
+            <div class="row g-3" id="dashboard-overview-section" aria-live="polite" aria-atomic="true">
+                <div class="col-md-4">
+                    <div class="card metric-card">
+                        <div class="card-body">
+                            <div class="small text-muted">候选选题</div>
+                            <div class="display-6 ui-skeleton" style="width:60px;height:36px;" id="stat-candidates" role="text" aria-label="候选选题数量加载中"></div>
+                            <div class="small"><a href="/selection/hits" class="text-reset">前往今日爆款 →</a></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card metric-card">
+                        <div class="card-body">
+                            <div class="small text-muted">选题库</div>
+                            <div class="display-6 ui-skeleton" style="width:60px;height:36px;" id="stat-library" role="text" aria-label="选题库数量加载中"></div>
+                            <div class="small"><a href="/selection/topics" class="text-reset">前往选题库 →</a></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card metric-card">
+                        <div class="card-body">
+                            <div class="small text-muted">已采纳选题</div>
+                            <div class="display-6 ui-skeleton" style="width:60px;height:36px;" id="stat-adopted" role="text" aria-label="已采纳选题数量加载中"></div>
+                        </div>
+                    </div>
+                </div>
             </div>
-        </div>
-    </div>
-</div>
-<div class="row g-3 mt-1">
-    <div class="col-md-3">
-        <div class="card metric-card">
-            <div class="card-body">
-                <div class="small text-muted">已同步剧目</div>
-                <div class="metric-value ui-skeleton" style="width:40px;height:28px;" id="stat-drama-count" role="text" aria-label="已同步剧目数量加载中"></div>
+            <div class="row g-3 mt-1">
+                <div class="col-md-3">
+                    <div class="card metric-card"><div class="card-body"><div class="small text-muted">已同步剧目</div><div class="metric-value ui-skeleton" style="width:40px;height:28px;" id="stat-drama-count" role="text" aria-label="已同步剧目数量加载中"></div></div></div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card metric-card"><div class="card-body"><div class="small text-muted">已采集评论</div><div class="metric-value ui-skeleton" style="width:40px;height:28px;" id="stat-comment-count" role="text" aria-label="已采集评论数量加载中"></div></div></div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card metric-card"><div class="card-body"><div class="small text-muted">已转写素材</div><div class="metric-value ui-skeleton" style="width:40px;height:28px;" id="stat-transcript-count" role="text" aria-label="已转写素材数量加载中"></div></div></div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card metric-card"><div class="card-body"><div class="small text-muted">分析任务</div><div class="metric-value ui-skeleton" style="width:40px;height:28px;" id="stat-task-count" role="text" aria-label="分析任务数量加载中"></div></div></div>
+                </div>
             </div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card metric-card">
-            <div class="card-body">
-                <div class="small text-muted">已采集评论</div>
-                <div class="metric-value ui-skeleton" style="width:40px;height:28px;" id="stat-comment-count" role="text" aria-label="已采集评论数量加载中"></div>
+        </section>
+        <aside class="workspace-inspector" aria-label="选品下一步">
+            <div class="workspace-inspector__header"><div><div class="workspace-section-label">Next</div><strong>继续处理</strong></div></div>
+            <div class="workspace-inspector__body d-grid gap-2">
+                <a class="btn btn-outline-light btn-sm text-start" href="/selection/ranks"><i class="bi bi-trophy me-1" aria-hidden="true"></i>查看今日榜单</a>
+                <a class="btn btn-primary btn-sm text-start" href="/selection/hits"><i class="bi bi-stars me-1" aria-hidden="true"></i>处理今日爆款</a>
+                <a class="btn btn-outline-light btn-sm text-start" href="/selection/topics"><i class="bi bi-collection me-1" aria-hidden="true"></i>打开选题库</a>
+                <p class="small text-muted mb-0">若数据加载失败，可使用页面顶部“刷新概览”重新加载。</p>
             </div>
-        </div>
+        </aside>
     </div>
-    <div class="col-md-3">
-        <div class="card metric-card">
-            <div class="card-body">
-                <div class="small text-muted">已转写素材</div>
-                <div class="metric-value ui-skeleton" style="width:40px;height:28px;" id="stat-transcript-count" role="text" aria-label="已转写素材数量加载中"></div>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card metric-card">
-            <div class="card-body">
-                <div class="small text-muted">分析任务</div>
-                <div class="metric-value ui-skeleton" style="width:40px;height:28px;" id="stat-task-count" role="text" aria-label="分析任务数量加载中"></div>
-            </div>
-        </div>
-    </div>
-</div>
-<div id="dashboard-error" class="alert alert-danger d-none mt-3" role="alert"></div>
 </div>
 {% endblock %}
 

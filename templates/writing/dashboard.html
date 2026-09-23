@@ -13,11 +13,7 @@
     .writer-progress-bar { height: 7px; background: var(--bg-panel-2); }
     .writer-task-table td, .writer-task-table th { white-space: nowrap; }
     .writer-task-table td:nth-child(2) { width: 100%; white-space: normal; min-width: 180px; }
-    @media (max-width: 575.98px) {
-        .writer-dashboard-header { align-items: flex-start !important; }
-        .writer-dashboard-header .btn { width: 100%; }
-        .writer-metric-value { font-size: 1.75rem; }
-    }
+    @media (max-width: 575.98px) { .writer-metric-value { font-size: 1.75rem; } }
     @media (max-width: 767.98px) {
         .main-content { margin-left: 0; }
         .mobile-topbar { display: flex; }
@@ -26,17 +22,25 @@
 {% endblock %}
 
 {% block page_header %}
-<div class="writer-dashboard-header d-flex flex-column flex-sm-row align-items-center justify-content-between gap-3 mb-4">
-    <div>
+<header class="workspace-page-header">
+    <div class="workspace-page-header__copy">
+        <div class="workspace-page-header__eyebrow">Writing · Overview</div>
         <h3 class="mb-1">编剧工作概览</h3>
         <div class="small text-muted">聚焦我的创作项目、待办任务与写作阶段进度</div>
     </div>
-    <a class="btn btn-primary btn-sm" href="/writing/projects"><i class="bi bi-folder2-open me-1" aria-hidden="true"></i>进入编剧项目</a>
-</div>
+    <div class="workspace-page-header__actions">
+        <a class="btn btn-outline-light btn-sm" href="/writing/dashboard"><i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i>刷新概览</a>
+        <a class="btn btn-primary btn-sm" href="/writing/projects"><i class="bi bi-folder2-open me-1" aria-hidden="true"></i>进入编剧项目</a>
+    </div>
+</header>
 {% endblock %}
 
 {% block content %}
-<div id="writer-dashboard" data-user-id="{{ principal.user_id }}">
+<div id="writer-dashboard" class="workspace-page-shell" data-workspace-layout="workspace-page-header workspace-context-bar workspace-split" data-user-id="{{ principal.user_id }}">
+    <section class="workspace-context-bar" aria-label="编剧概览上下文">
+        <div class="workspace-context-bar__primary"><div class="workspace-section-label">我的创作工作台</div><div class="small text-muted">项目、任务和阶段进度分别加载；失败时仍会保留可用数据。</div></div>
+        <div class="workspace-context-bar__meta"><span>编剧</span><span>最近任务优先</span></div>
+    </section>
     <div class="row row-cols-1 row-cols-sm-2 row-cols-xl-4 g-3 mb-4" aria-label="编剧核心指标">
         <div class="col"><div class="card writer-metric-card" style="--metric-accent:#5aa7ff"><div class="card-body d-flex justify-content-between gap-3"><div><div class="small text-muted mb-2">参与项目</div><div class="writer-metric-value" id="stat-projects">0</div></div><div class="writer-metric-icon"><i class="bi bi-folder2-open" aria-hidden="true"></i></div></div></div></div>
         <div class="col"><div class="card writer-metric-card" style="--metric-accent:#f2b84b"><div class="card-body d-flex justify-content-between gap-3"><div><div class="small text-muted mb-2">待处理任务</div><div class="writer-metric-value" id="stat-pending">0</div></div><div class="writer-metric-icon"><i class="bi bi-inbox" aria-hidden="true"></i></div></div></div></div>
@@ -44,32 +48,28 @@
         <div class="col"><div class="card writer-metric-card" style="--metric-accent:#53c58c"><div class="card-body d-flex justify-content-between gap-3"><div><div class="small text-muted mb-2">已完成任务</div><div class="writer-metric-value" id="stat-completed">0</div></div><div class="writer-metric-icon"><i class="bi bi-check2-circle" aria-hidden="true"></i></div></div></div></div>
     </div>
 
-    <div id="writer-projects-error" class="alert alert-warning d-none py-2" role="alert"></div>
-    <div id="writer-tasks-error" class="alert alert-warning d-none py-2" role="alert"></div>
+    <div id="writer-projects-error" class="workspace-state workspace-state--error d-none mb-3" role="alert" aria-live="assertive"></div>
+    <div id="writer-tasks-error" class="workspace-state workspace-state--error d-none mb-3" role="alert" aria-live="assertive"></div>
 
-    <div class="row g-3">
-        <div class="col-12 col-xl-5">
-            <section class="card h-100" aria-labelledby="writing-progress-heading">
-                <div class="card-header py-3"><h5 class="mb-1" id="writing-progress-heading">写作阶段进度</h5><div class="small text-muted">仅统计分配给我的编剧任务</div></div>
-                <div class="card-body">
+    <div class="workspace-split">
+        <aside class="workspace-inspector" aria-labelledby="writing-progress-heading">
+            <div class="workspace-inspector__header"><div><div class="workspace-section-label">Inspect</div><h5 class="mb-1" id="writing-progress-heading">写作阶段进度</h5><div class="small text-muted">仅统计分配给我的编剧任务</div></div></div>
+            <div class="workspace-inspector__body">
                     {% for type, label, color in [('outline', '全剧大纲', '#5aa7ff'), ('beats', 'Beats', '#9b7bff'), ('script', '场次剧本', '#53c58c')] %}
                     <div class="writer-progress-row">
                         <div class="d-flex align-items-center justify-content-between gap-3 mb-2"><div class="fw-semibold">{{ label }}</div><div class="small text-muted"><span id="progress-{{ type }}-count">0 / 0</span><span class="ms-2" id="progress-{{ type }}-percent">0%</span></div></div>
                         <div class="progress writer-progress-bar" role="progressbar" aria-label="{{ label }}完成进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="progress-bar" id="progress-{{ type }}-bar" style="width:0%;background:{{ color }}"></div></div>
                     </div>
                     {% endfor %}
-                </div>
-            </section>
-        </div>
-        <div class="col-12 col-xl-7">
-            <section class="card h-100" aria-labelledby="recent-writing-heading">
-                <div class="card-header py-3 d-flex align-items-center justify-content-between gap-3"><div><h5 class="mb-1" id="recent-writing-heading">最近编剧任务</h5><div class="small text-muted">按最近更新时间排序</div></div>{% if show_tasks %}<a class="btn btn-outline-light btn-sm" href="/tasks">查看全部</a>{% endif %}</div>
-                <div class="table-responsive">
+            </div>
+        </aside>
+        <section class="workspace-editor-pane" aria-labelledby="recent-writing-heading">
+            <div class="workspace-list-pane__header px-0 pt-0"><div><div class="workspace-section-label">Recent tasks</div><h5 class="mb-1" id="recent-writing-heading">最近编剧任务</h5><div class="small text-muted">按最近更新时间排序</div></div>{% if show_tasks %}<a class="btn btn-outline-light btn-sm" href="/tasks">查看全部</a>{% endif %}</div>
+            <div class="workspace-scroll-x">
                     <table class="table table-sm align-middle mb-0 writer-task-table"><thead><tr><th class="ps-3">阶段</th><th>项目</th><th>状态</th><th class="pe-3">更新时间</th></tr></thead><tbody id="recent-writing-tasks"></tbody></table>
-                </div>
-                <div id="recent-writing-tasks-empty" class="text-center text-muted py-5">暂无编剧任务</div>
-            </section>
-        </div>
+            </div>
+            <div id="recent-writing-tasks-empty" class="workspace-empty">暂无编剧任务</div>
+        </section>
     </div>
 </div>
 {% endblock %}

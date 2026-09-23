@@ -1,7 +1,11 @@
 {% extends "layouts/base.html" %}
 
 {% block content %}
-<div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">策划项目</h3><div class="small text-muted">我参与策划的创作项目，从选题库创建后自动陈列</div></div><button class="btn btn-outline-secondary btn-sm" @click="fetchCreativeProjects()"><i class="bi bi-arrow-clockwise"></i></button></div>
+<header class="workspace-page-header">
+    <div class="workspace-page-header__copy"><div class="workspace-page-header__eyebrow">Planning</div><h3 class="mb-1">策划项目</h3><div class="small text-muted">我参与策划的创作项目，从选题库创建后自动陈列</div></div>
+    <div class="workspace-page-header__actions"><button class="btn btn-outline-secondary btn-sm" @click="fetchCreativeProjects()" title="刷新项目"><i class="bi bi-arrow-clockwise"></i></button></div>
+</header>
+<section class="workspace-context-bar" aria-label="策划项目上下文"><div class="workspace-context-bar__primary"><div class="workspace-section-label">项目工作台</div><div class="small text-muted">从已采纳选题立项，或创建原创项目后进入 Brief、人物与写作阶段。</div></div><div class="workspace-context-bar__meta"><span class="badge text-bg-secondary">策划</span><span x-text="`${creativeWorkspace.projects.length} 个项目`"></span></div></section>
 {% set show_topic_creation = true %}
 {% include "common/workspace/project_list.html" %}
 {% endblock %}

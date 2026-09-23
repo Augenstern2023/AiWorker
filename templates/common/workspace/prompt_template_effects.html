@@ -1,12 +1,13 @@
 {% extends "layouts/base.html" %}
 
 {% block page_header %}
-<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
-    <div>
+<div class="workspace-page-header">
+    <div class="workspace-page-header__copy">
+        <div class="workspace-page-header__eyebrow">Step / Effects</div>
         <h3 class="mb-1">模板效果</h3>
         <div class="small text-muted" x-text="creativeWorkspace.project ? `${creativeWorkspace.project.name || '项目'} · 用真实生成结果改进模板` : '项目 {{ project_id }} · 用真实生成结果改进模板'">项目 {{ project_id }} · 用真实生成结果改进模板</div>
     </div>
-    {% include "common/workspace/project_list_back_link.html" %}
+    <div class="workspace-page-header__actions">{% include "common/workspace/project_list_back_link.html" %}</div>
 </div>
 {% endblock %}
 
@@ -14,40 +15,49 @@
 {% set creative_module = "prompt-effects" %}
 {% include "common/workspace/project_module_navigation.html" %}
 
-<div class="alert alert-danger" x-show="creativeWorkspace.error" x-text="creativeWorkspace.error" x-cloak></div>
-<section class="card border-secondary mb-3" aria-labelledby="prompt-effects-stage-title">
-    <div class="card-body">
-        <div class="row g-3 align-items-end">
-            <div class="col-lg-7">
-                <h5 id="prompt-effects-stage-title" class="mb-1">选择要分析的创作步骤</h5>
-                <div class="small text-muted">真实任务数据按创作步骤统计；Beats 与场次剧本还需要指定一集。</div>
-            </div>
-            <div class="col-sm-7 col-lg-3">
-                <label class="form-label small" for="prompt-effects-stage">创作步骤</label>
-                <select id="prompt-effects-stage" class="form-select" x-model="creativeWorkspace.promptLibrary.stage" @change="changePromptWorkspaceStage($event.target.value)">
-                    <option value="brief">Brief</option>
-                    <option value="characters">人物关系</option>
-                    <option value="outline">全剧大纲</option>
-                    <option value="beats">Beats</option>
-                    <option value="script">场次剧本</option>
-                </select>
-            </div>
-            <div class="col-sm-5 col-lg-2" x-show="['beats', 'script'].includes(creativeWorkspace.promptLibrary.stage)" x-cloak>
-                <label class="form-label small" for="prompt-effects-episode">集数</label>
-                <select id="prompt-effects-episode" class="form-select" x-model.number="creativeWorkspace.selectedEpisode" @change="changePromptWorkspaceEpisode($event.target.value)">
-                    <template x-for="number in Array.from({length: Number(creativeWorkspace.project?.target_episode_count || 1)}, (_, index) => index + 1)" :key="`prompt-effects-episode-${number}`">
-                        <option :value="number" x-text="`第 ${number} 集`"></option>
-                    </template>
-                </select>
-            </div>
-        </div>
+<div class="workspace-state workspace-state--error mb-3" x-show="creativeWorkspace.error" x-text="creativeWorkspace.error" x-cloak role="alert"></div>
+<section class="workspace-context-bar" aria-labelledby="prompt-effects-stage-title">
+    <div class="workspace-context-bar__primary">
+        <div class="workspace-section-label">当前上下文</div>
+        <h5 id="prompt-effects-stage-title" class="mb-1">选择要分析的创作步骤</h5>
+        <div class="small text-muted">真实任务数据按步骤统计；Beats 与场次剧本还需要指定一集。</div>
+    </div>
+    <div class="workspace-toolbar__group">
+        <label class="form-label" for="prompt-effects-stage">创作步骤</label>
+        <select id="prompt-effects-stage" class="form-select" x-model="creativeWorkspace.promptLibrary.stage" @change="changePromptWorkspaceStage($event.target.value)">
+            <option value="brief">Brief</option>
+            <option value="characters">人物关系</option>
+            <option value="outline">全剧大纲</option>
+            <option value="beats">Beats</option>
+            <option value="script">场次剧本</option>
+        </select>
+    </div>
+    <div class="workspace-toolbar__group workspace-toolbar__group--compact" x-show="['beats', 'script'].includes(creativeWorkspace.promptLibrary.stage)" x-cloak>
+        <label class="form-label" for="prompt-effects-episode">集数</label>
+        <select id="prompt-effects-episode" class="form-select" x-model.number="creativeWorkspace.selectedEpisode" @change="changePromptWorkspaceEpisode($event.target.value)">
+            <template x-for="number in Array.from({length: Number(creativeWorkspace.project?.target_episode_count || 1)}, (_, index) => index + 1)" :key="`prompt-effects-episode-${number}`">
+                <option :value="number" x-text="`第 ${number} 集`"></option>
+            </template>
+        </select>
     </div>
 </section>
 
-<div class="row g-3" aria-label="模板效果功能">
-    <div class="col-lg-6">
-        <section class="card h-100"><div class="card-body d-flex flex-column"><h5>效果数据</h5><p class="small text-muted">查看真实调用量、成功率、采纳率、Token、耗时和数据覆盖情况。</p><button class="btn btn-outline-dark mt-auto" type="button" @click="openPromptWorkspacePanel('observability')">查看效果数据</button></div></section>
-    </div>
+<div class="workspace-split workspace-split--inspect" aria-label="模板效果功能">
+    <nav class="workspace-list-pane" aria-label="效果分析导航">
+        <div class="workspace-list-pane__header"><div><div class="workspace-section-label">Effects</div><h5 class="mb-0">分析范围</h5></div></div>
+        <button class="workspace-list-pane__item is-active" type="button" @click="openPromptWorkspacePanel('observability')">
+            <span class="d-block fw-semibold">效果数据</span><span class="small text-muted">调用量、成功率、采纳率、Token 与耗时</span>
+        </button>
+    </nav>
+    <section class="workspace-inspector" aria-labelledby="prompt-effects-next-title">
+        <div class="workspace-inspector__header"><div><div class="workspace-section-label">Inspect</div><h5 id="prompt-effects-next-title" class="mb-0">用真实任务做判断</h5></div><i class="bi bi-graph-up-arrow text-info" aria-hidden="true"></i></div>
+        <div class="workspace-inspector__body">
+            <p class="mb-3">效果数据只统计真实终态任务；先选步骤，再打开效果面板查看版本差异和覆盖缺口。</p>
+            <div class="workspace-divider"></div>
+            <div class="small text-muted">当前步骤</div>
+            <div class="fw-semibold mt-1" x-text="promptStageLabel(creativeWorkspace.promptLibrary.stage)">Brief</div>
+        </div>
+    </section>
 </div>
 
 {% set prompt_library_surface = "effects" %}

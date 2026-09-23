@@ -1,23 +1,26 @@
 {% extends "layouts/base.html" %}
 
 {% block page_header %}
-<div class="d-flex justify-content-between align-items-start mb-3">
-    <div>
+<header class="workspace-page-header">
+    <div class="workspace-page-header__copy"><div class="workspace-page-header__eyebrow">Command / Inspect</div>
         <h3 class="mb-1">全剧大纲</h3>
         <div class="small text-muted">项目 {{ project_id }} · 全剧阶段弧线与分集大纲</div>
     </div>
-    <div class="d-flex gap-2">
+    <div class="workspace-page-header__actions">
         {% include "common/workspace/project_list_back_link.html" %}
         <button class="btn btn-outline-info btn-sm" type="button" @click="openPromptLibrary('outline')" title="选择全剧大纲生成模板"><i class="bi bi-sliders me-1"></i>选择生成模板</button>
     </div>
-</div>
+</header>
 {% endblock %}
 
 {% block content %}
 {% set creative_module = "outline" %}
+<section class="workspace-context-bar" x-show="creativeWorkspace.project" x-cloak aria-label="大纲项目上下文"><div class="workspace-context-bar__primary"><div class="workspace-section-label">当前项目</div><strong x-text="creativeWorkspace.project?.name || '未命名项目'"></strong></div><div class="workspace-context-bar__meta"><span>全剧大纲</span><span x-text="creativeProjectWorkflowModeLabel(creativeWorkspace.project)"></span></div></section>
 {% include "common/workspace/project_module_navigation.html" %}
-{% include "common/workspace/project_progress.html" %}
-<template x-if="creativeWorkspace.project"><div>{% include "common/workspace/project_outlines.html" %}</div></template>
+<div class="workspace-split workspace-split--inspect">
+    <template x-if="creativeWorkspace.project"><div class="workspace-editor-pane">{% include "common/workspace/project_outlines.html" %}</div></template>
+    {% include "common/workspace/project_progress.html" %}
+</div>
 {% include "common/workspace/creative_progress_modal.html" %}
 {% include "common/workspace/free_creative_modals.html" %}
 {% include "common/workspace/outline_field_rewrite_modal.html" %}

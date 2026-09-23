@@ -1,6 +1,8 @@
 {% extends "layouts/base.html" %}
 
 {% block content %}
+<div class="workspace-page-shell" data-workspace-layout="workspace-page-header workspace-context-bar workspace-toolbar workspace-split">
 {% include "common/workspace/selection_dramas.html" %}
+</div>
 {% endblock %}
 {% block scripts %}<script src="/static/js/common/creative.js?v={{ asset_version }}"></script><script src="/static/js/selection/drama_reviews.js?v={{ asset_version }}"></script><script src="/static/js/selection/dramas.js?v={{ asset_version }}"></script>{% endblock %}

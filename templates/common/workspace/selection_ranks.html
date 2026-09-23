@@ -1,6 +1,7 @@
 <section>
-            <div class="d-flex align-items-center justify-content-between mb-3">
-                <div>
+            <header class="workspace-page-header">
+                <div class="workspace-page-header__copy">
+                    <div class="workspace-page-header__eyebrow">Selection · Rankings</div>
                     <h3 class="mb-1">今日榜单</h3>
                     <div class="text-muted small">
                         <span x-show="todayRankData?.selected_snapshot">
@@ -10,7 +11,7 @@
                         <span x-show="!todayRankData?.selected_snapshot">默认展示 PostgreSQL 最新榜单快照</span>
                     </div>
                 </div>
-                <div class="d-flex gap-2">
+                <div class="workspace-page-header__actions workspace-toolbar">
                     <div class="btn-group btn-group-sm rank-platform-toggle me-2" role="group">
                         <button type="button" class="btn btn-outline-info" :class="{active: todayRankPlatform === 'dy'}" @click="setTodayRankRoute('dy')">抖音</button>
                         <button type="button" class="btn btn-outline-info" :class="{active: todayRankPlatform === 'hg'}" @click="setTodayRankRoute('hg')">红果</button>
@@ -40,12 +41,22 @@
                         </button>
                     {% endif %}
                 </div>
+            </header>
+            <div class="workspace-context-bar">
+                <div class="workspace-context-bar__primary"><strong>Filter</strong><span class="small text-muted ms-2">平台、日期与榜单分类</span></div>
+                <div class="workspace-context-bar__meta"><span>Inspect</span><span class="small">在榜单行收录选题</span></div>
             </div>
-
-            <div class="alert alert-danger" x-show="todayRankError" x-text="todayRankError"></div>
+            <div class="workspace-split workspace-split--inspect">
+              <div class="workspace-list-pane">
+                <div class="workspace-list-pane__header"><strong>榜单结果</strong><span class="small text-muted">当前快照</span></div>
+                <div class="workspace-list-pane__body">
+            <div class="workspace-state workspace-state--loading mb-3" x-show="todayRankLoading" x-cloak role="status" aria-live="polite"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span class="workspace-state__title">正在加载榜单</span></div>
+            <div class="workspace-state workspace-state--error mb-3" x-show="todayRankError" x-cloak role="alert" x-text="todayRankError"></div>
+            <div class="workspace-state workspace-state--empty mb-3" x-show="!todayRankLoading && !todayRankError && !((todayRankData?.sections || []).some(section => section.rankings?.some(ranking => (ranking.current_entries || []).length || (ranking.previous_entries || []).length)))" x-cloak role="status"><span class="workspace-state__title">暂无榜单数据</span><span class="small">当前平台和日期没有可展示的榜单记录，请刷新后重试。</span><button type="button" class="btn btn-sm btn-outline-secondary" @click="refreshTodayRank(false)">刷新榜单</button></div>
             <div class="alert alert-info" x-show="todayRankRefreshMessage" x-text="todayRankRefreshMessage"></div>
             <div class="alert alert-secondary" x-show="!todayRankLoading && todayRankData?.message" x-text="todayRankData?.message"></div>
 
+            <div x-show="!todayRankLoading && !todayRankError && ((todayRankData?.sections || []).some(section => section.rankings?.some(ranking => (ranking.current_entries || []).length || (ranking.previous_entries || []).length)))">
             <div class="row g-3 mb-3">
                 <div class="col-md-2">
                     <div class="card metric-card"><div class="card-body"><div class="text-muted">今日榜单数</div><div class="metric-value" x-text="todayRankSummary().current_count || 0"></div></div></div>
@@ -252,8 +263,16 @@
                     </div>
                 </template>
                 <div class="col-12" x-show="!selectedHongguoRanking()">
-                    <div class="text-muted py-4">暂无数据</div>
+                    <div class="workspace-empty text-muted py-4">暂无数据</div>
                 </div>
             </div>
             </template>
+                </div>
+            </div>
+              </div>
+              <aside class="workspace-inspector">
+                <div class="workspace-inspector__header"><strong>Inspect</strong><span class="small text-muted">榜单说明</span></div>
+                <div class="workspace-inspector__body small text-muted">选择平台、日期和榜单分类查看当前快照；收录动作保留在每个榜单行中。</div>
+              </aside>
+            </div>
         </section>

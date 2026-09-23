@@ -1,13 +1,16 @@
-<div class="d-flex align-items-center justify-content-between border-bottom pb-3 mb-4">
-    <div>
+<header class="workspace-page-header">
+    <div class="workspace-page-header__copy">
+        <div class="workspace-page-header__eyebrow">Workspace · Tasks</div>
         <h3 class="mb-1" id="task-workspace-title">我的工作台</h3>
         <div class="small text-muted">集中处理项目下一步动作，并掌握创作进度</div>
     </div>
-    <button class="btn btn-outline-secondary btn-sm" id="refresh-my-tasks" title="刷新" aria-label="刷新项目列表">
-        <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
-    </button>
-</div>
-<div id="my-tasks-error" class="alert alert-danger d-none" role="alert"></div>
+    <div class="workspace-page-header__actions"><button class="btn btn-outline-secondary btn-sm" id="refresh-my-tasks" title="刷新" aria-label="刷新项目列表"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i>刷新</button></div>
+</header>
+<section class="workspace-context-bar" aria-label="我的工作台上下文">
+    <div class="workspace-context-bar__primary"><div class="workspace-section-label">Operate / Monitor</div><div class="small text-muted">按项目名称、来源选题和当前状态筛选；每张卡片保留下一步与更多操作。</div></div>
+    <div class="workspace-context-bar__meta"><span>刷新可重新加载项目状态</span></div>
+</section>
+<div id="my-tasks-error" class="workspace-state workspace-state--error d-none mb-3" role="alert" aria-live="assertive"></div>
 
 <section class="task-workspace" aria-labelledby="task-workspace-title">
     <div id="task-summary" class="task-summary-grid" aria-live="polite">
@@ -24,22 +27,21 @@
             <strong class="task-summary-value" id="task-summary-done">0</strong>
         </div>
     </div>
-    <div class="task-toolbar" role="search">
-        <label class="visually-hidden" for="task-search">搜索项目</label>
-        <input id="task-search" class="form-control" type="search" placeholder="搜索项目或来源选题">
-        <label class="visually-hidden" for="task-status-filter">筛选状态</label>
-        <select id="task-status-filter" class="form-select">
-            <option value="all">全部状态</option>
-            <option value="action">需处理</option>
-            <option value="running">进行中</option>
-            <option value="done">已完成</option>
-        </select>
+    <div class="workspace-toolbar task-toolbar" role="search" aria-label="项目筛选">
+        <div class="workspace-toolbar__group"><label class="visually-hidden" for="task-search">搜索项目</label><input id="task-search" class="form-control" type="search" placeholder="搜索项目或来源选题"></div>
+        <div class="workspace-toolbar__group workspace-toolbar__group--compact"><label class="visually-hidden" for="task-status-filter">筛选状态</label><select id="task-status-filter" class="form-select"><option value="all">全部状态</option><option value="action">需处理</option><option value="running">进行中</option><option value="done">已完成</option></select></div>
     </div>
-    <div id="my-project-list" class="task-card-grid" aria-busy="true">
-        <div id="my-tasks-skeleton" class="task-card task-card-skeleton" aria-hidden="true">
-            <div class="ui-skeleton task-skeleton-title"></div>
-            <div class="ui-skeleton task-skeleton-line"></div>
-            <div class="ui-skeleton task-skeleton-line task-skeleton-line-short"></div>
+    <div class="workspace-list-pane">
+        <div class="workspace-list-pane__header"><div><div class="workspace-section-label">项目列表</div><strong>待处理项目</strong></div><span class="small text-muted">筛选结果会即时更新</span></div>
+        <div class="workspace-list-pane__body">
+            <div id="my-project-list" class="task-card-grid" aria-busy="true" aria-live="polite">
+                <div id="my-tasks-skeleton" class="task-card task-card-skeleton workspace-state workspace-state--loading" role="status">
+                    <span class="visually-hidden">正在加载项目列表</span>
+                    <div class="ui-skeleton task-skeleton-title"></div>
+                    <div class="ui-skeleton task-skeleton-line"></div>
+                    <div class="ui-skeleton task-skeleton-line task-skeleton-line-short"></div>
+                </div>
+            </div>
         </div>
     </div>
 </section>

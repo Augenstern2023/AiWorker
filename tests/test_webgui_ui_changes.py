@@ -2443,7 +2443,9 @@ def test_existing_breakdown_opens_without_generation_and_regeneration_is_explici
     assert "llm_model_record_id" in html
     assert "startTranscriptBreakdown(topic, source, true)" in html
     assert "Boolean(topic?.locked_breakdown_id)" not in html
-    assert "return this.startTranscriptBreakdown(\n                        topic,\n                        'topic-library'\n                    );" in html
+    assert "if (!topic?.latest_breakdown_id)" in html
+    assert "`/api/creative/breakdowns/${encodeURIComponent(topic.latest_breakdown_id)}`" in html
+    assert "this.openBreakdownEditor('topic-library', topic.title, record)" in html
     assert "return this.startTranscriptBreakdown(\n                        topic,\n                        'creative'\n                    );" in html
     assert ">更新拆解</button>" in html
 

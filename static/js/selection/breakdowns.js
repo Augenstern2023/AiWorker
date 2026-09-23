@@ -42,11 +42,25 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
-                createTopicLibraryBreakdown(topic) {
-                    return this.startTranscriptBreakdown(
-                        topic,
-                        'topic-library'
-                    );
+                async createTopicLibraryBreakdown(topic) {
+                    if (!topic?.latest_breakdown_id) {
+                        return this.startTranscriptBreakdown(
+                            topic,
+                            'topic-library'
+                        );
+                    }
+                    this.topicLibrary.error = '';
+                    try {
+                        const res = await aiworkerApi.request(
+                            `/api/creative/breakdowns/${encodeURIComponent(topic.latest_breakdown_id)}`
+                        );
+                        const record = await res.json();
+                        if (!res.ok) throw new Error(record.detail || '读取拆解失败');
+                        this.topicLibrary.breakdown = record;
+                        this.openBreakdownEditor('topic-library', topic.title, record);
+                    } catch (error) {
+                        this.topicLibrary.error = error.message || '读取拆解失败';
+                    }
                 },
 
                 topicProjectEligible(topic) {

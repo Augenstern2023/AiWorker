@@ -19,6 +19,65 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).parents[1]
 
 
+def test_existing_topic_breakdown_opens_preview_without_generation() -> None:
+    script = ROOT / "static/js/selection/breakdowns.js"
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.evaluate("window.aiworkerModules = []")
+        page.add_script_tag(path=script)
+        result = page.evaluate(
+            """
+            async () => {
+              const requests = [];
+              window.aiworkerApi = {
+                async request(url) {
+                  requests.push(url);
+                  return {
+                    ok: true,
+                    async json() {
+                      return {id: 23, topic_id: 7, status: 'draft', content: {title: '已有拆解'}};
+                    }
+                  };
+                }
+              };
+              const methods = window.aiworkerModules.at(-1)();
+              const state = Object.assign({}, methods, {
+                topicLibrary: {error: '', breakdown: null},
+                startTranscriptBreakdown() {
+                  throw new Error('已有拆解不应进入生成流程');
+                },
+                openBreakdownEditor(source, title, record) {
+                  this.opened = {source, title, record};
+                }
+              });
+
+              await state.createTopicLibraryBreakdown({
+                id: 7,
+                title: '已拆解剧目',
+                latest_breakdown_id: 23
+              });
+              return {requests, opened: state.opened, breakdown: state.topicLibrary.breakdown};
+            }
+            """
+        )
+
+        assert result["requests"] == ["/api/creative/breakdowns/23"]
+        assert result["opened"] == {
+            "source": "topic-library",
+            "title": "已拆解剧目",
+            "record": {
+                "id": 23,
+                "topic_id": 7,
+                "status": "draft",
+                "content": {"title": "已有拆解"},
+            },
+        }
+        assert result["breakdown"]["id"] == 23
+        browser.close()
+
+
 def test_breakdown_generation_selects_and_submits_model_record() -> None:
     modal = (ROOT / "templates/common/workspace/breakdown_modals.html").read_text(
         encoding="utf-8"

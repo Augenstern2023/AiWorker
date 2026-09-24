@@ -514,6 +514,8 @@ def build_script_optimization_router(
             if payload is not None and not payload.lock_after_accept:
                 raise ValueError("优化草稿必须锁定并采纳")
             accepted_content = payload.content if payload and payload.content is not None else draft["content"]
+            if draft["kind"] == "beats":
+                accepted_content = validate_beats(accepted_content, allow_legacy=True)
             free_mode = str(project.get("workflow_mode") or "sequential") == "free"
             free_service = FreeCreativeModeService(repository) if free_mode else None
             created_head: dict[str, Any] | None = None

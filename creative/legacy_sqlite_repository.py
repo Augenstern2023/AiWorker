@@ -5305,6 +5305,7 @@ class CreativeRepository:
         expected_authority: dict[str, Any] | None = None,
         reject_if_locked: bool = False,
     ) -> dict[str, Any]:
+        content = validate_beats(content, allow_legacy=True)
         request_hash = self._operation_request_hash(
             project_id=project_id,
             stage="beats",

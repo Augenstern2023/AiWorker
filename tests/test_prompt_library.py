@@ -1314,12 +1314,24 @@ def test_included_examples_and_parameter_overrides_reach_effective_instruction()
         content=template,
         stage="beats",
         mode="single",
-        override={"parameters": {"max_beats": 4}},
+        override={"parameters": {"max_beats": 3}},
     )
 
-    assert '"max_beats":4' in snapshot["effective_instruction"]
+    assert '"max_beats":3' in snapshot["effective_instruction"]
     assert "模板示例（节拍力度）" in snapshot["effective_instruction"]
     assert "误会必须引发一次可见的关系变化" in snapshot["effective_instruction"]
+
+    with pytest.raises(ValueError, match="max_beats 必须为 1-3"):
+        compose_prompt_snapshot(
+            template_id="system:generic-vertical-short",
+            template_key=template["key"],
+            title=template["title"],
+            revision=1,
+            content=template,
+            stage="beats",
+            mode="single",
+            override={"parameters": {"max_beats": 4}},
+        )
 
 
 @pytest.mark.parametrize(

@@ -18,6 +18,7 @@ from typing import Any
 from creative.outline_fields import outline_field_source_fingerprint
 from creative.prompt_templates import PROMPT_TEMPLATE_VERSION
 from creative.repository import CreativeRepository, canonical_request_hash
+from creative.script_service import validate_beats
 
 
 FREE_SCOPE = "free"
@@ -674,11 +675,22 @@ class FreeCreativeModeService:
         stage = self._assert_stage(stage)
         if stage not in {"beats", "script"}:
             raise ValueError("episode resource stage must be beats or script")
+        if stage == "beats" and (content.get("beats") or []):
+            validate_beats(content, allow_legacy=True)
         with self.repository._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             project = self._raw_project(conn, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
+            if stage == "beats":
+                row = conn.execute(
+                    "SELECT content_json FROM creative_episodes WHERE id = ? AND project_id = ? "
+                    "AND resource_scope = 'free' AND stage = 'beats'",
+                    (int(resource_ref), int(project_id)),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("自由创作资源不存在或无法锁定")
+                validate_beats(json.loads(row["content_json"]), allow_legacy=True)
             number = int(episode_number)
             if not 1 <= number <= int(project["target_episode_count"]):
                 raise ValueError("集数超出项目范围")
@@ -1036,6 +1048,8 @@ class FreeCreativeModeService:
                 resource = dict(resource_row)
                 if resource["status"] not in {"draft", "locked", "approved"}:
                     raise ValueError(f"第 {episode_number} 集当前 {label} 无法锁定")
+                if stage == "beats":
+                    validate_beats(json.loads(resource["content_json"]), allow_legacy=True)
                 records.append((episode_number, head, resource))
 
             now = time.time()

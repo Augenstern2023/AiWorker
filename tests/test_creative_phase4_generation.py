@@ -1164,17 +1164,26 @@ async def test_beats_generation_requires_change_cost_tactic_and_continuity_updat
 
 
 @pytest.mark.asyncio
-async def test_beats_generation_limits_an_episode_to_six_beats():
+async def test_beats_generation_limits_an_episode_to_three_beats():
     beat = {
         "scene": "大厅", "characters": ["周晴"], "goal": "说服居民", "obstacle": "无人信任",
         "emotion_change": "克制到坚定", "turn": "证据出现", "hook": "对手到场",
         "state_change": "居民改变态度", "cost": "周晴失去资格", "opposition_tactic": "公开质疑",
         "continuity_updates": [],
     }
-    invalid_payload = {"beats": [{**beat, "order": number} for number in range(1, 8)]}
+    valid_payload = {"beats": [{**beat, "order": number} for number in range(1, 4)]}
+    assert len(validate_beats(valid_payload)["beats"]) == 3
+    invalid_payload = {"beats": [{**beat, "order": number} for number in range(1, 5)]}
 
-    with pytest.raises(ValueError, match="1-6"):
+    with pytest.raises(ValueError, match="1-3"):
         validate_beats(invalid_payload)
+
+
+def test_legacy_beats_are_readable_within_limit_but_not_when_over_limit():
+    legacy = [{"order": number} for number in range(1, 4)]
+    assert validate_beats({"beats": legacy}, allow_legacy=True) == {"beats": legacy}
+    with pytest.raises(ValueError, match="1-3"):
+        validate_beats({"beats": legacy + [{"order": 4}]}, allow_legacy=True)
 
 
 def test_continuity_ledger_carries_the_latest_prop_state_across_episodes():

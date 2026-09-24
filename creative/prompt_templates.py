@@ -212,7 +212,7 @@ def beats_messages(
         f"为第 {episode_number} 集生成 Beats。顶层必须返回 JSON 对象，严格使用 {{\"beats\": [...]}} 格式，"
         "不得直接输出数组。beats 数组每项包含 order、scene、characters、"
         "goal、obstacle、emotion_change、turn、hook、state_change、cost、opposition_tactic、continuity_updates。"
-        "每集只能生成 1-6 个 Beats，order 必须从 1 连续编号。continuity_updates 是数组；每项包含 "
+        "每集只能生成 1-3 个 Beats，order 必须从 1 连续编号。continuity_updates 是数组；每项包含 "
         "kind、name、event、holder、location、known_by、status，用于登记关键道具或关键信息的状态变化。"
         "不得重复使用录音、报警或口头反击结束同类冲突。不得生成完整正文或完整台词。" + DRAMA_CONSTRAINTS,
         prompt_snapshot,
@@ -232,7 +232,7 @@ def beats_chunk_messages(
         f"批量生成第 {start}-{end} 集 Beats。顶层必须返回 {{\"episodes\":[...]}}；episodes 必须完整覆盖 "
         f"第 {start}-{end} 集，每项包含 episode 和 beats。beats 数组每项包含 order、scene、characters、"
         "goal、obstacle、emotion_change、turn、hook、state_change、cost、opposition_tactic、continuity_updates。"
-        "每集只能生成 1-6 个 Beats，order 必须从 1 连续编号。continuity_updates 是数组；每项包含 "
+        "每集只能生成 1-3 个 Beats，order 必须从 1 连续编号。continuity_updates 是数组；每项包含 "
         "kind、name、event、holder、location、known_by、status。必须让本批后续集承接前一集的状态变化，"
         "并严格对应同集 locked_outlines 中的核心事件、冲突、人物推进、反转和悬念。"
         "不得重复使用录音、报警或口头反击结束同类冲突；不得生成完整正文或完整台词。" + DRAMA_CONSTRAINTS,

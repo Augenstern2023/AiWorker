@@ -153,11 +153,11 @@ def test_creative_includes_render_explicit_component_surfaces():
     expected = {
         "planning/brief.html": {
             "workspace-stage-editor--brief", "workspace-prose-editor",
-            "creative-direction-grid",
+            "workspace-card-grid", "workspace-blueprint-card", "creative-direction-grid",
         },
         "planning/characters.html": {
             "workspace-stage-editor--characters", "workspace-prose-editor",
-            "workspace-scroll-x",
+            "workspace-card-grid", "character-card", "relationship-card",
         },
         "writing/outlines.html": {
             "workspace-stage-editor--outlines", "workspace-card-grid",

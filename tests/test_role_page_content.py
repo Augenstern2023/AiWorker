@@ -319,11 +319,11 @@ def test_creative_includes_keep_component_class_contracts_explicit():
     expected = {
         "project_blueprints.html": {
             "workspace-stage-editor--brief", "workspace-prose-editor",
-            "creative-direction-grid",
+            "workspace-card-grid", "workspace-blueprint-card", "creative-direction-grid",
         },
         "project_characters.html": {
             "workspace-stage-editor--characters", "workspace-prose-editor",
-            "workspace-scroll-x",
+            "workspace-card-grid", "character-card", "relationship-card",
         },
         "project_outlines.html": {
             "workspace-stage-editor--outlines", "workspace-card-grid",

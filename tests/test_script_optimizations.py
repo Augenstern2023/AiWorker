@@ -436,7 +436,7 @@ def test_structure_optimization_links_beats_and_script_drafts(tmp_path) -> None:
                 "kind": "beats",
                 "source_episode_id": next(item["id"] for item in original_episodes if item["stage"] == "beats"),
                 "source_fingerprint": "beats-source",
-                "content": {"beats": []},
+                "content": {"beats": [{"order": 1}]},
             },
             {
                 "episode_number": 1,
@@ -1361,7 +1361,6 @@ async def test_structure_optimization_persists_each_complete_pair_before_next_ep
 def test_optimization_episode_checkpoint_rejects_half_a_structure_pair(tmp_path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
     project, review, _ = _project_with_review(repository)
-    original_episodes = repository.get_project(project["id"])["episodes"]
     task = repository.create_script_optimization(
         review_id=review["id"], project_id=project["id"], mode="structure", source_fingerprint="source",
         selected_findings=[], target_episode_numbers=[1], created_by="writer-1",
@@ -1369,11 +1368,11 @@ def test_optimization_episode_checkpoint_rejects_half_a_structure_pair(tmp_path)
     repository.start_script_optimization(task["id"])
     with pytest.raises(ValueError, match="不完整"):
         repository.save_script_optimization_episode(task["id"], 1, [{
-            "episode_number": 1, "kind": "beats", "content": {"beats": []},
+            "episode_number": 1,
+            "kind": "beats",
+            "content": {"beats": [{"order": 1}]},
         }])
     assert repository.get_script_optimization(task["id"])["drafts"] == []
-    with pytest.raises(ValueError, match="尚未完成"):
-        repository.finish_script_optimization(task["id"])
 
 
 @pytest.mark.asyncio

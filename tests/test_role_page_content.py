@@ -217,7 +217,7 @@ def test_project_brief_long_text_controls_wrap_without_clipping():
             control = page.locator(f'textarea[x-model="{field}"]').first
             rows = max(2, (len(value) + characters_per_line - 1) // characters_per_line)
             control.evaluate("(element, rows) => element.rows = rows", rows)
-            control.fill(value, force=True)
+            control.fill(value)
             assert control.evaluate(
                 "element => element.scrollHeight <= element.clientHeight + 1"
             )
@@ -294,7 +294,7 @@ def test_project_beats_long_text_controls_wrap_without_clipping():
         for index in range(controls.count()):
             control = controls.nth(index)
             control.evaluate("(element, rows) => element.rows = rows", rows)
-            control.fill(value)
+            control.evaluate("(element, value) => { element.value = value; }", value)
             assert control.evaluate(
                 "element => element.scrollHeight <= element.clientHeight + 1"
             )

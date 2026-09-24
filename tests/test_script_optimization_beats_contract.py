@@ -62,6 +62,42 @@ def test_scene_limit_overflow_flag_is_only_forwarded_by_beats_route() -> None:
     assert "allow_scene_limit_overflow=payload.allow_scene_limit_overflow" in beats_route
 
 
+def test_beats_editor_exposes_return_and_standard_revision_actions() -> None:
+    root = Path(__file__).parents[1]
+    template = (root / "templates/common/workspace/project_beats.html").read_text(
+        encoding="utf-8"
+    )
+    generation = (root / "static/js/common/creative_generation.js").read_text(
+        encoding="utf-8"
+    )
+    creative = (root / "static/js/common/creative.js").read_text(encoding="utf-8")
+
+    assert ':href="beatsBackUrl()"' in template
+    assert "beatsBackLabel()" in template
+    assert "返回全集 Beats" in creative
+    assert "返回分集大纲" in creative
+    assert "基于此版本新建" in template
+    assert "async createProjectBeatsRevision()" in generation
+    assert "/episodes/${episodeNumber}/beats" in generation
+    assert "replaces_resource_id: String(item.id)" in generation
+    assert "expected_project_revision: Number(project.revision || 0)" in generation
+    assert "allow_scene_limit_overflow: sceneCount > 3" in generation
+
+
+def test_revision_overflow_flag_is_not_forwarded_to_non_beats_repository_writes() -> None:
+    source = (Path(__file__).parents[1] / "creative/application_service.py").read_text(
+        encoding="utf-8"
+    )
+    create_revision = source.split("    def create_revision(", 1)[1].split(
+        "    def _snapshot_extra(", 1
+    )[0]
+    characters_call = create_revision.split(
+        "self.repository.create_character_batch(", 1
+    )[1].split(")", 1)[0]
+
+    assert "allow_scene_limit_overflow" not in characters_call
+
+
 @pytest.mark.parametrize(
     ("path", "method", "transaction_call"),
     [

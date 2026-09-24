@@ -229,6 +229,8 @@ def test_episode_workspace_all_view_and_multi_download_modal(
             # only the secondary analysis is behind an explicit disclosure.
             assert page.locator(".beats-all-scene-details").count() >= 2
             assert page.get_by_text(expected_text).is_visible()
+            back_link = page.get_by_role("link", name="返回分集大纲")
+            assert back_link.get_attribute("href") == "/outline/0"
         else:
             assert page.get_by_text(expected_text, exact=True).is_visible()
         page.get_by_role("button", name="多集/全集下载").first.click()
@@ -686,6 +688,8 @@ def test_beats_focus_editor_selects_and_updates_the_original_scene() -> None:
         )
         page.add_script_tag(path=alpine_script)
         page.locator(".beats-focus-editor").wait_for(state="visible")
+        back_link = page.get_by_role("link", name="返回全集 Beats")
+        assert back_link.get_attribute("href") == "/writing/projects/9/episodes/1/beats?episode=all"
         page.locator("details.beats-secondary-details").evaluate("element => element.open = true")
 
         scene_rail = page.locator(".beats-scene-rail-item")

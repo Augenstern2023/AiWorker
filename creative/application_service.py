@@ -942,7 +942,6 @@ class CreativeApplicationService:
                     replaces_resource_id=replaces_resource_id,
                     expected_project_revision=expected_project_revision,
                     expected_authority=expected_authority,
-                    allow_scene_limit_overflow=allow_scene_limit_overflow,
                 )
             elif stage == "outline":
                 resource = self.repository.create_outline_batch(

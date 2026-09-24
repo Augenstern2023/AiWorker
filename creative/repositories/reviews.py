@@ -71,7 +71,7 @@ from creative.database_schema import (
     script_reviews,
 )
 from creative.repositories.base import jsonb_copy, utc_now
-from creative.script_service import normalize_script_content
+from creative.script_service import normalize_script_content, validate_beats
 
 
 def _review_request_key(row: Mapping[str, Any]) -> str:
@@ -150,90 +150,6 @@ class ReviewsRepository:
                 select(script_reviews).where(script_reviews.c.id == int(review_id))
             ).mappings().one_or_none()
         return self._script_review(self.row_dict(row)) if row is not None else {}
-
-    def create_script_review_rerun_once(
-        self,
-        *,
-        source_type: str,
-        mode: str,
-        project_id: int | None,
-        episode_numbers: list[int],
-        source_fingerprint: str,
-        source_payload: dict[str, Any],
-        created_by: str,
-        parent_review_id: int,
-        request_key: str,
-        rerun_scope: str,
-    ) -> tuple[dict[str, Any], bool]:
-        """Create one immutable rerun under a parent with transaction-safe idempotency."""
-
-        normalized_key = str(request_key).strip()
-        if int(parent_review_id) < 1 or not normalized_key:
-            raise ValueError("复审请求缺少父审核或幂等键")
-        execution = dict(source_payload.get("execution_snapshot") or {})
-        if (
-            int(execution.get("parent_review_id") or 0) != int(parent_review_id)
-            or str(execution.get("request_key") or "") != normalized_key
-            or str(execution.get("rerun_scope") or "") != str(rerun_scope)
-        ):
-            raise ValueError("复审执行快照与请求不一致")
-
-        now = utc_now()
-        with self.transaction_scope() as connection:
-            parent = connection.execute(
-                select(script_reviews.c.id)
-                .where(script_reviews.c.id == int(parent_review_id))
-                .with_for_update()
-            ).scalar_one_or_none()
-            if parent is None:
-                raise ValueError("复审引用的上一版本不存在")
-            candidates = connection.execute(
-                select(script_reviews)
-                .where(script_reviews.c.created_by == created_by)
-                .order_by(script_reviews.c.id.asc())
-            ).mappings().all()
-            for candidate in candidates:
-                existing = self._script_review(self.row_dict(candidate))
-                saved_execution = dict(
-                    (existing.get("source_payload") or {}).get("execution_snapshot")
-                    or {}
-                )
-                if (
-                    int(saved_execution.get("parent_review_id") or 0)
-                    != int(parent_review_id)
-                    or str(saved_execution.get("request_key") or "") != normalized_key
-                ):
-                    continue
-                if str(saved_execution.get("rerun_scope") or "") != str(rerun_scope):
-                    raise ValueError("该幂等键已用于不同的复审范围")
-                if str(existing.get("source_fingerprint") or "") != str(
-                    source_fingerprint
-                ):
-                    raise ValueError("该幂等键已用于不同的剧本快照")
-                return existing, False
-
-            review_id = connection.execute(
-                insert(script_reviews)
-                .values(
-                    project_id=project_id,
-                    source_type=source_type,
-                    mode=mode,
-                    episode_numbers_json=jsonb_copy(episode_numbers),
-                    source_fingerprint=source_fingerprint,
-                    source_payload_json=jsonb_copy(source_payload),
-                    created_by=created_by,
-                    created_at=now,
-                    updated_at=now,
-                )
-                .returning(script_reviews.c.id)
-            ).scalar_one()
-            row = connection.execute(
-                select(script_reviews).where(script_reviews.c.id == int(review_id))
-            ).mappings().one_or_none()
-        return (
-            self._script_review(self.row_dict(row)) if row is not None else {},
-            True,
-        )
 
     def create_project_review_once(
         self,
@@ -740,6 +656,15 @@ class ReviewsRepository:
     ) -> dict[str, Any]:
         """Commit a whole episode before the next model request starts."""
 
+        validated_drafts: list[dict[str, Any]] = []
+        for draft in drafts:
+            normalized = dict(draft)
+            if str(normalized.get("kind") or "") == "beats":
+                normalized["content"] = validate_beats(
+                    normalized.get("content") or {}, allow_legacy=True
+                )
+            validated_drafts.append(normalized)
+        drafts = validated_drafts
         now = utc_now()
         with self.transaction_scope() as connection:
             row = connection.execute(
@@ -847,6 +772,15 @@ class ReviewsRepository:
         optimization = self.get_script_optimization(optimization_id)
         if not optimization:
             raise ValueError("优化任务不存在")
+        validated_drafts: list[dict[str, Any]] = []
+        for draft in drafts:
+            normalized = dict(draft)
+            if str(normalized.get("kind") or "") == "beats":
+                normalized["content"] = validate_beats(
+                    normalized.get("content") or {}, allow_legacy=True
+                )
+            validated_drafts.append(normalized)
+        drafts = validated_drafts
         now = utc_now()
         # Draft rows, the structure peer links and the task status land in one
         # transaction: a partially written optimization must never be readable.

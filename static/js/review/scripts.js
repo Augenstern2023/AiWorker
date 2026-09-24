@@ -12,9 +12,10 @@
     const reviewPromptTemplate = document.getElementById('script-review-prompt-template');
     const reviewPromptRequirements = document.getElementById('script-review-prompt-requirements');
     const reviewPromptDescription = document.getElementById('script-review-prompt-description');
-    const reviewEngine = document.getElementById('script-review-engine');
-    const reviewModelProfileWrap = document.getElementById('script-review-model-profile-wrap');
-    const reviewModelProfile = document.getElementById('script-review-model-profile');
+    const reviewMethodInputs = [...document.querySelectorAll('input[name="script-review-method"]')];
+    const localReviewMethodInput = document.getElementById('script-review-method-local');
+    const localReviewMethodBadge = document.getElementById('script-review-method-local-badge');
+    const reviewMethodStatus = document.getElementById('script-review-method-status');
     const submit = document.getElementById('script-review-submit');
     const result = document.getElementById('script-review-result');
     const history = document.getElementById('script-review-history');
@@ -26,6 +27,8 @@
     const reviewProgressBar = document.getElementById('script-review-progress-bar');
     const reviewProgressElapsed = document.getElementById('script-review-progress-elapsed');
     const reviewProgressError = document.getElementById('script-review-progress-error');
+    const reviewProgressLogs = document.getElementById('script-review-progress-logs');
+    const reviewProgressLogCount = document.getElementById('script-review-progress-log-count');
     const reviewProgressViewReport = document.getElementById('script-review-progress-view-report');
     const optimizationProgressElement = document.getElementById('scriptOptimizationProgressModal');
     const optimizationProgressScope = document.getElementById('script-optimization-progress-scope');
@@ -42,8 +45,10 @@
     let selectedProject = null;
     const optimizationTimers = new Map();
     const reviewPollTimers = new Map();
-    const reviewProgress = { reviewId: null, startedAt: 0, elapsedTimer: null };
+    const reviewProgress = { reviewId: null, jobId: null, startedAt: 0, elapsedTimer: null, logs: [], logLoading: false };
     const optimizationProgress = { optimizationId: null, startedAt: 0, elapsedTimer: null };
+    const reviewMethodStorageKey = 'aiworker.scriptReview.method';
+    let localReviewCapability = { available: false, installed: false, state: 'checking', message: '正在检查本地初审' };
     const reviewProgressModal = reviewProgressElement && window.bootstrap
         ? window.bootstrap.Modal.getOrCreateInstance(reviewProgressElement)
         : null;
@@ -58,6 +63,100 @@
         error.classList.toggle('d-none', !message);
     }
 
+    function reviewMethodValue(value) {
+        if (typeof value === 'string') return value === 'local' ? 'local' : 'complete';
+        if (value?.review_method === 'local' || value?.source_payload?.review_method === 'local') return 'local';
+        return value?.report?.engine === 'semif' ? 'local' : 'complete';
+    }
+
+    function reviewMethodLabel(value) {
+        return reviewMethodValue(value) === 'local' ? '本地初审' : '完整审核';
+    }
+
+    function selectedReviewMethod() {
+        return reviewMethodInputs.find((input) => input.checked)?.value === 'local' ? 'local' : 'complete';
+    }
+
+    function rememberReviewMethod(value) {
+        try { window.localStorage.setItem(reviewMethodStorageKey, reviewMethodValue(value)); } catch (_error) { /* browser storage is optional */ }
+    }
+
+    function selectReviewMethod(value, remember = true) {
+        const normalized = reviewMethodValue(value);
+        reviewMethodInputs.forEach((input) => { input.checked = input.value === normalized; });
+        if (remember) rememberReviewMethod(normalized);
+        syncReviewMethodUi();
+    }
+
+    function syncReviewMethodUi() {
+        const local = selectedReviewMethod() === 'local';
+        if (reviewMethodStatus) {
+            reviewMethodStatus.textContent = local
+                ? localReviewCapability.message
+                : '完整审核将提供问题分析、原文依据和修改建议。';
+            reviewMethodStatus.className = `small mt-2 ${localReviewCapability.state === 'error' && local ? 'text-danger' : 'text-muted'}`;
+        }
+    }
+
+    function applyLocalReviewCapability(status) {
+        localReviewCapability = status || localReviewCapability;
+        const state = localReviewCapability.state || 'unavailable';
+        const styles = {
+            ready: ['text-bg-success', '已就绪'],
+            starting: ['text-bg-warning', '准备中'],
+            stopped: ['text-bg-secondary', '使用时准备'],
+            error: ['text-bg-danger', '启动失败'],
+            unavailable: ['text-bg-secondary', '不可用'],
+            checking: ['text-bg-secondary', '检查中'],
+        };
+        const [badgeClass, badgeText] = styles[state] || styles.unavailable;
+        if (localReviewMethodBadge) {
+            localReviewMethodBadge.className = `badge ${badgeClass} ms-1`;
+            localReviewMethodBadge.textContent = badgeText;
+        }
+        if (localReviewMethodInput) localReviewMethodInput.disabled = localReviewCapability.installed === false;
+        if (localReviewCapability.installed === false && selectedReviewMethod() === 'local') {
+            selectReviewMethod('complete');
+        } else {
+            syncReviewMethodUi();
+        }
+    }
+
+    async function loadReviewCapabilities() {
+        const payload = await readJson(await aiworkerApi.request('/api/script-reviews/capabilities'));
+        applyLocalReviewCapability(payload.methods?.local);
+        return localReviewCapability;
+    }
+
+    function delay(milliseconds) {
+        return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+    }
+
+    async function prepareLocalReview() {
+        if (localReviewCapability.available) return;
+        applyLocalReviewCapability(await readJson(await aiworkerApi.request('/api/script-reviews/local-runtime/start', { method: 'POST' })));
+        for (let attempt = 0; attempt < 180; attempt += 1) {
+            await delay(2000);
+            const status = await loadReviewCapabilities();
+            if (status.available) return;
+            if (['error', 'unavailable'].includes(status.state)) break;
+        }
+        throw new Error(localReviewCapability.message || '本地初审暂不可用');
+    }
+
+    async function resolveReviewMethodForSubmission() {
+        if (selectedReviewMethod() !== 'local') return 'complete';
+        try {
+            await prepareLocalReview();
+            return 'local';
+        } catch (runtimeError) {
+            const useComplete = window.confirm(`${runtimeError.message}\n\n是否改用完整审核？`);
+            if (!useComplete) throw runtimeError;
+            selectReviewMethod('complete');
+            return 'complete';
+        }
+    }
+
     async function readJson(response) {
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.detail || '请求失败');
@@ -68,26 +167,12 @@
         return { queued: '等待审核', running: '审核中', cancelled: '已取消', pending_confirmation: '待人工确认', confirmed: '已确认', stale: '已过期', failed: '审核失败' }[value] || value || '-';
     }
 
-    function qualityLabel(value) {
-        return { passed: '质量通过', needs_revision: '修改后复审', rejected: '未通过', manual_review: '人工复核' }[value] || value || '-';
-    }
-
-    function safeLocalUrl(value) {
-        const raw = String(value || '');
-        try {
-            const origin = window.location.origin === 'null' ? 'http://aiworker.local' : window.location.origin;
-            const parsed = new URL(raw, origin);
-            if (raw.startsWith('/') && !raw.startsWith('//') && !raw.includes('\\') && parsed.origin === origin) return `${parsed.pathname}${parsed.search}${parsed.hash}`;
-        } catch (_error) { return ''; }
-        return '';
-    }
-
     function reviewScope(payload) {
-        if (payload.source_type === 'text') return '剧本文件 · 单集审核';
+        if (payload.source_type === 'text') return `${reviewMethodLabel(payload)} · 剧本文件 · 单集审核`;
         const projectName = reviewProjects.find((item) => Number(item.id) === Number(payload.project_id))?.name || '创作项目';
         const modeName = { single: '单集', multiple: '多集', collection: '合集' }[payload.mode] || '剧本';
         const selected = payload.episode_numbers || [];
-        return `${projectName} · ${modeName}${selected.length ? ` · ${selected.map((number) => `第 ${number} 集`).join('、')}` : ''}`;
+        return `${reviewMethodLabel(payload)} · ${projectName} · ${modeName}${selected.length ? ` · ${selected.map((number) => `第 ${number} 集`).join('、')}` : ''}`;
     }
 
     function formatReviewElapsed(milliseconds) {
@@ -101,10 +186,75 @@
         reviewProgressElapsed.textContent = `已等待 ${formatReviewElapsed(Date.now() - reviewProgress.startedAt)}`;
     }
 
+    function resetReviewProgressLogs() {
+        reviewProgress.jobId = null;
+        reviewProgress.logs = [];
+        reviewProgress.logLoading = false;
+        if (reviewProgressLogCount) reviewProgressLogCount.textContent = '';
+        if (reviewProgressLogs) {
+            const empty = document.createElement('div');
+            empty.className = 'text-muted p-2';
+            empty.textContent = '等待日志...';
+            reviewProgressLogs.replaceChildren(empty);
+        }
+    }
+
+    function renderReviewProgressLogs(logs) {
+        if (!reviewProgressLogs) return;
+        const normalized = Array.isArray(logs) ? logs.map((line) => String(line)) : [];
+        if (reviewProgressLogCount) reviewProgressLogCount.textContent = normalized.length ? `共 ${normalized.length} 条` : '';
+        if (normalized.length === reviewProgress.logs.length && normalized.every((line, index) => line === reviewProgress.logs[index])) return;
+        const nearBottom = reviewProgressLogs.scrollHeight - reviewProgressLogs.scrollTop - reviewProgressLogs.clientHeight < 32;
+        const prefixMatches = reviewProgress.logs.length <= normalized.length
+            && reviewProgress.logs.every((line, index) => line === normalized[index]);
+        const additions = prefixMatches ? normalized.slice(reviewProgress.logs.length) : normalized;
+        if (!prefixMatches) reviewProgressLogs.replaceChildren();
+        if (!normalized.length) {
+            const empty = document.createElement('div');
+            empty.className = 'text-muted p-2';
+            empty.textContent = '等待日志...';
+            reviewProgressLogs.replaceChildren(empty);
+        } else {
+            if (!reviewProgress.logs.length && prefixMatches) reviewProgressLogs.replaceChildren();
+            additions.forEach((line) => {
+                const row = document.createElement('div');
+                row.className = `log-line${line.includes('[ERROR]') ? ' text-danger' : line.includes('[WARNING]') ? ' text-warning' : ''}`;
+                row.textContent = line;
+                reviewProgressLogs.append(row);
+            });
+        }
+        reviewProgress.logs = normalized;
+        if (nearBottom || !prefixMatches) reviewProgressLogs.scrollTop = reviewProgressLogs.scrollHeight;
+    }
+
+    async function syncReviewProgressLogs(review) {
+        const jobId = String(review?.job_id || reviewProgress.jobId || '');
+        if (!jobId || reviewProgress.logLoading) return;
+        if (reviewProgress.jobId !== jobId) {
+            resetReviewProgressLogs();
+            reviewProgress.jobId = jobId;
+        }
+        reviewProgress.logLoading = true;
+        try {
+            const payload = await readJson(await aiworkerApi.request(`/api/jobs/${encodeURIComponent(jobId)}/logs`));
+            renderReviewProgressLogs(payload.logs || []);
+        } catch (_error) {
+            if (!reviewProgress.logs.length && reviewProgressLogs) {
+                const unavailable = document.createElement('div');
+                unavailable.className = 'text-warning p-2';
+                unavailable.textContent = '暂时无法读取运行日志，审核任务仍会继续。';
+                reviewProgressLogs.replaceChildren(unavailable);
+            }
+        } finally {
+            reviewProgress.logLoading = false;
+        }
+    }
+
     function showReviewProgress(scope = '') {
         if (!reviewProgressModal) return;
         reviewProgress.reviewId = null;
         reviewProgress.startedAt = Date.now();
+        resetReviewProgressLogs();
         if (reviewProgressScope) reviewProgressScope.textContent = scope;
         if (reviewProgressStatus) {
             reviewProgressStatus.className = 'alert alert-info py-2';
@@ -129,6 +279,7 @@
 
     function updateReviewProgress(review, message = '') {
         if (!reviewProgressModal || reviewProgress.reviewId !== review.id) return;
+        if (review.job_id) reviewProgress.jobId = String(review.job_id);
         const isRunning = ['queued', 'running'].includes(review.status);
         const completed = review.status === 'pending_confirmation';
         const cancelled = review.status === 'cancelled';
@@ -415,6 +566,7 @@
         episodes.classList.toggle('d-none', uploading || mode.value === 'collection');
         mode.disabled = uploading;
         if (uploading) mode.value = 'single';
+        syncReviewMethodUi();
         renderEpisodes();
     }
 
@@ -488,24 +640,23 @@
             return;
         }
         submit.disabled = true;
-        const payload = source.value === 'text'
-            ? { source_type: 'text', mode: 'single', engine: reviewEngine?.value || 'legacy' }
-            : {
-                source_type: 'project', mode: mode.value, project_id: Number(project.value),
-                episode_numbers: selectedEpisodes(),
-                engine: reviewEngine?.value || 'legacy',
-                ...(reviewEngine?.value === 'semif' ? { model_profile: String(reviewModelProfile?.value || 'local-default').trim() } : {}),
-                ...promptSelectionPayload(reviewPromptTemplate, reviewPromptRequirements),
-            };
-        showReviewProgress(reviewScope(payload));
         try {
+            const reviewMethod = await resolveReviewMethodForSubmission();
+            const payload = source.value === 'text'
+                ? { source_type: 'text', mode: 'single', review_method: reviewMethod }
+                : {
+                    source_type: 'project', mode: mode.value, project_id: Number(project.value),
+                    episode_numbers: selectedEpisodes(),
+                    review_method: reviewMethod,
+                    ...promptSelectionPayload(reviewPromptTemplate, reviewPromptRequirements),
+                };
+            showReviewProgress(reviewScope(payload));
             const response = source.value === 'text'
                 ? await aiworkerApi.request('/api/script-reviews/file', {
                     method: 'POST',
                     headers: {
                         'X-Script-Filename': encodeURIComponent(file.name),
-                        'X-Script-Review-Engine': payload.engine,
-                        ...(payload.engine === 'semif' ? { 'X-SemIf-Model-Profile': String(reviewModelProfile?.value || 'local-default').trim() } : {}),
+                        'X-Review-Method': reviewMethod,
                         'Content-Type': file.type || 'text/plain',
                     },
                     body: file,
@@ -600,100 +751,6 @@
         result.append(list);
     }
 
-    function renderSemifReport(review) {
-        const report = review.report || {};
-        if (report.schema_version !== 'screenplay-review-report-v2' || report.partial === true) return;
-        const summary = document.createElement('section');
-        summary.className = 'border rounded p-3 mb-3';
-        const top = document.createElement('div');
-        top.className = 'd-flex flex-wrap gap-2 align-items-center mb-3';
-        const quality = document.createElement('span');
-        quality.className = `badge ${report.quality_status === 'passed' ? 'text-bg-success' : report.quality_status === 'needs_revision' ? 'text-bg-warning' : 'text-bg-danger'}`;
-        quality.textContent = qualityLabel(report.quality_status);
-        const score = document.createElement('strong');
-        score.textContent = `综合得分 ${Number(report.overall_score || 0)}/100`;
-        const gate = document.createElement('span');
-        gate.className = 'small text-muted';
-        gate.textContent = `硬门槛：${report.hard_gate?.passed ? '通过' : '未通过或需人工复核'} · ${report.review_version || 'review-v001'}`;
-        top.append(quality, score, gate);
-        summary.append(top);
-        const dimensions = document.createElement('div');
-        dimensions.className = 'row g-2';
-        (report.dimensions || []).forEach((item) => {
-            const column = document.createElement('div');
-            column.className = 'col-md-6';
-            const card = document.createElement('div');
-            card.className = 'border rounded p-2 h-100';
-            const heading = document.createElement('div');
-            heading.className = 'd-flex justify-content-between gap-2';
-            const name = document.createElement('strong'); name.textContent = item.label || item.id || '-';
-            const value = document.createElement('span'); value.textContent = `${Number(item.weighted_score || 0).toFixed(1)} / ${Number(item.weight || 0)}`;
-            heading.append(name, value); card.append(heading);
-            const option = document.createElement('div'); option.className = 'small text-muted'; option.textContent = item.selected_option || '-'; card.append(option);
-            (item.evidence || []).slice(0, 3).forEach((evidence) => {
-                const line = document.createElement('div'); line.className = 'small mt-1';
-                const url = safeLocalUrl(evidence.source_url);
-                if (url) {
-                    const link = document.createElement('a'); link.href = url; link.textContent = `${evidence.episode_id || '-'} / ${evidence.scene_id || '-'}`; line.append(link);
-                } else {
-                    line.textContent = `${evidence.episode_id || '-'} / ${evidence.scene_id || '-'}`;
-                }
-                if (evidence.text) line.append(document.createTextNode(`：${evidence.text}`));
-                card.append(line);
-            });
-            column.append(card); dimensions.append(column);
-        });
-        summary.append(dimensions);
-        if ((report.revision_plan || []).length) {
-            const list = document.createElement('ul'); list.className = 'mt-3 mb-0 ps-3';
-            report.revision_plan.forEach((item) => {
-                const row = document.createElement('li'); row.textContent = `[${item.priority || 'P2'}] ${item.action || item.suggestion || '待补充修改动作'}`; list.append(row);
-            });
-            summary.append(list);
-        }
-        result.append(summary);
-    }
-
-    const pendingRerunKeys = new Map();
-
-    function rerunRequestKey(reviewId, scope) {
-        const identity = `${reviewId}:${scope}`;
-        if (!pendingRerunKeys.has(identity)) {
-            pendingRerunKeys.set(identity, window.crypto?.randomUUID?.() || `review-${reviewId}-${scope}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-        }
-        return pendingRerunKeys.get(identity);
-    }
-
-    async function rerunSemifReview(reviewId, scope) {
-        showError();
-        const identity = `${reviewId}:${scope}`;
-        try {
-            const payload = await readJson(await aiworkerApi.request(`/api/script-reviews/${reviewId}/reruns`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ scope, request_key: rerunRequestKey(reviewId, scope) }),
-            }));
-            pendingRerunKeys.delete(identity);
-            activeReviewId = payload.review.id;
-            renderReview(payload.review);
-            await loadHistory();
-            void pollReview(payload.review.id);
-        } catch (requestError) { showError(requestError.message); }
-    }
-
-    function renderSemifRerunActions(review) {
-        if (review.report?.schema_version !== 'screenplay-review-report-v2' || ['queued', 'running', 'failed'].includes(review.status)) return;
-        const actions = document.createElement('div'); actions.className = 'd-flex flex-wrap gap-2 mt-3';
-        [
-            ['failed_dimensions_only', '仅复审失败维度'],
-            ['affected_episodes', '复审受影响集'],
-            ['full', '完整复审'],
-        ].forEach(([scope, text]) => {
-            const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-outline-light btn-sm'; button.textContent = text;
-            button.addEventListener('click', () => rerunSemifReview(review.id, scope)); actions.append(button);
-        });
-        result.append(actions);
-    }
-
     function appendFindingSection(parent, title, items) {
         if (!items?.length) return;
         const heading = document.createElement('h6');
@@ -731,7 +788,7 @@
     }
 
     function renderOptimizationSection(review) {
-        if (review.status !== 'confirmed' || review.final_verdict !== '建议修改' || !review.project_id || !review.source_payload?.formal) return;
+        if (reviewMethodValue(review) === 'local' || review.status !== 'confirmed' || review.final_verdict !== '建议修改' || !review.project_id || !review.source_payload?.formal) return;
         const section = document.createElement('section');
         section.className = 'border-top pt-4 mt-4';
         section.append(sectionHeading('AI 优化草稿'));
@@ -1037,6 +1094,9 @@
         const status = document.createElement('span');
         status.className = 'badge text-bg-secondary';
         status.textContent = label(review.status);
+        const method = document.createElement('span');
+        method.className = `badge ${reviewMethodValue(review) === 'local' ? 'text-bg-info' : 'text-bg-primary'}`;
+        method.textContent = reviewMethodLabel(review);
         const actions = document.createElement('div');
         actions.className = 'd-flex gap-2 align-items-center';
         const download = document.createElement('button');
@@ -1046,7 +1106,7 @@
         download.setAttribute('aria-label', '下载审核报告');
         download.innerHTML = '<i class="bi bi-download" aria-hidden="true"></i>';
         download.addEventListener('click', () => downloadReviewReport(review.id));
-        actions.append(download, status);
+        actions.append(download, method, status);
         heading.append(title, actions);
         result.append(heading);
         const coverage = document.createElement('div');
@@ -1066,12 +1126,13 @@
             notice.textContent = `阶段性报告：已完成 ${completed}/${total} 集逐集审核，跨集汇总尚未完成。请继续或重新发起审核后获取最终结论。`;
             result.append(notice);
         } else {
-            result.append(sectionHeading('修改建议'));
+            result.append(sectionHeading(reviewMethodValue(review) === 'local' ? '初审结果' : '修改建议'));
             const overview = document.createElement('p');
             overview.className = 'mb-3';
-            overview.textContent = `AI 建议：${review.ai_verdict}。${review.report.summary || ''}`;
+            overview.textContent = reviewMethodValue(review) === 'local'
+                ? `本地初审：${review.report.summary || '结果需要人工确认。'}`
+                : `AI 建议：${review.ai_verdict}。${review.report.summary || ''}`;
             result.append(overview);
-            renderSemifReport(review);
         }
         const coreFindings = review.report.core_findings || [];
         const coreFindingKeys = new Set(coreFindings.map(findingKey));
@@ -1110,7 +1171,6 @@
             });
         }
         appendFindingSection(result, '跨集问题', review.report.cross_episode_findings || []);
-        renderSemifRerunActions(review);
         if (review.status === 'pending_confirmation' && review.source_payload?.formal) {
             const controls = document.createElement('div');
             controls.className = 'd-flex flex-wrap gap-2 align-items-center mt-3';
@@ -1149,10 +1209,6 @@
         }
         renderOptimizationSection(review);
     }
-
-    reviewEngine?.addEventListener('change', () => {
-        reviewModelProfileWrap?.classList.toggle('d-none', reviewEngine.value !== 'semif');
-    });
 
     async function confirmReview(reviewId, finalVerdict, confirmationNote) {
         try {
@@ -1220,6 +1276,7 @@
             const review = await readJson(await aiworkerApi.request(`/api/script-reviews/${reviewId}`));
             if (review.id === activeReviewId) renderReview(review);
             updateReviewProgress(review);
+            await syncReviewProgressLogs(review);
             if (['queued', 'running'].includes(review.status)) {
                 const timer = window.setTimeout(() => {
                     reviewPollTimers.delete(reviewId);
@@ -1241,7 +1298,7 @@
             history.replaceChildren();
             (payload.items || []).forEach((review) => {
                 const row = document.createElement('tr');
-                [sourceLabel(review), review.episode_numbers?.join('、') || '-', review.ai_verdict || '-', review.final_verdict || '-', label(review.status), review.created_at ? new Date(review.created_at * 1000).toLocaleString() : '-'].forEach((value) => {
+                [sourceLabel(review), reviewMethodLabel(review), review.episode_numbers?.join('、') || '-', review.ai_verdict || '-', review.final_verdict || '-', label(review.status), review.created_at ? new Date(review.created_at * 1000).toLocaleString() : '-'].forEach((value) => {
                     const cell = document.createElement('td'); cell.textContent = value; row.append(cell);
                 });
                 const action = document.createElement('td'); action.className = 'text-end';
@@ -1268,7 +1325,7 @@
                     action.append(remove);
                 }
             });
-            if (!history.children.length) history.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">暂无审核记录</td></tr>';
+            if (!history.children.length) history.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">暂无审核记录</td></tr>';
         } catch (requestError) {
             showError(requestError.message);
         }
@@ -1277,12 +1334,20 @@
     source.addEventListener('change', toggleSource);
     mode.addEventListener('change', renderEpisodes);
     project.addEventListener('change', loadSelectedProject);
+    reviewMethodInputs.forEach((input) => input.addEventListener('change', () => {
+        rememberReviewMethod(input.value);
+        syncReviewMethodUi();
+    }));
     submit.addEventListener('click', createReview);
     reviewProgressViewReport?.addEventListener('click', hideReviewProgress);
     optimizationProgressViewDrafts?.addEventListener('click', hideOptimizationProgress);
     document.getElementById('script-review-refresh')?.addEventListener('click', async () => { await loadProjects(); await loadHistory(); });
     (async () => {
         try {
+            let savedMethod = 'complete';
+            try { savedMethod = window.localStorage.getItem(reviewMethodStorageKey) || 'complete'; } catch (_error) { /* browser storage is optional */ }
+            selectReviewMethod(savedMethod, false);
+            await loadReviewCapabilities();
             await loadProjects();
             await loadHistory();
             toggleSource();

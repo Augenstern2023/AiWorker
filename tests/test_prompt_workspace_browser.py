@@ -55,7 +55,7 @@ def _install_workspace_runtime(
                 "expression": "口语化",
             },
             "shared_dna": "开场快速建立未完成动作。",
-            "parameters": {"max_beats": 5, "strong_ending_hook": True},
+            "parameters": {"max_beats": 3, "strong_ending_hook": True},
             "stage_rules": {
                 "brief": {
                     "single": "生成 Brief",
@@ -257,7 +257,7 @@ def test_prompt_picker_card_click_selects_template_and_reveals_full_details():
 
         details.get_by_text("查看模板参数和示例", exact=True).click()
         details.get_by_text("节拍数量上限", exact=True).wait_for()
-        assert details.get_by_text("5", exact=True).is_visible()
+        assert details.get_by_text("3", exact=True).is_visible()
         assert details.get_by_text("强化结尾钩子", exact=True).is_visible()
         assert details.get_by_text("开启", exact=True).is_visible()
         raw_parameters = details.locator(".prompt-raw-parameters")
@@ -266,7 +266,7 @@ def test_prompt_picker_card_click_selects_template_and_reveals_full_details():
         assert not raw_json.is_visible()
         raw_parameters.locator("summary").click()
         assert raw_json.is_visible()
-        assert '"max_beats": 5' in raw_json.inner_text()
+        assert '"max_beats": 3' in raw_json.inner_text()
         assert raw_json.evaluate(
             "element => getComputedStyle(element).backgroundColor"
         ) != "rgb(255, 255, 255)"

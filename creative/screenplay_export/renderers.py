@@ -175,6 +175,7 @@ def _markdown_safe(value: str) -> str:
 
 def _render_markdown(document: ScriptExportDocument, spec: TemplateSpec) -> bytes:
     view = _render_view(document, spec)
+    dialogue_color = spec.color_rules()["dialogue"]
     lines = [f"# {_markdown_safe(str(view['title']))}", ""]
     if view["synopsis"]:
         lines.extend(["## 简介", "", _markdown_safe(str(view["synopsis"])), ""])
@@ -196,7 +197,13 @@ def _render_markdown(document: ScriptExportDocument, spec: TemplateSpec) -> byte
             if scene["metadata"]:
                 lines.extend([_markdown_safe(scene["metadata"]), ""])
             for block in scene["blocks"]:
-                lines.extend([_markdown_safe(block["text"]), ""])
+                text = _markdown_safe(block["text"])
+                if block["type"] == "dialogue":
+                    text = (
+                        f'<span style="color: {dialogue_color}; font-weight: 600;">'
+                        f"{text}</span>"
+                    )
+                lines.extend([text, ""])
         if spec.page_break_policy == "between_episodes":
             lines.extend(["<!-- pagebreak -->", ""])
     if view["appendix"]:
@@ -228,6 +235,7 @@ def _preview_css(spec: TemplateSpec) -> str:
         .metadata {{ color: {colors['muted']}; margin: 0 0 .8em; }}
         .script-block {{ margin: 0 0 .72em; white-space: pre-wrap; overflow-wrap: anywhere; }}
         .script-block.action {{ padding-left: 1em; }}
+        .script-block.dialogue {{ color: {colors['dialogue']}; font-weight: 600; }}
         .character-bio {{ margin: 0 0 .72em; }}
         .episode + .episode {{
             {'break-before: page;' if spec.page_break_policy == 'between_episodes' else ''}
@@ -387,7 +395,11 @@ def _render_docx(document: ScriptExportDocument, spec: TemplateSpec) -> bytes:
                                     keep_with_next=bool(scene["blocks"]))
             for block in scene["blocks"]:
                 _add_docx_paragraph(output, block["text"], family=spec.font_family,
-                                    size=spec.font_size_pt, after=7,
+                                    size=spec.font_size_pt,
+                                    bold=block["type"] == "dialogue",
+                                    color=(colors["dialogue"] if block["type"] == "dialogue"
+                                           else "#000000"),
+                                    after=7,
                                     indent_mm=5 if block["type"] == "action" else 0)
     if view["appendix"]:
         output.add_page_break()
@@ -499,9 +511,9 @@ def export_filename(
     template_id: str,
     format: str,
 ) -> str:
-    """Build a Windows-safe, length-bounded human export filename."""
+    """Build a Windows-safe filename without exposing the layout template."""
 
-    spec = get_template_spec(template_id)
+    get_template_spec(template_id)
     numbers = list(document.metadata.episode_numbers)
     if len(numbers) == 1:
         scope = f"第{numbers[0]}集"
@@ -511,10 +523,9 @@ def export_filename(
         scope = "第" + "、".join(map(str, numbers)) + "集"
     else:
         scope = "全集"
-    short_name = _safe_filename_part(spec.short_name, limit=24)
     if len(scope) > 64 and numbers:
         scope = f"第{numbers[0]}集等{len(numbers)}集"
-    suffix = f"{scope}{short_name}模板"
+    suffix = scope
     name = _safe_filename_part(
         document.drama_name,
         limit=max(20, 180 - len(suffix)),

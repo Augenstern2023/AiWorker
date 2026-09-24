@@ -147,7 +147,7 @@ _BUILTIN_TEMPLATES: tuple[dict[str, Any], ...] = (
             "每集围绕一个清晰的戏剧动作推进。冲突必须造成状态变化，主角要付出代价，"
             "结尾留下具体、可兑现的下一集钩子。"
         ),
-        "parameters": {"max_beats": 6, "strong_ending_hook": True},
+        "parameters": {"max_beats": 3, "strong_ending_hook": True},
         "stage_rules": _stage_rules(
             brief="把一句话卖点、主角欲望、核心阻力、情绪承诺和前三集钩子写成同一条可持续故事引擎。",
             characters="每个核心人物都要有外部行动目标、最怕失去之物、行为矛盾、压力反应和不可逾越的底线；人物关系必须能因具体选择而升级或转向。",
@@ -182,7 +182,7 @@ _BUILTIN_TEMPLATES: tuple[dict[str, Any], ...] = (
             "观众知道核心身份真相，主角之一暂时不知道。笑点来自身份信息差、地位反差和态度转弯；"
             "单元问题最终由人物的真诚选择解决，感情只推进一格，不突然表白。"
         ),
-        "parameters": {"max_beats": 5, "strong_ending_hook": True},
+        "parameters": {"max_beats": 3, "strong_ending_hook": True},
         "stage_rules": _stage_rules(
             brief="明确谁掌握真实身份、谁被蒙在鼓里，以及身份错位如何持续制造笑点、关系推进和暴露压力。",
             characters="围绕身份信息差设计人物认知边界、表里反差和互补欲望；台词风格必须彼此可辨，关系弧线每次只推进一格。",
@@ -220,7 +220,7 @@ _BUILTIN_TEMPLATES: tuple[dict[str, Any], ...] = (
             "弹幕只能提供预警、揭密或陪看情绪，不能替女主行动。女主必须把信息转化为证据和布局；"
             "反派逐级升级，反制同时占据事实与法理高地，不复合、不降智。"
         ),
-        "parameters": {"max_beats": 6, "strong_ending_hook": True},
+        "parameters": {"max_beats": 3, "strong_ending_hook": True},
         "stage_rules": _stage_rules(
             brief="明确弹幕的信息边界、女主的主动取证能力、逐级清算对象和不可退让的女性成长底线。",
             characters="女主必须具备把预警转化为证据和布局的主动能力；反派要有可信利益、软肋与失败代价，盟友关系不得替女主完成关键行动。",
@@ -258,7 +258,7 @@ _BUILTIN_TEMPLATES: tuple[dict[str, Any], ...] = (
             "奇幻能力必须同时具备限制和代价，既定规则不得临时打补丁。道具承担信息与伏笔，"
             "人物通过动作泄露秘密；表任务、身世谜和规则阴谋并行。"
         ),
-        "parameters": {"max_beats": 6, "strong_ending_hook": True},
+        "parameters": {"max_beats": 3, "strong_ending_hook": True},
         "stage_rules": _stage_rules(
             brief="先定义奇幻规则、限制与对等代价，再建立表任务、身世谜和规则阴谋三条可交叉验证的悬疑线。",
             characters="人物秘密必须与既定规则、限制或代价相连，并通过动作和选择泄露；关系中要存在相互隐瞒、试探以及可兑现的信任成本。",
@@ -347,6 +347,11 @@ def normalize_template_content(content: dict[str, Any]) -> dict[str, Any]:
     parameters = content.get("parameters") or {}
     if not isinstance(parameters, dict) or len(parameters) > 50:
         raise ValueError("模板参数必须是至多 50 项的对象")
+    max_beats = parameters.get("max_beats")
+    if max_beats is not None and (
+        isinstance(max_beats, bool) or not isinstance(max_beats, int) or not 1 <= max_beats <= 3
+    ):
+        raise ValueError("模板 max_beats 必须为 1-3")
     try:
         serialized_parameters = json.dumps(
             parameters, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -413,6 +418,11 @@ def compose_prompt_snapshot(
     if not isinstance(override_parameters, dict) or len(override_parameters) > 20:
         raise ValueError("模板参数覆盖必须是至多 20 项的对象")
     parameters = {**normalized["parameters"], **override_parameters}
+    max_beats = parameters.get("max_beats")
+    if max_beats is not None and (
+        isinstance(max_beats, bool) or not isinstance(max_beats, int) or not 1 <= max_beats <= 3
+    ):
+        raise ValueError("模板 max_beats 必须为 1-3")
     try:
         serialized_parameters = json.dumps(
             parameters, ensure_ascii=False, sort_keys=True, separators=(",", ":")

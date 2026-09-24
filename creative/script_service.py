@@ -378,7 +378,7 @@ def validate_beats(payload: dict[str, Any] | list[Any], *, allow_legacy: bool = 
     if not isinstance(beats, list) or not beats:
         raise ValueError("beats 至少包含一个节拍")
     if len(beats) > 3:
-        raise ValueError("每集 Beats 场次不能超过 3 个")
+        raise ValueError("每集 Beats 数量必须为 1-3 个（场次不能超过 3 个）")
     enhanced_fields = {"state_change", "cost", "opposition_tactic", "continuity_updates"}
     if allow_legacy and all(
         isinstance(beat, dict) and not (enhanced_fields & set(beat))

@@ -47,11 +47,11 @@ def test_creative_template_provenance_does_not_guess_from_current_binding():
         [{"generation_meta": {"prompt_snapshot": {"template_key": "private-key", "title": "冻结标题", "revision": 3}, "manual_revision": True}}, "基于模板版本修订：冻结标题 · 模板 v3"],
         [{"direction_type": "original", "parent_version_id": 12, "generation_meta": {"prompt_snapshot": {"template_key": "private-key", "title": "冻结标题", "revision": 3}, "job_id": "old-job"}}, "基于模板版本修订：冻结标题 · 模板 v3"],
         [{"generation_meta": {"origin": "manual"}}, "手动创建/修订 · 未按生成模板生成"],
-        [{"generation_meta": {"manual_revision": True, "job_id": "old-job"}}, "手动修订 · 原模板来源未记录"],
+        [{"generation_meta": {"manual_revision": True, "job_id": "old-job"}}, "经典兼容模板"],
         [{"generation_meta": {"manual_revision": True, "prompt_source": "system"}}, "基于系统提示词版本修订 · 未使用模板库"],
         [{"generation_meta": {"job_id": "new-job", "prompt_source": "system"}}, "系统提示词生成 · 未使用模板库"],
-        [{"generation_meta": {"job_id": "legacy-job"}}, "历史生成 · 模板记录缺失"],
-        [{"generation_meta": {}}, "模板来源未记录"],
+        [{"generation_meta": {"job_id": "legacy-job"}}, "经典兼容模板"],
+        [{"generation_meta": {}}, "经典兼容模板"],
     ]
     program = (
         "global.window = {aiworkerModules: []}; "
@@ -335,32 +335,92 @@ def test_next_generation_template_selection_survives_navigation_and_is_cleared()
     assert result.returncode == 0, result.stderr
 
 
-def test_old_project_upgrade_is_folded_into_first_real_template_action():
+def test_old_project_enables_template_configuration_before_showing_picker():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
     script = _read("static/js/common/prompt_templates.js")
     api = _read("creative/api.py")
 
     assert "这是旧项目，当前默认仍使用原有提示词" in modal
-    assert "仅下次生成使用”不会改变项目设置" in modal
-    assert "首次“保存默认设置”会同时启用模板设置" in modal
+    assert "启用模板配置后，即可为各创作阶段选择生成模板" in modal
     assert "只影响之后新生成的内容，不会修改已有内容" in modal
+    assert ">启用模板配置</button>" in modal
     assert "升级到模板系统" not in modal
-    assert "enableCurrentProjectPromptLibrary" not in script
-    assert "/prompt-system/enable" not in script
-    assert 'x-show="creativeWorkspace.promptLibrary.settings?.enabled" @click="usePromptForNextGeneration"' not in modal
-    assert 'x-show="creativeWorkspace.promptLibrary.settings?.enabled" @click="savePromptBinding"' not in modal
+    assert "enableCurrentProjectPromptLibrary" in script
+    assert "/prompt-system/enable" in script
+    assert 'x-show="!creativeWorkspace.promptLibrary.settings?.enabled" x-cloak @click="enableCurrentProjectPromptLibrary"' in modal
+    assert 'x-show="creativeWorkspace.promptLibrary.settings?.enabled" x-cloak @click="usePromptForNextGeneration"' in modal
+    assert 'x-show="creativeWorkspace.promptLibrary.settings?.enabled" x-cloak @click="savePromptBinding"' in modal
     assert "if (!state.settings?.enabled && !window.confirm(" in script
     assert "state.settings = data.settings || state.settings" in script
     assert '@router.post("/projects/{project_id}/prompt-system/enable")' in api
 
 
-def test_review_and_optimization_pages_send_single_run_template_selections():
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_enabling_old_project_reloads_picker_without_changing_enabled_projects():
+    program = """
+    const calls = [];
+    global.window = {aiworkerModules: []};
+    global.aiworkerApi = {
+      async request(url, options) {
+        calls.push({url, options});
+        return {
+          ok: true,
+          async json() { return {project_id: 9, enabled: true}; },
+        };
+      },
+    };
+    require('./static/js/common/creative.js');
+    const component = window.aiworkerModules[0]();
+    component.creativeWorkspace = {
+      project: {id: 9},
+      promptLibrary: {stage: 'beats', settings: {enabled: false}, saving: false, error: ''},
+    };
+    let reloads = 0;
+    component.loadProjectPromptModule = async stage => {
+      if (stage !== 'beats') throw new Error(`unexpected stage: ${stage}`);
+      reloads += 1;
+      component.creativeWorkspace.promptLibrary.settings = {enabled: true};
+    };
+    component.showCreativeNotice = () => {};
+    (async () => {
+      await component.enableCurrentProjectPromptLibrary();
+      if (calls.length !== 1 || calls[0].url !== '/api/creative/projects/9/prompt-system/enable') {
+        throw new Error(`unexpected calls: ${JSON.stringify(calls)}`);
+      }
+      if (calls[0].options.method !== 'POST'
+          || JSON.parse(calls[0].options.body).template_key !== 'classic-compatible') {
+        throw new Error(`unexpected request: ${JSON.stringify(calls[0])}`);
+      }
+      if (reloads !== 1 || component.creativeWorkspace.promptLibrary.saving) {
+        throw new Error('template picker was not reloaded cleanly');
+      }
+      await component.enableCurrentProjectPromptLibrary();
+      if (calls.length !== 1) throw new Error('enabled project should not be changed');
+    })().catch(error => {
+      console.error(error);
+      process.exit(1);
+    });
+    """
+    result = subprocess.run(
+        ["node", "-e", program],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_review_page_keeps_templates_while_exposing_local_method_controls():
     page = _read("templates/review/scripts.html")
     script = _read("static/js/review/scripts.js")
 
     assert 'id="script-review-prompt-template"' in page
     assert 'id="script-review-prompt-requirements"' in page
     assert "loadPromptSelector(" in script
+    assert "reviewPromptTemplate" in script
+    assert "reviewPromptRequirements" in script
     assert "'review', reviewPromptTemplate" in script
     assert "'optimization', promptSelect" in script
     assert "prompt_template_key: select.value" in script

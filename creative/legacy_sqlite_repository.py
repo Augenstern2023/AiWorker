@@ -5305,6 +5305,7 @@ class CreativeRepository:
         expected_authority: dict[str, Any] | None = None,
         reject_if_locked: bool = False,
     ) -> dict[str, Any]:
+        content = validate_beats(content, allow_legacy=True)
         request_hash = self._operation_request_hash(
             project_id=project_id,
             stage="beats",
@@ -6260,6 +6261,15 @@ class CreativeRepository:
         optimization = self.get_script_optimization(optimization_id)
         if not optimization:
             raise ValueError("优化任务不存在")
+        validated_drafts: list[dict[str, Any]] = []
+        for draft in drafts:
+            normalized = dict(draft)
+            if str(normalized.get("kind") or "") == "beats":
+                normalized["content"] = validate_beats(
+                    normalized.get("content") or {}, allow_legacy=True
+                )
+            validated_drafts.append(normalized)
+        drafts = validated_drafts
         now = time.time()
         with self._connect() as conn:
             inserted: list[tuple[dict[str, Any], int]] = []

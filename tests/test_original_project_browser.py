@@ -687,6 +687,223 @@ def test_original_brief_query_starts_direction_generation_once() -> None:
     assert "generate_original" not in result["search"]
 
 
+def test_sequential_generation_button_enables_after_models_load() -> None:
+    """An empty unavailable-model id must not keep the start button disabled."""
+    modal = _source("templates/common/workspace/free_creative_modals.html")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_default_timeout(5_000)
+        page.route(
+            "http://aiworker.test/model-dialog",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=(
+                    '<html data-bs-theme="dark"><body data-workspace-page="">'
+                    '<main id="workspace" x-data="appData()" '
+                    'x-init="window.__workspace = $data">'
+                    f"{modal}</main></body></html>"
+                ),
+            ),
+        )
+        page.goto("http://aiworker.test/model-dialog")
+        page.add_style_tag(content=_source("static/css/bootstrap.min.css"))
+        page.evaluate(
+            """
+            () => {
+              localStorage.setItem(
+                'aiworker.creative.sequential-generation-preference',
+                JSON.stringify({modelRecordId: 'model-1', reasoningEffort: ''})
+              );
+              window.aiworkerApi = {
+                request: async (url) => {
+                  if (url !== '/api/llm/available-models') {
+                    throw new Error(`unexpected request: ${url}`);
+                  }
+                  return {
+                    ok: true,
+                    json: async () => ({
+                      default_model_record_id: 'model-1',
+                      items: [{
+                        id: 'model-1',
+                        label: 'deepseek-local / deepseek-coder',
+                        is_default: true,
+                        reasoning_effort_options: [],
+                      }],
+                    }),
+                  };
+                },
+              };
+            }
+            """
+        )
+        page.add_script_tag(content=_source("static/js/bootstrap.bundle.min.js"))
+        page.add_script_tag(content=_source("static/js/common/creative.js"))
+        page.add_script_tag(content=_source("static/js/common/tasks.js"))
+        page.add_script_tag(content=_source("static/js/alpine.min.js"))
+        page.wait_for_function(
+            "() => Boolean(window.__workspace?.sequentialGenerationModelModal)"
+        )
+        page.evaluate(
+            """
+            async () => window.__workspace.openSequentialGenerationModel(
+              '/api/creative/projects/2/beats/generate',
+              {episode_number: 1},
+              'beats',
+              {}
+            )
+            """
+        )
+        page.wait_for_function(
+            """
+            () => {
+              const state = window.__workspace.creativeWorkspace.sequentialGeneration;
+              return !state.loading && state.modelOptions.length === 1;
+            }
+            """
+        )
+        state = page.evaluate(
+            """
+            () => {
+              const generation = window.__workspace.creativeWorkspace.sequentialGeneration;
+              const button = document.querySelector(
+                '#sequentialGenerationModelModal .btn-primary'
+              );
+              return {
+                loading: generation.loading,
+                pending: Boolean(generation.pending),
+                unavailableModelRecordId: generation.unavailableModelRecordId,
+                disabled: button.disabled,
+                disabledAttribute: button.getAttribute('disabled'),
+              };
+            }
+            """
+        )
+        browser.close()
+
+    assert state == {
+        "loading": False,
+        "pending": True,
+        "unavailableModelRecordId": "",
+        "disabled": False,
+        "disabledAttribute": None,
+    }
+
+
+def test_sequential_generation_hands_off_modals_during_show_transition() -> None:
+    """A fast confirmation must not leave the disabled model modal on top."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <div class="modal fade" id="sequentialGenerationModelModal" tabindex="-1">
+              <div class="modal-dialog"><div class="modal-content">
+                <button id="start-generation" class="btn btn-primary">开始生成</button>
+              </div></div>
+            </div>
+            <div class="modal fade" id="creativeGenerationProgressModal" tabindex="-1">
+              <div class="modal-dialog"><div class="modal-content">生成进度</div></div>
+            </div>
+            """
+        )
+        page.add_style_tag(content=_source("static/css/bootstrap.min.css"))
+        page.add_script_tag(content=_source("static/js/bootstrap.bundle.min.js"))
+        page.add_script_tag(content=_source("static/js/common/creative.js"))
+        page.evaluate(
+            """
+            () => {
+              window.aiworkerUi = {requestKey: async (_key, request) => request()};
+              window.aiworkerApi = {request: () => new Promise(() => {})};
+              const workspace = window.aiworkerModules[0]();
+              const modelModal = bootstrap.Modal.getOrCreateInstance(
+                document.getElementById('sequentialGenerationModelModal')
+              );
+              const originalHide = modelModal.hide.bind(modelModal);
+              window.__modelModalHideAttempts = 0;
+              modelModal.hide = () => {
+                window.__modelModalHideAttempts += 1;
+                if (window.__modelModalHideAttempts <= 2) return;
+                originalHide();
+              };
+              Object.assign(workspace, {
+                creativeWorkspace: {
+                  project: {id: 2, workflow_mode: 'sequential'},
+                  sequentialGeneration: {
+                    loading: false,
+                    pending: {url: '/generate', body: {}, action: 'beats', options: {}},
+                    modelRecordId: 'model-1', defaultModelRecordId: 'model-1',
+                    reasoningEffort: '', unavailableModelRecordId: '',
+                  },
+                  error: '', startingAction: '', jobMessage: '', jobId: '',
+                  jobStatus: '', jobProgress: {}, jobStartedAt: 0,
+                  jobElapsedSeconds: 0, paused: false, notifiedStatus: '',
+                  jobLogs: [], jobLogCount: 0, showJobLogs: false,
+                  activeAction: '', activeSeriesGeneration: false,
+                  activeBatchId: '', selectedEpisode: 1,
+                },
+                sequentialGenerationModelModal: modelModal,
+                creativeGenerationProgressModal: bootstrap.Modal.getOrCreateInstance(
+                  document.getElementById('creativeGenerationProgressModal')
+                ),
+                showCreativeNotice: () => {},
+                fetchJobs: async () => {},
+                syncCreativeJobLogs: async () => {},
+              });
+              window.__workspace = workspace;
+              workspace.sequentialGenerationModelModal.show();
+            }
+            """
+        )
+        page.locator("#start-generation").wait_for(state="visible")
+        page.locator("#start-generation").focus()
+        page.evaluate("() => { window.__workspace.submitSequentialGeneration(); }")
+        page.wait_for_function(
+            """
+            () => {
+              const modelModal = document.getElementById(
+                'sequentialGenerationModelModal'
+              );
+              const progressModal = document.getElementById(
+                'creativeGenerationProgressModal'
+              );
+              return !modelModal.classList.contains('show')
+                && modelModal.style.display === 'none'
+                && progressModal.classList.contains('show')
+                && document.querySelectorAll('.modal-backdrop').length === 1;
+            }
+            """,
+            timeout=5_000,
+        )
+        result = page.evaluate(
+            """
+            () => ({
+              modelModalShown: document.getElementById(
+                'sequentialGenerationModelModal'
+              ).classList.contains('show'),
+              modelModalDisplay: document.getElementById(
+                'sequentialGenerationModelModal'
+              ).style.display,
+              progressModalShown: document.getElementById(
+                'creativeGenerationProgressModal'
+              ).classList.contains('show'),
+              backdropCount: document.querySelectorAll('.modal-backdrop').length,
+              hideAttempts: window.__modelModalHideAttempts,
+            })
+            """
+        )
+        browser.close()
+
+    assert result == {
+        "modelModalShown": False,
+        "modelModalDisplay": "none",
+        "progressModalShown": True,
+        "backdropCount": 1,
+        "hideAttempts": 3,
+    }
+
+
 def test_direction_button_tracks_running_server_job_until_it_finishes() -> None:
     """Would catch losing the generation lock after a page reload."""
     with sync_playwright() as playwright:

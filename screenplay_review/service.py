@@ -18,6 +18,7 @@ from .strategy import ReviewExecutionPlan, estimate_tokens, plan_review_executio
 
 
 REVIEW_MODES = frozenset({"single", "multiple", "collection"})
+REVIEW_METHODS = frozenset({"complete", "local"})
 SOURCE_TYPES = frozenset({"project", "text"})
 VERDICTS = frozenset({"通过", "建议修改"})
 SEVERITIES = frozenset({"P0", "P1", "P2"})
@@ -36,10 +37,13 @@ def validate_review_request(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize the small public request contract before source lookup."""
     source_type = str(payload.get("source_type") or "").strip()
     mode = str(payload.get("mode") or "").strip()
+    review_method = str(payload.get("review_method") or "complete").strip()
     if source_type not in SOURCE_TYPES:
         raise ValueError("source_type 必须是 project 或 text")
     if mode not in REVIEW_MODES:
         raise ValueError("mode 必须是 single、multiple 或 collection")
+    if review_method not in REVIEW_METHODS:
+        raise ValueError("review_method 必须是 complete 或 local")
 
     raw_numbers = payload.get("episode_numbers") or []
     if not isinstance(raw_numbers, list):
@@ -52,7 +56,13 @@ def validate_review_request(payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("粘贴文本仅支持单集审核")
         if not text:
             raise ValueError("请粘贴剧本文本")
-        return {"source_type": source_type, "mode": mode, "text": text, "episode_numbers": [1]}
+        return {
+            "source_type": source_type,
+            "mode": mode,
+            "review_method": review_method,
+            "text": text,
+            "episode_numbers": [1],
+        }
 
     project_id = int(payload.get("project_id") or 0)
     if project_id < 1:
@@ -64,6 +74,7 @@ def validate_review_request(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "source_type": source_type,
         "mode": mode,
+        "review_method": review_method,
         "project_id": project_id,
         "episode_numbers": episode_numbers,
     }
@@ -206,7 +217,7 @@ def source_fingerprint(source: dict[str, Any]) -> str:
         {
             key: value
             for key, value in source.items()
-            if key not in {"fingerprint", "prompt_snapshot", "execution_snapshot"}
+            if key not in {"fingerprint", "prompt_snapshot"}
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -270,16 +281,22 @@ def build_review_markdown(review: dict[str, Any]) -> str:
         str(review.get("mode") or ""), "审核"
     )
     episodes = "、".join(f"第 {number} 集" for number in review.get("episode_numbers") or []) or "-"
+    review_method = (
+        "本地初审"
+        if payload.get("review_method") == "local" or report.get("engine") == "semif"
+        else "完整审核"
+    )
     lines = [
         f"# 剧本审核报告 #{review.get('id') or '-'}",
         "",
         f"- 来源：{_review_source_label(review)}",
+        f"- 审核方式：{review_method}",
         f"- 审核范围：{mode} · {episodes}",
         f"- 审核状态：{review.get('status') or '-'}",
         "",
         "## 审核结论",
         "",
-        f"AI 建议：{report.get('ai_verdict') or review.get('ai_verdict') or '-'}",
+        f"{'初审结论' if review_method == '本地初审' else 'AI 建议'}：{report.get('ai_verdict') or review.get('ai_verdict') or '-'}",
     ]
     if report.get("summary"):
         lines.extend(["", str(report["summary"]).strip()])
@@ -295,88 +312,6 @@ def build_review_markdown(review: dict[str, Any]) -> str:
                 f"- 第 {episode.get('episode_number') or '-'} 集：大纲 v{(episode.get('outline') or {}).get('version') or '-'} · "
                 f"Beats v{(episode.get('beats') or {}).get('version') or '-'} · 场次剧本 v{(episode.get('script') or {}).get('version') or episode.get('version') or '-'}"
             )
-
-    if str(report.get("schema_version") or "") == "screenplay-review-report-v2":
-        hard_gate = report.get("hard_gate") if isinstance(report.get("hard_gate"), dict) else {}
-        lines.extend(
-            [
-                "",
-                "## SemIf 质量判定",
-                "",
-                f"- 质量状态：{report.get('quality_status') or '-'}",
-                f"- 综合得分：{report.get('overall_score') if report.get('overall_score') is not None else '-'}/100",
-                f"- 硬门槛：{'通过' if hard_gate.get('passed') else '未通过或需人工复核'}",
-                f"- 评审版本：{report.get('review_version') or '-'}",
-            ]
-        )
-        failed_items = [
-            item
-            for item in [
-                *(hard_gate.get("failed_items") or []),
-                *(hard_gate.get("insufficient_items") or []),
-            ]
-            if isinstance(item, dict)
-        ]
-        if failed_items:
-            lines.extend(["", "### 硬门槛明细", ""])
-            for item in failed_items:
-                lines.append(
-                    f"- {item.get('label') or item.get('dimension_id') or '-'}："
-                    f"{item.get('selected_option') or '-'} · {item.get('scope_ref') or '-'}"
-                )
-        dimensions = [
-            item for item in report.get("dimensions") or [] if isinstance(item, dict)
-        ]
-        if dimensions:
-            lines.extend(
-                [
-                    "",
-                    "### 评分维度",
-                    "",
-                    "| 维度 | 结果 | 得分 | 权重 | 证据 |",
-                    "|---|---:|---:|---:|---|",
-                ]
-            )
-            for item in dimensions:
-                evidence = [
-                    value
-                    for value in item.get("evidence") or []
-                    if isinstance(value, dict)
-                ]
-                refs = "；".join(
-                    f"{value.get('episode_id') or '-'} / {value.get('scene_id') or '-'}："
-                    f"{str(value.get('text') or '').strip()}"
-                    for value in evidence[:3]
-                ) or "-"
-                refs = refs.replace("|", "\\|").replace("\n", " ")
-                lines.append(
-                    f"| {item.get('label') or item.get('id') or '-'} | "
-                    f"{item.get('selected_option') or '-'} | "
-                    f"{item.get('weighted_score') if item.get('weighted_score') is not None else '-'} | "
-                    f"{item.get('weight') if item.get('weight') is not None else '-'} | {refs} |"
-                )
-        revision_plan = [
-            item for item in report.get("revision_plan") or [] if isinstance(item, dict)
-        ]
-        if revision_plan:
-            lines.extend(["", "### 修改计划", ""])
-            for item in revision_plan:
-                action = str(item.get("action") or item.get("suggestion") or "").strip()
-                lines.append(
-                    f"- [{str(item.get('priority') or 'P2').upper()}] {action or '待补充修改动作'}"
-                )
-        model = report.get("model") if isinstance(report.get("model"), dict) else {}
-        lines.extend(
-            [
-                "",
-                "### 审计信息",
-                "",
-                f"- 规则包：{report.get('rule_package') or '-'}",
-                f"- 模型：{model.get('name') or '-'} · {model.get('revision') or '-'}",
-                f"- 输入快照：{report.get('input_snapshot_hash') or '-'}",
-                f"- Prompt：{report.get('prompt_hash') or '-'}",
-            ]
-        )
 
     sections = [
         ("核心问题", report.get("core_findings") or []),

@@ -1,0 +1,28 @@
+{
+  "schema_version": "aiworker-semif-upstream-v1",
+  "repository": "https://github.com/TheoLeeCJ/SemIf",
+  "commit": "1f2dea3e25379f9dfc98cb83c324f00ab5deda37",
+  "license": "MIT",
+  "python_package": "semif-phase1",
+  "model": {
+    "source": "Qwen/Qwen3.5-4B",
+    "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "backend": "llamacpp",
+    "gguf_repository": "bartowski/Qwen_Qwen3.5-4B-GGUF",
+    "gguf_revision": "ba06320255db2dbec194dad738d066be90dabf29",
+    "gguf_filename": "Qwen_Qwen3.5-4B-Q4_K_M.gguf",
+    "gguf_sha256": "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983",
+    "gguf_repository_license": "Apache-2.0"
+  },
+  "runtime": {
+    "llama_cpp_python_version": "0.3.35",
+    "llama_cpp_python_wheel": "cu124-win_amd64",
+    "llama_cpp_python_wheel_sha256": "84f7218c1e9cf21014b9770c65064c5a3674dd2f4fbc312c5d6bb40cec0fb269",
+    "cuda_runtime_version": "12.4.127",
+    "cublas_version": "12.4.5.8",
+    "gpu_layers": "all"
+  },
+  "prompt_limit_tokens": 24576,
+  "state_target_tokens": 18000,
+  "execution_mode": "shared"
+}

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 import time
 from typing import Any
@@ -25,8 +26,8 @@ from creative.llm_observability import dump_terminal_error, public_failure_summa
 from creative.postgres_repository import PostgresCreativeRepository
 from system_database import SystemDatabase, SystemDatabaseSettings
 
-from .pipeline import run_semif_review
-from .semif_adapter import SemIfAdapter
+from .semif_client import SemIfClient
+from .semif_review import review_source_with_semif
 from .service import review_source
 
 
@@ -38,15 +39,6 @@ def create_provider(*, profile: str = "unit", retry_callback: Any = None) -> Any
     )
     return create_llm_provider_from_config(
         config, prefix=prefix, retry_callback=retry_callback
-    )
-
-
-def create_semif_adapter() -> SemIfAdapter:
-    """Create the sidecar boundary from process configuration."""
-    return SemIfAdapter(
-        str(config.SEMIF_BASE_URL),
-        timeout_seconds=float(config.SEMIF_TIMEOUT_SECONDS),
-        max_retries=int(config.SEMIF_MAX_RETRIES),
     )
 
 
@@ -94,19 +86,23 @@ async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
         raise ValueError("审核记录不存在")
     repository.start_script_review(review_id)
     emit(job, "job_started", "开始剧本审核")
+    active_request: dict[str, Any] = {}
 
     def progress(completed: int, total: int) -> None:
+        message = (
+            f"已完成本地初审状态包 {completed}/{total}"
+            if active_request.get("kind") == "semif_state"
+            else f"已审核 {completed}/{total} 个剧本范围"
+        )
         emit(
             job,
             "progress",
-            f"已审核 {completed}/{total} 个剧本范围",
+            message,
             payload={"stage": "script_review", "completed": completed, "total": total},
         )
 
     def checkpoint(report: dict[str, Any]) -> None:
         repository.checkpoint_script_review(review_id, report)
-
-    active_request: dict[str, Any] = {}
 
     def request_started(request: dict[str, Any]) -> None:
         active_request.clear()
@@ -115,12 +111,19 @@ async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
             "unit": "正在逐集审核",
             "batch_summary": "正在汇总审核批次",
             "final_summary": "正在生成审核总评",
-            "semif_decision": "正在执行 SemIf 结构化判断",
+            "semif_state": "正在执行本地规则初审",
         }
+        message = labels.get(str(request.get("kind") or ""), "正在执行剧本审核")
+        if request.get("kind") == "semif_state":
+            message = (
+                f"正在初审第 {int(request.get('episode_number') or 0)} 集"
+                f"（状态包 {int(request.get('state_index') or 0)}/"
+                f"{int(request.get('state_total') or 0)}）"
+            )
         emit(
             job,
             "progress",
-            labels.get(str(request.get("kind") or ""), "正在执行剧本审核"),
+            message,
             payload={
                 "stage": "script_review",
                 **request,
@@ -153,73 +156,54 @@ async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
                 or prompt_snapshot.get("mode") != expected_mode
             ):
                 raise ValueError("审核提示词快照与任务范围不匹配")
-        execution = dict(review["source_payload"].get("execution_snapshot") or {})
-        engine = str(execution.get("engine") or "legacy")
+        engine = _screenplay_review_engine(review)
         if engine == "semif":
-            rerun_scope = str(execution.get("rerun_scope") or "resume")
-            pipeline_initial_report = prior_report
-            parent_review_id = int(execution.get("parent_review_id") or 0)
-            if parent_review_id:
-                parent_review = repository.get_script_review(parent_review_id)
-                if not parent_review:
-                    raise ValueError("复审引用的上一版本不存在")
-                if (
-                    rerun_scope != "full"
-                    and str(parent_review.get("source_fingerprint") or "")
-                    != str(review.get("source_fingerprint") or "")
-                ):
-                    raise ValueError("局部复审的来源快照与上一版本不一致")
-                pipeline_initial_report = (
-                    None if rerun_scope == "full" else parent_review.get("report") or {}
-                )
-            summary_provider = create_provider(
-                profile="summary", retry_callback=report_retry
-            )
-            job._llm_usage_providers.append(summary_provider)
-            semif = create_semif_adapter()
             try:
-                report = await run_semif_review(
+                report = await _run_semif_review(
                     review["source_payload"],
-                    semif=semif,
-                    writer_provider=summary_provider,
-                    model_profile=str(
-                        execution.get("model_profile")
-                        or config.SEMIF_MODEL_PROFILE
-                        or "local-default"
-                    ),
+                    prior_report=prior_report,
                     on_progress=progress,
                     on_checkpoint=checkpoint,
                     on_request=request_started,
-                    initial_report=pipeline_initial_report,
-                    prompt_snapshot=prompt_snapshot or None,
-                    review_version=str(execution.get("review_version") or "review-v001"),
-                    rerun_scope=rerun_scope,
                 )
-            finally:
-                close = getattr(semif, "close", None)
-                if callable(close):
-                    result = close()
-                    if asyncio.iscoroutine(result):
-                        await result
-        elif engine == "legacy":
-            provider = create_provider(profile="unit", retry_callback=report_retry)
-            job._llm_usage_providers.append(provider)
-            summary_provider = create_provider(
-                profile="summary", retry_callback=report_retry
-            )
-            job._llm_usage_providers.append(summary_provider)
-            report = await review_source(
-                provider,
+            except Exception as exc:
+                if _semif_fallback_engine(review) != "legacy":
+                    raise
+                emit(
+                    job,
+                    "progress",
+                    "本地初审暂不可用，已切换完整审核",
+                    "warning",
+                    {
+                        "stage": "script_review",
+                        "engine": "legacy",
+                        "fallback_from": "semif",
+                        "reason": type(exc).__name__,
+                    },
+                )
+                report = await _run_legacy_review(
+                    job,
+                    review["source_payload"],
+                    prior_report=(
+                        prior_report if prior_report.get("engine") != "semif" else {}
+                    ),
+                    prompt_snapshot=prompt_snapshot,
+                    on_progress=progress,
+                    on_checkpoint=checkpoint,
+                    on_request=request_started,
+                    retry_callback=report_retry,
+                )
+        else:
+            report = await _run_legacy_review(
+                job,
                 review["source_payload"],
-                summary_provider=summary_provider,
+                prior_report=prior_report,
+                prompt_snapshot=prompt_snapshot,
                 on_progress=progress,
                 on_checkpoint=checkpoint,
                 on_request=request_started,
-                initial_report=prior_report,
-                prompt_snapshot=prompt_snapshot or None,
+                retry_callback=report_retry,
             )
-        else:
-            raise ValueError(f"未知剧本审核引擎: {engine}")
         completed = repository.complete_script_review(review_id, report)
     except Exception as exc:
         repository.fail_script_review(review_id, str(exc))
@@ -252,13 +236,92 @@ async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
         "剧本审核完成，等待人工确认",
         payload=_usage_payload(
             job,
-            {
-                "review_id": review_id,
-                "ai_verdict": report["ai_verdict"],
-                "engine": str(report.get("engine") or "legacy"),
-                "quality_status": str(report.get("quality_status") or ""),
-            },
+            {"review_id": review_id, "ai_verdict": report["ai_verdict"]},
         ),
+    )
+
+
+def _screenplay_review_engine(review: dict[str, Any] | None = None) -> str:
+    review_method = str(
+        ((review or {}).get("source_payload") or {}).get("review_method") or ""
+    ).strip()
+    if review_method == "complete":
+        return "legacy"
+    if review_method == "local":
+        return "semif"
+    if review_method:
+        raise ValueError("review_method must be complete or local")
+    engine = os.getenv("SCREENPLAY_REVIEW_ENGINE", "legacy").strip().lower()
+    if engine not in {"legacy", "semif"}:
+        raise ValueError("SCREENPLAY_REVIEW_ENGINE must be legacy or semif")
+    return engine
+
+
+def _semif_fallback_engine(review: dict[str, Any] | None = None) -> str:
+    review_method = str(
+        ((review or {}).get("source_payload") or {}).get("review_method") or ""
+    ).strip()
+    if review_method == "local":
+        return "none"
+    fallback = os.getenv("SCREENPLAY_REVIEW_SEMIF_FALLBACK", "legacy").strip().lower()
+    if fallback not in {"legacy", "none"}:
+        raise ValueError("SCREENPLAY_REVIEW_SEMIF_FALLBACK must be legacy or none")
+    return fallback
+
+
+async def _run_semif_review(
+    source: dict[str, Any],
+    *,
+    prior_report: dict[str, Any],
+    on_progress: Any,
+    on_checkpoint: Any,
+    on_request: Any,
+) -> dict[str, Any]:
+    url = os.getenv("SCREENPLAY_REVIEW_SEMIF_URL", "http://127.0.0.1:8765")
+    timeout = float(os.getenv("SCREENPLAY_REVIEW_SEMIF_TIMEOUT_SECONDS", "300"))
+    retries = int(os.getenv("SCREENPLAY_REVIEW_SEMIF_MAX_RETRIES", "1"))
+    async with SemIfClient(
+        url,
+        timeout_seconds=timeout,
+        max_retries=retries,
+    ) as client:
+        await client.health()
+        return await review_source_with_semif(
+            client,
+            source,
+            on_progress=on_progress,
+            on_checkpoint=on_checkpoint,
+            on_request=on_request,
+            initial_report=prior_report,
+        )
+
+
+async def _run_legacy_review(
+    job: CrawlJob,
+    source: dict[str, Any],
+    *,
+    prior_report: dict[str, Any],
+    prompt_snapshot: dict[str, Any],
+    on_progress: Any,
+    on_checkpoint: Any,
+    on_request: Any,
+    retry_callback: Any,
+) -> dict[str, Any]:
+    provider = create_provider(profile="unit", retry_callback=retry_callback)
+    job._llm_usage_providers.append(provider)
+    summary_provider = create_provider(
+        profile="summary", retry_callback=retry_callback
+    )
+    job._llm_usage_providers.append(summary_provider)
+    return await review_source(
+        provider,
+        source,
+        summary_provider=summary_provider,
+        on_progress=on_progress,
+        on_checkpoint=on_checkpoint,
+        on_request=on_request,
+        initial_report=prior_report,
+        prompt_snapshot=prompt_snapshot or None,
     )
 
 

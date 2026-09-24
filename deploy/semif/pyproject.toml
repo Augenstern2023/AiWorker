@@ -1,0 +1,34 @@
+[project]
+name = "aiworker-semif-sidecar"
+version = "0.1.0"
+description = "Isolated HTTP wrapper for the pinned SemIf screenplay scorer"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "fastapi==0.110.2",
+    "llama-cpp-python @ https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35-cu124/llama_cpp_python-0.3.35-py3-none-win_amd64.whl",
+    "nvidia-cublas-cu12==12.4.5.8",
+    "nvidia-cuda-runtime-cu12==12.4.127",
+    "semif-phase1[llamacpp] @ git+https://github.com/TheoLeeCJ/SemIf.git@1f2dea3e25379f9dfc98cb83c324f00ab5deda37",
+    "uvicorn==0.29.0",
+]
+
+[project.scripts]
+aiworker-semif = "semif_sidecar.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["semif_sidecar"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv]
+package = true
+environments = ["sys_platform == 'win32'"]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true

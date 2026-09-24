@@ -1,49 +1,122 @@
-# SemIf Sidecar Contract
+# AIWorker SemIf sidecar
 
-AIWorker only depends on the versioned HTTP contract implemented by
-`screenplay_review.semif_adapter.SemIfAdapter`. Model code and weights do not
-belong in this repository.
+这个目录把 SemIf 固定在独立环境中。它不会把 Torch、Transformers 或
+llama.cpp 安装进 AIWorker 主环境，也不会替代现有剧本审核 API。
 
-## Local contract smoke test
+固定版本见 `upstream-manifest.json`。当前只开放两个内部接口：
 
-Start the deterministic fake service:
+- `GET /health`
+- `POST /v1/score`
 
-```powershell
-uv run uvicorn deploy.semif.fake_server:app --host 127.0.0.1 --port 18766
-```
+`/v1/score` 接受一个 `state` 和一组 `criteria`，服务端将它们转换成 SemIf
+原生的 `id/state/question/options` 行。`shared` 模式要求全部规则复用完全相同
+的 state。返回值保留上游概率、logits、Prompt 哈希、模型元数据和计时；服务
+不会生成理由、引文或修改建议。
 
-Verify it:
+## 安装
 
-```powershell
-curl.exe http://127.0.0.1:18766/health
-```
+先从上游 README 指定的模型仓库取得
+`Qwen_Qwen3.5-4B-Q4_K_M.gguf`，然后计算文件 SHA-256。模型约 3 GB。sidecar
+使用 CUDA 12.4 版 llama.cpp，把模型全部层卸载到 NVIDIA GPU，并为剧本审核
+打开 24,576 token 上下文；当前配置针对 RTX 3060 12 GB。
 
-Then set `SCREENPLAY_REVIEW_ENGINE=semif` only for an explicit internal test.
-The fake service validates integration and recovery; it does not measure review
-quality.
+固定文件 revision 和预期 SHA-256 已记录在 `upstream-manifest.json`。当前预期
+哈希为 `13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983`；
+启动时仍会重新计算本地文件并拒绝不一致的模型。
 
-## Required real-service endpoints
-
-- `GET /health` returns `status`, `model_name`, and immutable `model_revision`.
-- `POST /v1/reviews` accepts `semif-review-request-v1` and returns
-  `semif-review-response-v1`.
-- Repeating a `client_request_id` must be safe and should return the same result.
-- Logs must not retain content windows, prompts, credentials, or screenplay text.
-- Unknown rule, option, scope, or schema versions must return a 4xx response.
-
-## Container environment
-
-`docker-compose.yml` is an environment contract, not a bundled implementation.
-Set `SEMIF_IMAGE` to the approved image and `SEMIF_MODEL_DIR` to a local model
-directory before starting it. No default image or weight name is intentionally
-provided because the real SemIf distribution and licence have not yet been
-confirmed.
+以下示例把虚拟环境、uv 缓存、Hugging Face 缓存和模型全部放在 D 盘；
+仓库本身可以继续保留在 C 盘。先在仓库根目录执行安装：
 
 ```powershell
-$env:SEMIF_IMAGE = "approved-registry/semif:approved-revision"
-$env:SEMIF_MODEL_DIR = "D:\models\approved-semif-model"
-docker compose -f deploy/semif/docker-compose.yml up -d
+$env:UV_PROJECT_ENVIRONMENT = "D:\AiWorker\SemIf\.venv"
+$env:UV_CACHE_DIR = "D:\AiWorker\uv-cache"
+$env:HF_HOME = "D:\AiWorker\huggingface-cache"
+$env:HF_HUB_CACHE = "D:\AiWorker\huggingface-cache\hub"
+
+uv sync --frozen --project deploy/semif
 ```
 
-An RTX 4060 8 GB result only proves that the tested quantized profile starts and
-serves the benchmark. It does not establish BF16 production capacity.
+CUDA wheel 的 CPU 辅助内核启用了 AVX-512，而 i5-12400F 只能稳定使用 AVX2。
+因此还需用同版本 CPU wheel 准备兼容内核，CUDA 权重和计算仍保留在 GPU：
+
+```powershell
+uv pip install --target "D:\AiWorker\SemIf\cpu-kernel" --no-deps `
+  "llama-cpp-python @ https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35/llama_cpp_python-0.3.35-py3-none-win_amd64.whl"
+
+$native = "D:\AiWorker\SemIf\native\llama-cpp-cu124-avx2"
+New-Item -ItemType Directory -Force $native | Out-Null
+Copy-Item "D:\AiWorker\SemIf\.venv\Lib\site-packages\llama_cpp\lib\*.dll" $native
+Copy-Item "D:\AiWorker\SemIf\cpu-kernel\llama_cpp\lib\ggml-cpu.dll" $native -Force
+```
+
+把模型放到 `D:\AiWorker\SemIf\models` 后，在同一个 PowerShell 窗口启动服务：
+
+也可以由仓库内启动器从固定的 Hugging Face revision 下载并校验模型（下载约
+3 GB；模型文件保存在 D 盘，不会进入 Git）：
+
+```powershell
+$env:HF_ENDPOINT = "https://hf-mirror.com"  # 网络可直连 Hugging Face 时可省略
+uv run python scripts/start_semif_pilot.py --download-model --check-only
+```
+
+如需使用其他安装根目录，先设置 `SCREENPLAY_REVIEW_SEMIF_ROOT`；启动器会将
+虚拟环境、可执行文件、模型和 native 目录统一解析到该根目录。
+
+```powershell
+$env:UV_PROJECT_ENVIRONMENT = "D:\AiWorker\SemIf\.venv"
+$env:UV_CACHE_DIR = "D:\AiWorker\uv-cache"
+$env:HF_HOME = "D:\AiWorker\huggingface-cache"
+$env:HF_HUB_CACHE = "D:\AiWorker\huggingface-cache\hub"
+$env:SCREENPLAY_REVIEW_SEMIF_ROOT = "D:\AiWorker\SemIf"
+$env:SEMIF_GGUF_PATH = "D:\AiWorker\SemIf\models\Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+$env:SEMIF_GGUF_SHA256 = "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983"
+$env:SEMIF_LLAMA_THREADS = "6"
+$env:SEMIF_LLAMA_GPU_LAYERS = "-1"
+$env:SEMIF_MAX_TOKENS = "24576"
+$env:LLAMA_CPP_LIB_PATH = "D:\AiWorker\SemIf\native\llama-cpp-cu124-avx2"
+
+uv run --frozen --project deploy/semif aiworker-semif
+```
+
+服务就绪后，`Invoke-RestMethod http://127.0.0.1:8765/health` 应返回
+`status: ok`、`backend: llamacpp`、`accelerator: cuda`、`n_gpu_layers: -1` 和
+`max_prompt_tokens: 24576`。sidecar 仍复用 SemIf 固定版本的提示构造、分词验证、
+共享状态评分和结果格式，只在加载时把上游默认的 CPU 层数改为全层 GPU 卸载。
+
+模型首次启动还需要下载固定 revision 的参考 tokenizer。生产环境应预先缓存，
+并把实际 GGUF SHA-256 纳入部署记录。
+
+## 接入 AIWorker
+
+用户不需要选择特殊启动脚本。使用普通 WebGUI，在“剧本审核”页面选择“完整审核”
+或“本地初审”即可；系统会把选择冻结到单条审核任务中。“本地初审”首次使用时会
+自动准备 D 盘 sidecar，未就绪时不会静默改用完整审核，而是让用户确认。
+
+以下环境变量只用于调整本地服务地址和运行参数：
+
+```powershell
+$env:SCREENPLAY_REVIEW_SEMIF_URL = "http://127.0.0.1:8765"
+$env:SCREENPLAY_REVIEW_SEMIF_TIMEOUT_SECONDS = "900"
+$env:SCREENPLAY_REVIEW_SEMIF_MAX_RETRIES = "0"
+```
+
+仓库根目录的 `启动Web程序-SemIf试点.bat` 和 `启动程序-SemIf试点.bat` 仅作为
+维护入口保留，用于在打开 GUI 前预热 sidecar；它们不再全局改变审核方式。
+
+可在不启动 GUI 的情况下验证本机安装：
+
+```powershell
+uv run python scripts/start_semif_pilot.py --check-only
+```
+
+SemIf 结果始终标记为 `manual_review`。选项概率是给定选项之间的条件分数，
+没有完成剧本领域校准前不得显示为业务“置信度”或用于自动通过。
+
+服务启动后可用真实 UTF-8 剧本文本测量当前硬件：
+
+```powershell
+uv run python scripts/benchmark_semif_screenplay.py `
+  --text-file "project-1-script (1).txt" `
+  --repeat 3 `
+  --output data/semif-benchmark.json
+```

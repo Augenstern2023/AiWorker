@@ -980,6 +980,16 @@ class FreeCreativeModeService:
                     (now, now, int(project_id), str(resource_ref)),
                 )
             else:
+                resource = conn.execute(
+                    "SELECT content_json FROM creative_episodes WHERE id = ? AND project_id = ? "
+                    "AND stage = ? AND episode_number = ? AND resource_scope = 'free' "
+                    "AND status IN ('draft', 'locked')",
+                    (int(resource_ref), int(project_id), stage, number),
+                ).fetchone()
+                if resource is None:
+                    raise ValueError("自由创作资源不存在或无法锁定")
+                if stage == "beats":
+                    validate_beats(json.loads(resource["content_json"]), allow_legacy=True)
                 cursor = conn.execute(
                     "UPDATE creative_episodes SET status = 'locked', locked_at = ?, updated_at = ? "
                     "WHERE id = ? AND project_id = ? AND stage = ? AND episode_number = ? "
@@ -1055,6 +1065,8 @@ class FreeCreativeModeService:
                 resource = dict(resource_row)
                 if resource["status"] not in {"draft", "locked", "approved"}:
                     raise ValueError(f"第 {episode_number} 集当前 {label} 无法锁定")
+                if stage == "beats":
+                    validate_beats(json.loads(resource["content_json"]), allow_legacy=True)
                 records.append((episode_number, head, resource))
 
             now = time.time()

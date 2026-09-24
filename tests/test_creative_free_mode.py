@@ -1437,7 +1437,7 @@ def test_context_options_lists_only_locked_free_resources(postgres_creative):
         actor_user_id="owner-1",
     )
     beats = service.create_episode_resource(
-        project["id"], "beats", 1, {"beats": []},
+        project["id"], "beats", 1, {"beats": [{"order": 1}]},
         expected_head_revision=0, actor_user_id="owner-1",
     )
     service.lock_resource(
@@ -1476,7 +1476,7 @@ def test_free_episode_series_lock_locks_all_current_heads_atomically(
     project = create_free_project(repository)
     service = FreeCreativeModeService(repository)
     content = (
-        {"beats": []}
+        {"beats": [{"order": 1}]}
         if stage == "beats"
         else {"episode_title": "", "scenes": []}
     )
@@ -1532,7 +1532,7 @@ def test_free_episode_series_lock_rejects_missing_episode_without_partial_lock(
         project["id"],
         "beats",
         1,
-        {"beats": []},
+        {"beats": [{"order": 1}]},
         expected_head_revision=0,
         actor_user_id="owner-1",
     )

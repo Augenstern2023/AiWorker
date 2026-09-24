@@ -7,4 +7,8 @@
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 #
 
-"""Local SemIf deployment helpers."""
+"""Isolated HTTP process for the pinned SemIf runtime."""
+
+from .runtime import SEMIF_UPSTREAM_COMMIT
+
+__all__ = ["SEMIF_UPSTREAM_COMMIT"]

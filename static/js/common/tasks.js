@@ -226,7 +226,10 @@
                     saveState: {}, notice: '', noticeType: 'success', noticeTimer: null,
                     moduleCapabilities: {},
                     sequentialGeneration: {
-                        modelOptions: [], modelRecordId: '', defaultModelRecordId: '', reasoningEffortOptions: [], reasoningEffort: '', loading: false, error: '', pending: null
+                        modelOptions: [], modelRecordId: '', defaultModelRecordId: '',
+                        reasoningEffortOptions: [], reasoningEffort: '',
+                        unavailableModelRecordId: '', unavailableReasoningEffort: '',
+                        loading: false, error: '', pending: null
                     },
                     promptLibrary: {
                         stage: '', loading: false, saving: false, deletingTemplateId: '', error: '',

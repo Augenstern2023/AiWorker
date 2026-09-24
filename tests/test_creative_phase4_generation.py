@@ -1171,10 +1171,20 @@ async def test_beats_generation_limits_an_episode_to_three_scenes():
         "state_change": "居民改变态度", "cost": "周晴失去资格", "opposition_tactic": "公开质疑",
         "continuity_updates": [],
     }
-    invalid_payload = {"beats": [{**beat, "order": number} for number in range(1, 8)]}
+    for beat_count in (1, 2, 3):
+        valid_payload = {"beats": [{**beat, "order": number} for number in range(1, beat_count + 1)]}
+        assert len(validate_beats(valid_payload)["beats"]) == beat_count
 
+    invalid_payload = {"beats": [{**beat, "order": number} for number in range(1, 5)]}
     with pytest.raises(ValueError, match="不能超过 3 个"):
         validate_beats(invalid_payload)
+
+
+def test_legacy_beats_are_readable_within_limit_but_not_when_over_limit():
+    legacy = [{"order": number} for number in range(1, 4)]
+    assert validate_beats({"beats": legacy}, allow_legacy=True) == {"beats": legacy}
+    with pytest.raises(ValueError, match="不能超过 3 个"):
+        validate_beats({"beats": legacy + [{"order": 4}]}, allow_legacy=True)
 
 
 def test_continuity_ledger_carries_the_latest_prop_state_across_episodes():

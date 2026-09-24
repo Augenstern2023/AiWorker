@@ -720,6 +720,8 @@ def test_server_resolved_style_is_appended_without_replacing_output_contract():
     legacy = beats_messages({"project": {"name": "测试"}}, 1)
 
     assert "严格使用 {\"beats\": [...]} 格式" in styled[0]["content"]
+    assert "每集只能生成 1-3 个 Beats" in styled[0]["content"]
+    assert "每集最多 3 个场次" in styled[0]["content"]
     assert "当前项目创作风格要求" in styled[0]["content"]
     assert "身份信息差" in styled[0]["content"]
     assert "当前项目创作风格要求" not in legacy[0]["content"]

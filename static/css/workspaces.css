@@ -250,6 +250,15 @@
         .editor-command-actions-group { align-items: center; }
         .editor-episode-select { width: 170px; }
         .editor-episode-select .form-label { display: block; margin-bottom: 3px; }
+        .beats-rule-note { margin-top: 8px; color: #b9d6ff; font-size: 12px; }
+        .beats-editor-limit {
+            display: flex; align-items: center; gap: 4px; margin: 0 0 12px; padding: 8px 10px;
+            border: 1px solid rgba(83, 155, 255, .28); border-radius: 6px; color: #b9d6ff;
+            background: rgba(83, 155, 255, .08); font-size: 12px;
+        }
+        .beats-editor-limit.is-invalid {
+            border-color: rgba(248, 113, 113, .6); color: #fecaca; background: rgba(127, 29, 29, .25);
+        }
         .editor-episode-meta {
             justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 10px;
             border-bottom: 1px solid var(--border);
@@ -289,6 +298,7 @@
         .beats-editor-group h6 { margin-bottom: 10px; color: #f2f5fa; font-size: 13px; }
         .beats-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
         .beats-field-grid-core { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .beats-field-grid-primary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .beats-field-grid label,
         .beats-continuity-update label { display: grid; min-width: 0; gap: 5px; color: #b9c4d0; font-size: 12px; }
         .beats-field-wide { grid-column: 1 / -1; }
@@ -306,6 +316,22 @@
         .beats-all-scene-list { display: grid; gap: 9px; margin-top: 10px; padding-left: 23px; }
         .beats-all-scene-list li { padding-bottom: 9px; border-bottom: 1px solid #2b3545; }
         .beats-all-scene-list li:last-child { border-bottom: 0; padding-bottom: 0; }
+        .beats-hook-field { border-color: rgba(167, 139, 250, .6); box-shadow: 0 0 0 1px rgba(167, 139, 250, .14); }
+        .beats-secondary-details,
+        .beats-inspector-details { border-top: 1px solid #35435a; }
+        .beats-secondary-details summary,
+        .beats-inspector-details summary {
+            display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; padding: 11px 0;
+            cursor: pointer; color: #c7dcff; font-size: 13px; list-style-position: inside;
+        }
+        .beats-secondary-details summary span,
+        .beats-inspector-details summary span { color: var(--muted); font-size: 11px; font-weight: 400; }
+        .beats-secondary-details[open] summary,
+        .beats-inspector-details[open] summary { color: #fff; }
+        .beats-inspector-details { border-top: 0; }
+        .beats-inspector-details summary { padding: 13px; }
+        .beats-inspector-details summary .beats-panel-heading { margin: 0; }
+        .beats-inspector-details > .beats-inspector-section { border-top: 1px solid #35435a; }
         @media (max-width: 1199.98px) {
             .beats-editor-layout { grid-template-columns: minmax(160px, .75fr) minmax(0, 2fr); }
             .beats-inspector { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -321,7 +347,8 @@
             .beats-scene-rail .beats-panel-heading { display: none; }
             .beats-scene-rail-item { min-width: 146px; }
             .beats-field-grid,
-            .beats-field-grid-core { grid-template-columns: 1fr; }
+            .beats-field-grid-core,
+            .beats-field-grid-primary { grid-template-columns: 1fr; }
             .beats-inspector { grid-column: auto; grid-template-columns: 1fr; }
             .beats-inspector-section { border-right: 0; border-bottom: 1px solid #35435a; }
             .beats-inspector-section:last-child { border-bottom: 0; }
@@ -937,6 +964,18 @@
         .creative-topic-table .lifecycle-badge {
             color: #fff !important;
             border: 1px solid rgba(255, 255, 255, .16);
+        }
+        .creative-topic-table .topic-row {
+            cursor: pointer;
+        }
+        .creative-topic-table .topic-row:hover > td,
+        .creative-topic-table .topic-row:focus-visible > td,
+        .creative-topic-table .topic-row--selected > td {
+            background: rgba(59, 130, 246, .12);
+        }
+        .creative-topic-table .topic-row:focus-visible {
+            outline: 2px solid #9bc6ff;
+            outline-offset: -2px;
         }
         .lifecycle-pending-review { background: #6b7280; }
         .lifecycle-adopted { background: #0f766e; }

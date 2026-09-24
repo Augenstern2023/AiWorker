@@ -185,7 +185,7 @@
                     rankSource: creativeRankSourcePreference(creativePlatformPreference()),
                     items: [], loading: false, error: '', breakdown: null
                 },
-                topicLibrary: {platform: '', lifecycleStatus: '', category: '', minScore: '', hasLocked: '', items: [], loading: false, error: '', breakdown: null},
+                topicLibrary: {platform: '', lifecycleStatus: '', category: '', minScore: '', hasLocked: '', items: [], selectedTopicId: null, loading: false, error: '', breakdown: null},
                 adoptionNotice: {success: true, title: '', message: ''},
                 adoptionNoticeModal: null,
                 generatedContentPreview: {topic: null, project: null, stage: '', versions: [], selectedVersion: 0, selectedResourceId: '', snapshot: null, loading: false, error: ''},

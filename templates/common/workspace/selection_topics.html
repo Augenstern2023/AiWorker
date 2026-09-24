@@ -22,7 +22,7 @@
             </header>
             <div class="workspace-context-bar">
                 <div class="workspace-context-bar__primary"><strong>Filter</strong><span class="small text-muted ms-2">按平台、进度和拆解状态缩小选题范围</span></div>
-                <div class="workspace-context-bar__meta"><span>Inspect</span><span class="small">从结果行使用预览、下载或项目操作</span></div>
+                <div class="workspace-context-bar__meta"><span>Inspect</span><span class="small">点击结果行查看详情，预览操作会在此处或弹窗中打开。</span></div>
             </div>
             <div class="workspace-toolbar" aria-label="选题库筛选">
                     <div class="row g-2 align-items-end">
@@ -57,7 +57,7 @@
                     <thead><tr><th>选题</th><th>简介</th><th>来源</th><th>榜单</th><th>题材</th><th>推荐分 <button type="button" class="btn btn-link btn-sm p-0 text-muted score-help" data-bs-toggle="tooltip" data-bs-placement="top" title="由热度、增长、新鲜度和平台适配加权计算；数据缺失时会动态归一化" aria-label="推荐分计算说明"><i class="bi bi-info-circle"></i></button></th><th>状态</th><th>拆解版本</th><th>操作</th></tr></thead>
                     <tbody>
                         <template x-for="topic in topicLibrary.items" :key="topic.id">
-                            <tr>
+                            <tr class="topic-row" :class="{'topic-row--selected': Number(topic.id) === Number(topicLibrary.selectedTopicId)}" @click="selectTopicLibraryTopic(topic)" @keydown.enter.prevent="selectTopicLibraryTopic(topic)" tabindex="0">
                                 <td><div class="fw-semibold" x-text="topic.title"></div><small class="text-muted" x-text="topic.recommendation || '暂无推荐理由'"></small></td>
                                 <td class="topic-desc-cell" :title="topic.description">
                                     <span class="topic-desc-clamp" x-text="topic.description || '暂无简介'"></span>
@@ -71,7 +71,7 @@
                                 <td class="text-nowrap">
                                     <button class="btn btn-sm btn-outline-primary me-1" x-show="topic.status === 'adopted'" @click="openTopicDownload(topic)" :title="dramaDownloadRunningForTopic(topic.id) ? '查看下载进度' : '下载剧集'" aria-label="下载剧集"><span class="spinner-border spinner-border-sm" x-show="dramaDownloadRunningForTopic(topic.id)"></span><i class="bi bi-download" x-show="!dramaDownloadRunningForTopic(topic.id)"></i></button>
                                     <button class="btn btn-sm btn-outline-secondary me-1" x-show="topic.status === 'adopted' && ((topic.source_platforms || [topic.platform]).includes('hg') || (topic.source_platforms || [topic.platform]).includes('dy'))" @click="openTopicReviewCapture(topic)" :title="dramaReviewActionTitle(topic)" :aria-label="dramaReviewActionTitle(topic)"><span class="spinner-border spinner-border-sm" x-show="dramaReviewRunningForTopic(topic)"></span><i class="bi bi-chat-square-text" x-show="!dramaReviewRunningForTopic(topic)"></i></button>
-                                    <button class="btn btn-sm btn-outline-light me-1" x-show="topic.status === 'adopted' && Number(topic.downloaded_episode_count || 0) > 0" @click="createTopicLibraryBreakdown(topic)" :disabled="breakdownJobRunningForTopic(topic.id)" :title="breakdownJobRunningForTopic(topic.id) ? '该剧目正在拆解' : (topic.latest_breakdown_id ? '预览拆解' : '生成拆解')" :aria-label="topic.latest_breakdown_id ? '预览拆解' : '生成拆解'"><span class="spinner-border spinner-border-sm" x-show="breakdownJobRunningForTopic(topic.id)"></span><i class="bi bi-diagram-3" x-show="!breakdownJobRunningForTopic(topic.id)"></i></button>
+                                    <button class="btn btn-sm btn-outline-secondary me-1" x-show="topicLibraryBreakdownActionVisible(topic)" @click.stop="createTopicLibraryBreakdown(topic)" :disabled="breakdownJobRunningForTopic(topic.id)" :title="topicLibraryBreakdownActionTitle(topic)" :aria-label="topicLibraryBreakdownActionTitle(topic)"><span class="spinner-border spinner-border-sm" x-show="breakdownJobRunningForTopic(topic.id)"></span><i class="bi bi-diagram-3" x-show="!breakdownJobRunningForTopic(topic.id)"></i></button>
                                     <button class="btn btn-sm btn-outline-info me-1" x-show="topic.status === 'adopted' && Number(topic.transcript_episode_count || 0) > 0" @click="openTopicTranscriptPreview(topic)" title="预览字幕转写" aria-label="预览字幕转写"><i class="bi bi-eye"></i></button>
                                     <button class="btn btn-sm btn-outline-info me-1" x-show="topic.status === 'adopted' && Number(topic.transcript_episode_count || 0) > 0" @click="downloadTopicTranscripts(topic)" title="下载字幕转写" aria-label="下载字幕转写"><i class="bi bi-file-earmark-arrow-down"></i></button>
                                     <button class="btn btn-sm btn-outline-success me-1" x-show="topic.status === 'adopted' && topic.locked_breakdown_id && !topic.lifecycle_project_id" @click="openCreateProject(topic)" title="创建项目及任务"><i class="bi bi-folder-plus"></i></button>
@@ -88,9 +88,19 @@
             </div>
                 </div>
               </div>
-              <aside class="workspace-inspector">
-                <div class="workspace-inspector__header"><strong>Inspect</strong><span class="small text-muted">选题详情</span></div>
-                <div class="workspace-inspector__body small text-muted">请使用结果行中的预览、下载、拆解或项目操作查看现有详情；业务详情仍由原有弹窗承载。</div>
+              <aside class="workspace-inspector" aria-label="选题详情预览">
+                <div class="workspace-inspector__header"><div><div class="workspace-section-label">Inspect</div><strong x-text="selectedTopicLibraryTopic()?.title || '选题详情'"></strong></div><span class="small text-muted" x-text="selectedTopicLibraryTopic() ? '已选中' : '未选择'"></span></div>
+                <div class="workspace-inspector__body">
+                    <div x-show="!selectedTopicLibraryTopic()" class="workspace-empty small text-muted text-center py-4"><i class="bi bi-cursor-text fs-4 d-block mb-2"></i>点击左侧结果行查看选题预览</div>
+                    <template x-if="selectedTopicLibraryTopic()">
+                        <div class="topic-inspector-content">
+                            <div class="d-flex justify-content-between align-items-start gap-2 mb-3"><div><div class="workspace-section-label">Topic</div><h5 class="mb-1" x-text="selectedTopicLibraryTopic().title"></h5><div class="small text-muted" x-text="selectedTopicLibraryTopic().recommendation || '暂无推荐理由'"></div></div><span class="badge lifecycle-badge" :class="topicLifecycleClass(selectedTopicLibraryTopic().lifecycle_status)" x-text="selectedTopicLibraryTopic().lifecycle_label || topicLifecycleLabel(selectedTopicLibraryTopic())"></span></div>
+                            <p class="small mb-3" x-text="selectedTopicLibraryTopic().description || '暂无简介'"></p>
+                            <dl class="row g-2 small mb-3"><dt class="col-5 text-muted">平台</dt><dd class="col-7 mb-0" x-text="(selectedTopicLibraryTopic().source_platforms || [selectedTopicLibraryTopic().platform]).join('、') || '-' "></dd><dt class="col-5 text-muted">题材</dt><dd class="col-7 mb-0" x-text="selectedTopicLibraryTopic().category || '-' "></dd><dt class="col-5 text-muted">榜单</dt><dd class="col-7 mb-0" x-text="selectedTopicLibraryTopic().rank_type || '-' "></dd><dt class="col-5 text-muted">推荐分</dt><dd class="col-7 mb-0 fw-semibold" x-text="Number(selectedTopicLibraryTopic().score || 0).toFixed(1)"></dd><dt class="col-5 text-muted">素材进度</dt><dd class="col-7 mb-0" x-text="`${Number(selectedTopicLibraryTopic().downloaded_episode_count || 0)} 集已就绪`"></dd></dl>
+                            <div class="border-top pt-3"><div class="workspace-section-label mb-2">Preview</div><div class="d-grid gap-2"><button type="button" class="btn btn-primary btn-sm" x-show="topicInspectorPreviewLabel(selectedTopicLibraryTopic())" @click.stop="previewSelectedTopicLibraryTopic()"><i class="bi bi-eye me-1"></i><span x-text="topicInspectorPreviewLabel(selectedTopicLibraryTopic())"></span></button><button type="button" class="btn btn-outline-info btn-sm" x-show="Number(selectedTopicLibraryTopic().transcript_episode_count || 0) > 0" @click.stop="openTopicTranscriptPreview(selectedTopicLibraryTopic())"><i class="bi bi-file-earmark-text me-1"></i>查看字幕转写</button><button type="button" class="btn btn-outline-secondary btn-sm" x-show="topicLibraryBreakdownActionVisible(selectedTopicLibraryTopic())" @click.stop="createTopicLibraryBreakdown(selectedTopicLibraryTopic())"><i class="bi bi-diagram-3 me-1"></i><span x-text="selectedTopicLibraryTopic().latest_breakdown_id || selectedTopicLibraryTopic().locked_breakdown_id ? '查看拆解' : '配置拆解'"></span></button><button type="button" class="btn btn-outline-secondary btn-sm" x-show="selectedTopicLibraryTopic().lifecycle_project_id && selectedTopicLibraryTopic().can_open_project" @click.stop="openTopicProject(selectedTopicLibraryTopic())"><i class="bi bi-folder2-open me-1"></i>打开项目</button></div><div x-show="!topicInspectorPreviewLabel(selectedTopicLibraryTopic()) && !selectedTopicLibraryTopic().latest_breakdown_id && !selectedTopicLibraryTopic().locked_breakdown_id" class="small text-muted">当前还没有可预览的内容；已有选题可从“配置拆解”进入，未下载素材时提交会提示先下载剧集。</div></div>
+                        </div>
+                    </template>
+                </div>
               </aside>
             </div>
         </section>

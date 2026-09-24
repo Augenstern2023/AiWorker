@@ -1164,7 +1164,7 @@ async def test_beats_generation_requires_change_cost_tactic_and_continuity_updat
 
 
 @pytest.mark.asyncio
-async def test_beats_generation_limits_an_episode_to_six_beats():
+async def test_beats_generation_limits_an_episode_to_three_scenes():
     beat = {
         "scene": "大厅", "characters": ["周晴"], "goal": "说服居民", "obstacle": "无人信任",
         "emotion_change": "克制到坚定", "turn": "证据出现", "hook": "对手到场",
@@ -1173,7 +1173,7 @@ async def test_beats_generation_limits_an_episode_to_six_beats():
     }
     invalid_payload = {"beats": [{**beat, "order": number} for number in range(1, 8)]}
 
-    with pytest.raises(ValueError, match="1-6"):
+    with pytest.raises(ValueError, match="不能超过 3 个"):
         validate_beats(invalid_payload)
 
 

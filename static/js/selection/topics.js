@@ -96,6 +96,61 @@ window.aiworkerModules.push(() => ({
                     window.open(`/api/creative/topics/export?${params.toString()}`, '_blank', 'noopener');
                 },
 
+                syncTopicLibrarySelection(items) {
+                    const topics = Array.isArray(items) ? items : [];
+                    const selectedId = this.topicLibrary.selectedTopicId;
+                    if (selectedId != null && topics.some(item => Number(item.id) === Number(selectedId))) return;
+                    this.topicLibrary.selectedTopicId = topics[0]?.id ?? null;
+                },
+
+                selectTopicLibraryTopic(topic) {
+                    if (!topic?.id) return;
+                    this.topicLibrary.selectedTopicId = topic.id;
+                },
+
+                selectedTopicLibraryTopic() {
+                    const selectedId = this.topicLibrary.selectedTopicId;
+                    return this.topicLibrary.items.find(item => Number(item.id) === Number(selectedId)) || null;
+                },
+
+                topicInspectorPreviewLabel(topic) {
+                    if (!topic) return '';
+                    if (this.generatedLifecycleStage(topic.lifecycle_status) && topic.lifecycle_project_id) return '预览已生成内容';
+                    if (Number(topic.transcript_episode_count || 0) > 0) return '预览字幕转写';
+                    if (topic.latest_breakdown_id || topic.locked_breakdown_id) return '打开拆解';
+                    return '';
+                },
+
+                previewSelectedTopicLibraryTopic() {
+                    const topic = this.selectedTopicLibraryTopic();
+                    if (!topic) return;
+                    if (this.generatedLifecycleStage(topic.lifecycle_status) && topic.lifecycle_project_id) {
+                        return this.openGeneratedContentPreview(topic);
+                    }
+                    if (Number(topic.transcript_episode_count || 0) > 0) {
+                        return this.openTopicTranscriptPreview(topic);
+                    }
+                    if (topic.latest_breakdown_id || topic.locked_breakdown_id) {
+                        return this.createTopicLibraryBreakdown(topic);
+                    }
+                },
+
+                topicLibraryBreakdownActionVisible(topic) {
+                    return Boolean(topic && (
+                        topic.status === 'adopted'
+                        || topic.latest_breakdown_id
+                        || topic.locked_breakdown_id
+                    ));
+                },
+
+                topicLibraryBreakdownActionTitle(topic) {
+                    if (!topic) return '拆解';
+                    if (this.breakdownJobRunningForTopic(topic.id)) return '该剧目正在拆解';
+                    if (topic.latest_breakdown_id || topic.locked_breakdown_id) return '预览拆解';
+                    if (Number(topic.downloaded_episode_count || 0) > 0) return '生成拆解';
+                    return '配置拆解（需先下载剧集）';
+                },
+
                 async fetchTopicLibrary() {
                     this.topicLibrary.loading = true;
                     this.topicLibrary.error = '';
@@ -104,6 +159,7 @@ window.aiworkerModules.push(() => ({
                         const cached = window.aiworkerUi?.readCache(cacheKey);
                         if (cached && !cached.stale) {
                             this.topicLibrary.items = cached.value;
+                            this.syncTopicLibrarySelection(cached.value);
                             this.topicLibrary.loading = false;
                             return;
                         }
@@ -120,6 +176,7 @@ window.aiworkerModules.push(() => ({
                         if (!res.ok) throw new Error(data.detail || '读取选题库失败');
                         const items = data.items || [];
                         this.topicLibrary.items = items;
+                        this.syncTopicLibrarySelection(items);
                         window.aiworkerUi?.writeCache(cacheKey, items, {ttlMs: 30000});
                     } catch (e) {
                         if (window.aiworkerApi?.isAbortError(e)) return;
@@ -177,7 +234,11 @@ window.aiworkerModules.push(() => ({
 
                 async openGeneratedContentPreview(topic) {
                     const stage = this.generatedLifecycleStage(topic?.lifecycle_status);
-                    if (!stage || !topic?.lifecycle_project_id) return;
+                    if (!stage) return;
+                    if (!topic?.lifecycle_project_id) {
+                        this.topicLibrary.error = '当前选题缺少关联项目，暂时无法预览已生成内容';
+                        return;
+                    }
                     this.generatedContentPreview = {topic, project: null, stage, versions: [], selectedVersion: 0, selectedResourceId: '', snapshot: null, loading: true, error: ''};
                     this.modal('generatedContentPreviewModal')?.show();
                     await this.loadGeneratedContentVersion();

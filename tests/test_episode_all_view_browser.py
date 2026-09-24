@@ -660,6 +660,8 @@ def test_beats_focus_editor_selects_and_updates_the_original_scene() -> None:
                 creativeActionDisabled() { return false; },
                 creativeActionRunning() { return false; },
                 creativeResourceEditable() { return true; },
+                beatsWithinSceneLimit() { return true; },
+                beatsSceneLimitMessage() { return '每集最多 3 个场次'; },
                 canBatchLockProjectBeats() { return false; },
                 isFreeCreativeProject() { return false; },
                 freeStageCan() { return false; },
@@ -682,6 +684,7 @@ def test_beats_focus_editor_selects_and_updates_the_original_scene() -> None:
         )
         page.add_script_tag(path=alpine_script)
         page.locator(".beats-focus-editor").wait_for(state="visible")
+        page.locator("details.beats-secondary-details").evaluate("element => element.open = true")
 
         scene_rail = page.locator(".beats-scene-rail button")
         scene_rail.nth(1).click()

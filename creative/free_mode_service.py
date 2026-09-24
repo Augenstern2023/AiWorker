@@ -18,6 +18,7 @@ from typing import Any
 from creative.outline_fields import outline_field_source_fingerprint
 from creative.prompt_templates import PROMPT_TEMPLATE_VERSION
 from creative.repository import CreativeRepository, canonical_request_hash
+from creative.script_service import validate_beats
 
 
 FREE_SCOPE = "free"
@@ -43,6 +44,21 @@ class FreeCreativeModeService:
 
     def __init__(self, repository: CreativeRepository) -> None:
         self.repository = repository
+
+    @staticmethod
+    def _normalize_episode_content(stage: str, content: dict[str, Any]) -> dict[str, Any]:
+        """Validate free-mode episode payloads at both create and update boundaries."""
+        if stage != "beats":
+            return content
+        if not isinstance(content, dict):
+            raise ValueError("Beats 内容必须是对象")
+        beats = content.get("beats")
+        if not isinstance(beats, list):
+            raise ValueError("Beats 内容必须包含 beats 数组")
+        if not beats:
+            return dict(content)
+        normalized = validate_beats(content, allow_legacy=True)
+        return {**content, "beats": normalized["beats"]}
 
     @contextmanager
     def _migration_transaction(
@@ -674,6 +690,7 @@ class FreeCreativeModeService:
         stage = self._assert_stage(stage)
         if stage not in {"beats", "script"}:
             raise ValueError("episode resource stage must be beats or script")
+        content = self._normalize_episode_content(stage, content)
         with self.repository._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             project = self._raw_project(conn, project_id)
@@ -736,6 +753,7 @@ class FreeCreativeModeService:
         content: dict[str, Any],
     ) -> dict[str, Any]:
         stage = self._assert_stage(stage)
+        content = self._normalize_episode_content(stage, content)
         with self.repository._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             project = self._raw_project(conn, project_id)
@@ -804,6 +822,7 @@ class FreeCreativeModeService:
                 raise ValueError("自由创作资源类型错误")
             if row["status"] != "draft":
                 raise ValueError("已锁定的自由创作资源不能修改")
+            content = self._normalize_episode_content(stage, content)
             conn.execute(
                 f"UPDATE {table} SET content_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(content, ensure_ascii=False), time.time(), int(item_id)),

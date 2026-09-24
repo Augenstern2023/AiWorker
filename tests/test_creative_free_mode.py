@@ -789,6 +789,18 @@ def test_free_head_uses_per_module_compare_and_swap(postgres_creative):
     assert second["head"]["revision"] == 2
 
 
+def test_free_beats_reject_more_than_three_scenes(postgres_creative):
+    project = create_free_project(postgres_creative)
+    service = FreeCreativeModeService(postgres_creative)
+
+    with pytest.raises(ValueError, match="不能超过 3 个"):
+        service.create_episode_resource(
+            project["id"], "beats", 1,
+            {"beats": [{"beat": f"场次 {index}"} for index in range(1, 5)]},
+            expected_head_revision=0, actor_user_id="owner-1",
+        )
+
+
 def test_free_brief_versions_follow_the_current_head(postgres_creative):
     repository = postgres_creative
     project = create_free_project(repository)

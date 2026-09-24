@@ -377,14 +377,14 @@ def validate_beats(payload: dict[str, Any] | list[Any], *, allow_legacy: bool = 
     beats = payload.get("beats")
     if not isinstance(beats, list) or not beats:
         raise ValueError("beats 至少包含一个节拍")
+    if len(beats) > 3:
+        raise ValueError("每集 Beats 场次不能超过 3 个")
     enhanced_fields = {"state_change", "cost", "opposition_tactic", "continuity_updates"}
     if allow_legacy and all(
         isinstance(beat, dict) and not (enhanced_fields & set(beat))
         for beat in beats
     ):
         return {"beats": [dict(beat) for beat in beats]}
-    if len(beats) > 6:
-        raise ValueError("每集 Beats 数量必须为 1-6 个")
     fields = {
         "order", "scene", "characters", "goal", "obstacle", "emotion_change", "turn", "hook",
         "state_change", "cost", "opposition_tactic", "continuity_updates",

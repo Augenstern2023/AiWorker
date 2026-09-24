@@ -680,6 +680,19 @@ def test_beats_workspace_uses_command_and_inspect_layout():
     assert "selectedProjectBeat" in script
 
 
+def test_beats_workspace_prioritizes_core_fields_and_collapses_secondary_analysis():
+    html = _source("templates/common/workspace/project_beats.html")
+    script = _source("static/js/writing/beats.js")
+
+    assert "每集最多 3 个场次" in html
+    assert "beatsWithinSceneLimit" in html
+    assert "场景：${beat.scene" not in html
+    assert "转折：${beat.turn || '-'} · 结尾钩子：${beat.hook || '-'}" in html
+    assert "class=\"beats-secondary-details\"" in html
+    assert "行动目标、阻力、情绪变化、局面变化、代价、对抗策略" in html
+    assert "beatsSceneLimitMessage" in script
+
+
 def test_review_findings_render_outline_anchors_with_writer_facing_labels():
     review_script = _source("static/js/review/scripts.js")
 
@@ -1197,6 +1210,8 @@ def test_topic_library_keeps_archived_topics_and_offers_restore_and_delete():
     assert "deleteTopicLibrary(topic)" in section
     assert section.count('x-show="topic.status === \'archived\'"') == 2
     assert 'x-show="topic.status === \'adopted\' && Number(topic.transcript_episode_count || 0) > 0"' in section
+    assert 'x-show="topicLibraryBreakdownActionVisible(topic)"' in section
+    assert "topic.latest_breakdown_id || topic.locked_breakdown_id" in section
     assert 'x-show="topic.status === \'adopted\' && topic.locked_breakdown_id && !topic.lifecycle_project_id"' in section
     assert 'x-show="topic.status === \'adopted\' && topic.lifecycle_project_id && topic.can_open_project"' in section
     assert "method: 'DELETE'" in breakdowns
@@ -1217,6 +1232,23 @@ def test_topic_library_offers_filtered_csv_and_excel_exports():
     assert '@click="exportTopicLibrary(\'csv\')"' in section
     assert '@click="exportTopicLibrary(\'excel\')"' in section
     assert "导出选题库" in section
+
+
+def test_topic_library_inspector_previews_the_selected_topic():
+    topics = _source("static/js/selection/topics.js")
+    tasks = _source("static/js/common/tasks.js")
+    section = _source("templates/common/workspace/selection_topics.html")
+
+    assert "selectedTopicId" in tasks
+    assert "syncTopicLibrarySelection(items)" in topics
+    assert "selectedTopicLibraryTopic()" in topics
+    assert "previewSelectedTopicLibraryTopic()" in topics
+    assert "topicLibraryBreakdownActionVisible(topic)" in topics
+    assert '@click="selectTopicLibraryTopic(topic)"' in section
+    assert "topic-row--selected" in section
+    assert "点击结果行查看详情，预览操作会在此处或弹窗中打开。" in section
+    assert "topicInspectorPreviewLabel(selectedTopicLibraryTopic())" in section
+    assert "配置拆解" in section
 
 
 def test_today_hits_restores_the_last_selected_platform_after_refresh():

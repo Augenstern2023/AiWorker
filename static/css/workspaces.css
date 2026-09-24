@@ -1629,6 +1629,207 @@
         .workspace-inspector__body { padding: var(--space-4); }
         .workspace-editor-pane { padding: var(--space-4); }
         .workspace-inspector { align-self: start; background: rgba(25, 29, 39, .72); }
+
+        /* Shared editorial components for creative content surfaces. These
+           primitives intentionally target existing stage hooks as well, so a
+           visual hierarchy change does not require changing Alpine bindings. */
+        .workspace-card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+            gap: var(--space-4);
+            min-width: 0;
+        }
+        .workspace-card,
+        .outline-episode-card,
+        .workspace-episode-card,
+        .workspace-scene-card,
+        .workspace-relation-card {
+            min-width: 0;
+            padding: var(--space-4);
+            color: var(--color-text);
+            background: linear-gradient(145deg, rgba(34, 40, 53, .94), rgba(25, 29, 39, .96));
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-panel);
+            box-shadow: 0 12px 28px rgba(0, 0, 0, .16);
+        }
+        .workspace-card,
+        .workspace-relation-card {
+            transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+        }
+        .workspace-card:hover,
+        .workspace-card:focus-within,
+        .workspace-relation-card:hover,
+        .workspace-relation-card:focus-within {
+            border-color: rgba(83, 155, 255, .72);
+            box-shadow: 0 14px 30px rgba(0, 0, 0, .24), 0 0 0 1px rgba(83, 155, 255, .12);
+        }
+        .workspace-card > :first-child,
+        .workspace-episode-card > :first-child,
+        .workspace-scene-card > :first-child,
+        .workspace-relation-card > :first-child { margin-top: 0; }
+        .workspace-card > :last-child,
+        .workspace-episode-card > :last-child,
+        .workspace-scene-card > :last-child,
+        .workspace-relation-card > :last-child { margin-bottom: 0; }
+        .workspace-card__header,
+        .workspace-episode-card__header,
+        .workspace-scene-card__header,
+        .workspace-relation-card__header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: var(--space-3);
+            margin-bottom: var(--space-3);
+        }
+        .workspace-card__title,
+        .workspace-episode-card__title,
+        .workspace-scene-card__title,
+        .workspace-relation-card__title {
+            min-width: 0;
+            color: var(--color-text);
+            font-weight: 700;
+            overflow-wrap: anywhere;
+        }
+        .workspace-card__meta,
+        .workspace-episode-card__meta,
+        .workspace-scene-card__meta,
+        .workspace-relation-card__meta {
+            color: var(--color-muted);
+            font-size: .78rem;
+            line-height: 1.45;
+        }
+        .workspace-section {
+            min-width: 0;
+            padding: var(--space-4) 0;
+            border-top: 1px solid rgba(48, 55, 71, .86);
+        }
+        .workspace-section:first-child { padding-top: 0; border-top: 0; }
+        .workspace-section:last-child { padding-bottom: 0; }
+        .workspace-section > :first-child { margin-top: 0; }
+        .workspace-section > :last-child { margin-bottom: 0; }
+        .workspace-field-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: var(--space-3);
+            min-width: 0;
+        }
+        .outline-field-grid { min-width: 0; }
+        .outline-field-grid > * { min-width: 0; }
+        .workspace-field-grid > * { min-width: 0; }
+        .workspace-field-grid > label,
+        .workspace-field-grid > .form-field {
+            display: grid;
+            align-content: start;
+            gap: var(--space-2);
+            min-width: 0;
+            color: #b9c4d0;
+            font-size: .78rem;
+            line-height: 1.45;
+        }
+        .workspace-field-grid .form-control,
+        .workspace-field-grid .form-select { min-width: 0; }
+        .workspace-featured-field,
+        .beats-field-grid-primary > label:first-child,
+        .workspace-hook-field {
+            min-width: 0;
+            padding: var(--space-3);
+            border: 1px solid rgba(83, 155, 255, .48);
+            border-radius: var(--radius-control);
+            background: rgba(59, 130, 246, .08);
+        }
+        .workspace-featured-field,
+        .beats-field-grid-primary > label:first-child { box-shadow: inset 3px 0 0 #539bff; }
+        .workspace-featured-field > :first-child,
+        .workspace-hook-field > :first-child { color: #c7dcff; font-weight: 700; }
+        .workspace-hook-field {
+            border-color: rgba(245, 158, 11, .62);
+            background: rgba(245, 158, 11, .1);
+            box-shadow: inset 3px 0 0 #f59e0b;
+        }
+        .workspace-hook-field > :first-child { color: #fde68a; }
+        .workspace-script-block {
+            min-width: 0;
+            margin: var(--space-2) 0 0;
+            padding: var(--space-3) var(--space-4);
+            color: #e5edf8;
+            line-height: 1.75;
+            overflow-wrap: anywhere;
+            background: rgba(15, 23, 42, .38);
+            border: 1px solid rgba(48, 55, 71, .92);
+            border-left: 3px solid #64748b;
+            border-radius: 0 var(--radius-control) var(--radius-control) 0;
+        }
+        .workspace-script-block[data-block-type="dialogue"],
+        .workspace-script-block[data-type="dialogue"] { border-left-color: #60a5fa; }
+        .workspace-script-block[data-block-type="voiceover"],
+        .workspace-script-block[data-type="voiceover"] { border-left-color: #a78bfa; }
+        .workspace-detail-disclosure {
+            min-width: 0;
+            border-top: 1px solid rgba(48, 55, 71, .86);
+        }
+        .beats-secondary-details,
+        .beats-inspector-details { min-width: 0; }
+        .workspace-detail-disclosure > summary {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: var(--space-2);
+            padding: var(--space-3) 0;
+            color: #c7dcff;
+            cursor: pointer;
+            font-size: .84rem;
+            font-weight: 650;
+        }
+        .beats-secondary-details > summary,
+        .beats-inspector-details > summary {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: var(--space-2);
+            min-height: 44px;
+        }
+        .workspace-detail-disclosure > summary:focus-visible {
+            outline: 2px solid #9bc6ff;
+            outline-offset: 2px;
+        }
+        .workspace-detail-disclosure[open] > summary { color: #fff; }
+        .workspace-detail-disclosure > :not(summary) { min-width: 0; }
+
+        /* Existing creative include hooks receive the same component grammar. */
+        .beats-all-episodes { display: grid; gap: var(--space-4); }
+        .beats-episode-summary,
+        .beats-all-scene-card,
+        .beats-ledger-item,
+        .creative-relation-card {
+            min-width: 0;
+            color: var(--color-text);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-panel);
+            box-shadow: 0 12px 28px rgba(0, 0, 0, .16);
+        }
+        .beats-episode-summary { padding: var(--space-4) !important; background: linear-gradient(145deg, rgba(34, 40, 53, .94), rgba(25, 29, 39, .96)); }
+        .beats-all-scene-card { background: rgba(15, 23, 42, .48); }
+        .beats-all-scene-card .beats-hook-callout { margin-top: var(--space-2); }
+        .beats-editor-group { min-width: 0; }
+        .beats-field-grid { gap: var(--space-3); }
+        .beats-field-grid > label { padding: var(--space-3); border-radius: var(--radius-control); background: rgba(34, 40, 53, .52); }
+        .beats-field-grid-primary > label:first-child { border-color: rgba(83, 155, 255, .48); box-shadow: inset 3px 0 0 #539bff; }
+        .beats-hook-editor-field { background: rgba(245, 158, 11, .1); }
+        .beats-secondary-details { margin-top: var(--space-3); }
+        .beats-secondary-details,
+        .beats-inspector-details { border-top-color: rgba(48, 55, 71, .86); }
+        .beats-secondary-details summary,
+        .beats-inspector-details summary { min-height: 44px; }
+        .creative-project-settings-grid { gap: var(--space-3); }
+        .workspace-stage-editor--characters .character-card,
+        .workspace-stage-editor--characters .creative-character-card,
+        .workspace-stage-editor--characters .relation-card,
+        .workspace-stage-editor--outlines .outline-episode-card,
+        .workspace-stage-editor--scripts .script-scene-card { min-width: 0; }
+        .workspace-stage-editor--scripts .border-top.py-3 { padding: var(--space-4) 0 !important; border-top-color: rgba(48, 55, 71, .86) !important; }
+        .workspace-stage-editor--scripts .border-top.py-3 > .small.fw-semibold { color: #dbeafe; }
+        .workspace-stage-editor--scripts .workspace-prose { margin-top: var(--space-2); }
+
         /* Long-form creative copy uses a calmer reading rhythm than controls. */
         .workspace-prose,
         .workspace-prose-editor,

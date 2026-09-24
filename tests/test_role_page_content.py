@@ -46,6 +46,14 @@ def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
+def _class_tokens(html: str) -> set[str]:
+    return {
+        class_name
+        for class_attribute in re.findall(r'\bclass="([^"]+)"', html)
+        for class_name in class_attribute.split()
+    }
+
+
 def test_role_templates_are_standalone_pages_with_external_scripts():
     for relative_path in ROLE_TEMPLATES:
         html = _read(f"templates/{relative_path}")
@@ -305,6 +313,35 @@ def test_creative_long_form_fields_use_shared_prose_editor_semantics():
     scripts = _read("templates/common/workspace/project_scripts.html")
     assert 'x-model="block.text"' in scripts
     assert 'x-model="block.text"' in scripts and "workspace-prose-editor" in scripts
+
+
+def test_creative_includes_keep_component_class_contracts_explicit():
+    expected = {
+        "project_blueprints.html": {
+            "workspace-stage-editor--brief", "workspace-prose-editor",
+            "creative-direction-grid",
+        },
+        "project_characters.html": {
+            "workspace-stage-editor--characters", "workspace-prose-editor",
+            "workspace-scroll-x",
+        },
+        "project_outlines.html": {
+            "workspace-stage-editor--outlines", "workspace-card-grid",
+            "workspace-card", "workspace-section", "outline-field-grid",
+        },
+        "project_beats.html": {
+            "workspace-stage-editor--beats", "beats-field-grid",
+            "beats-hook-field", "beats-secondary-details",
+        },
+        "project_scripts.html": {
+            "workspace-stage-editor--scripts", "workspace-card-grid",
+            "workspace-card", "workspace-scene-card", "workspace-script-block",
+            "workspace-section",
+        },
+    }
+    for filename, required_classes in expected.items():
+        classes = _class_tokens(_read(f"templates/common/workspace/{filename}"))
+        assert required_classes <= classes, (filename, required_classes - classes)
 
 
 def test_project_brief_long_text_controls_wrap_without_clipping():

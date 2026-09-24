@@ -6,6 +6,7 @@
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 
+import re
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -129,6 +130,52 @@ def test_creative_prose_typography_is_scoped_to_long_form_content():
         assert page.has_element(classes={"workspace-prose"}) or page.has_element(
             classes={"workspace-prose-editor"}
         ), template
+
+
+def test_creative_component_css_contract_has_explicit_focus_and_mobile_rules():
+    css = source("static/css/workspaces.css")
+    component_classes = (
+        "workspace-card-grid", "workspace-card", "workspace-section",
+        "workspace-episode-card", "workspace-scene-card",
+        "workspace-script-block", "workspace-field-grid",
+        "workspace-featured-field", "workspace-hook-field",
+        "workspace-detail-disclosure", "workspace-relation-card",
+    )
+    for class_name in component_classes:
+        assert re.search(rf"(?m)^\s*\.{re.escape(class_name)}(?:[\s,{{]|$)", css), class_name
+    assert ":focus-visible" in css
+    assert "@media (max-width: 575.98px)" in css
+    assert re.search(r"(?:^|[,{]\s*)body\s*\{[^}]*overflow-x\s*:\s*hidden", css, re.S) is None
+    assert re.search(r"(?:^|[,{]\s*)html\s*\{[^}]*overflow-x\s*:\s*hidden", css, re.S) is None
+
+
+def test_creative_includes_render_explicit_component_surfaces():
+    expected = {
+        "planning/brief.html": {
+            "workspace-stage-editor--brief", "workspace-prose-editor",
+            "creative-direction-grid",
+        },
+        "planning/characters.html": {
+            "workspace-stage-editor--characters", "workspace-prose-editor",
+            "workspace-scroll-x",
+        },
+        "writing/outlines.html": {
+            "workspace-stage-editor--outlines", "workspace-card-grid",
+            "workspace-card", "workspace-section", "outline-field-grid",
+        },
+        "writing/beats.html": {
+            "workspace-stage-editor--beats", "beats-field-grid",
+            "beats-hook-field", "beats-secondary-details",
+        },
+        "writing/scripts.html": {
+            "workspace-stage-editor--scripts", "workspace-card-grid",
+            "workspace-card", "workspace-scene-card", "workspace-script-block",
+            "workspace-section",
+        },
+    }
+    for template, required_classes in expected.items():
+        page = rendered_page(template)
+        assert required_classes <= page.classes, (template, required_classes - page.classes)
 
 
 def test_heavy_libraries_are_route_scoped():

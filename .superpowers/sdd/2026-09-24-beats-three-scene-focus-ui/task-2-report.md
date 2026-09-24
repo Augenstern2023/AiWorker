@@ -28,3 +28,11 @@ git diff --check
 ## 范围与提交
 
 本任务仅提交 Beats UI 文件、对应 UI 契约测试和本报告。未提交或修改 `creative/free_mode_service.py`、`static/js/writing/optimization_draft.js`。
+
+## 定向修复（2026-09-24）
+
+- 以 `b3b71395` 的 `project_beats.html` 为基准确认模板已恢复并保持受版本控制，未留下删除状态。
+- 单集编辑区调用已有 `removeProjectBeat`，补充可访问的删除场次按钮；权限/锁定状态仍通过 `creativeResourceEditable` 禁用，历史超限可删除场次恢复到 3 以内。
+- 全集卡片移除模板来源，只保留版本状态、`N/3`、四个核心字段与单集入口；单集 provenance 保留。
+- 收紧连续性账本及其输入项的最小宽度、表格固定布局和长文本换行，避免 1024/390 页面级横向溢出。
+- 场次导航改为完整换行并提供包含场景与钩子的 `aria-label`，不再依赖截断文本。

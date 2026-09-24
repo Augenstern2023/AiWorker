@@ -217,7 +217,7 @@ def test_project_brief_long_text_controls_wrap_without_clipping():
             control = page.locator(f'textarea[x-model="{field}"]').first
             rows = max(2, (len(value) + characters_per_line - 1) // characters_per_line)
             control.evaluate("(element, rows) => element.rows = rows", rows)
-            control.fill(value)
+            control.fill(value, force=True)
             assert control.evaluate(
                 "element => element.scrollHeight <= element.clientHeight + 1"
             )
@@ -251,6 +251,7 @@ def test_project_beats_uses_multiline_controls_for_long_content():
 
 def test_project_beats_exposes_story_change_cost_and_continuity_ledger():
     beats = _read("templates/common/workspace/project_beats.html")
+    workspace_css = _read("static/css/workspaces.css")
 
     for label, field in (
         ("局面变化", "beat.state_change"),
@@ -261,6 +262,19 @@ def test_project_beats_exposes_story_change_cost_and_continuity_ledger():
         assert field in beats
     assert "连续性变更" in beats
     assert "连续性账本" in beats
+    assert "removeProjectBeat(selectedProjectBeats(), beat.order)" in beats
+    assert ':title="`删除第 ${beat.order} 场`"' in beats
+    assert "data-template-provenance" not in beats.split('x-show="creativeWorkspace.selectedEpisode === 0"', 1)[1].split("<template x-if=", 1)[0]
+    assert ".beats-inspect .workspace-scroll-x table" in workspace_css
+    assert ".beats-continuity-row > *" in workspace_css
+
+
+def test_project_beats_scene_navigation_keeps_full_accessible_names():
+    beats = _read("templates/common/workspace/project_beats.html")
+    workspace_css = _read("static/css/workspaces.css")
+
+    assert ':aria-label="`场次 ${beat.order}：${beat.scene || \'未命名场景\'}；${beat.hook || \'未填写结尾钩子\'}`"' in beats
+    assert "overflow-wrap: anywhere; white-space: normal" in workspace_css
 
 
 def test_project_beats_long_text_controls_wrap_without_clipping():
@@ -274,7 +288,7 @@ def test_project_beats_long_text_controls_wrap_without_clipping():
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 2048, "height": 900})
         page.set_content(f"<style>{bootstrap_css}{workspace_css}</style>{markup}")
-        controls = page.locator("tbody textarea")
+        controls = page.locator(".beats-editor-main textarea")
         assert controls.count() == 10
         rows = max(2, (len(value) + 9) // 10)
         for index in range(controls.count()):

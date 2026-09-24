@@ -1286,7 +1286,7 @@
             #originalProjectModal select { max-width: 100%; }
         }
 /* Beats focused editor: keep the four decision-making fields visible and defer analysis detail. */
-.beats-workspace { --beats-ink: #f4f7fb; --beats-muted: #8e9aae; --beats-panel: rgba(19, 27, 42, .86); --beats-line: rgba(148, 163, 184, .18); }
+.beats-workspace { --beats-ink: #f4f7fb; --beats-muted: #8e9aae; --beats-panel: rgba(19, 27, 42, .86); --beats-line: rgba(148, 163, 184, .18); min-width: 0; max-width: 100%; }
 .beats-command { gap: 18px; }
 .beats-command__actions { align-items: end; justify-content: flex-end; }
 .beats-section-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; color: var(--beats-ink); font-weight: 650; }
@@ -1307,11 +1307,13 @@
 .beats-limit-alert { padding: 10px 12px; border: 1px solid rgba(248, 113, 113, .45); border-radius: 9px; background: rgba(127, 29, 29, .2); color: #fecaca; font-size: .86rem; }
 .beats-editor-topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
 .beats-editor-layout { display: grid; grid-template-columns: minmax(170px, 220px) minmax(0, 1fr) minmax(230px, 300px); gap: 16px; align-items: start; }
-.beats-scene-nav, .beats-inspect { min-width: 0; }
+.beats-editor-shell, .beats-edit-card, .beats-scene-nav, .beats-inspect, .beats-details { min-width: 0; max-width: 100%; }
+.beats-inspect { overflow: hidden; }
 .beats-scene-nav__item { display: flex; width: 100%; gap: 10px; align-items: flex-start; margin-bottom: 8px; padding: 11px; border: 1px solid var(--beats-line); border-radius: 10px; background: transparent; color: var(--beats-muted); text-align: left; }
 .beats-scene-nav__item:hover, .beats-scene-nav__item.is-active { border-color: rgba(96, 165, 250, .65); background: rgba(30, 64, 175, .18); color: var(--beats-ink); }
 .beats-scene-nav__number { display: grid; width: 24px; height: 24px; flex: 0 0 24px; place-items: center; border-radius: 50%; background: rgba(96, 165, 250, .16); color: #bfdbfe; font-size: .78rem; }
-.beats-scene-nav__item strong, .beats-scene-nav__item small { display: block; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.beats-scene-nav__item > .text-start { min-width: 0; flex: 1 1 auto; }
+.beats-scene-nav__item strong, .beats-scene-nav__item small { display: block; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
 .beats-scene-nav__item small { margin-top: 3px; color: var(--beats-muted); font-size: .72rem; }
 .beats-edit-card__heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .beats-core-edit-grid, .beats-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
@@ -1321,11 +1323,15 @@
 .beats-details > summary { cursor: pointer; color: #cbd5e1; font-size: .84rem; font-weight: 650; }
 .beats-details > summary::marker { color: #60a5fa; }
 .beats-continuity-block { padding: 10px 0; border-bottom: 1px solid var(--beats-line); }
-.beats-continuity-row { display: grid; grid-template-columns: 90px minmax(90px, 1fr) minmax(0, 2fr) 34px; gap: 6px; margin-bottom: 8px; }
+.beats-continuity-row { display: grid; grid-template-columns: 90px minmax(90px, 1fr) minmax(0, 2fr) 34px; gap: 6px; margin-bottom: 8px; min-width: 0; }
+.beats-continuity-row > * { min-width: 0; max-width: 100%; }
 .beats-continuity-row textarea { min-height: 42px; resize: vertical; }
+.beats-inspect .workspace-scroll-x { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; }
+.beats-inspect .workspace-scroll-x table { width: 100%; max-width: 100%; min-width: 0; table-layout: fixed; }
+.beats-inspect .workspace-scroll-x th, .beats-inspect .workspace-scroll-x td { min-width: 0; overflow-wrap: anywhere; word-break: break-word; white-space: normal; }
 @media (max-width: 1100px) { .beats-editor-layout { grid-template-columns: minmax(150px, 190px) minmax(0, 1fr); } .beats-inspect { grid-column: 1 / -1; } }
-@media (max-width: 700px) { .beats-command, .beats-editor-topbar { align-items: stretch; flex-direction: column; } .beats-command__actions { justify-content: flex-start; } .beats-command__actions > * { max-width: 100%; } .beats-editor-layout { grid-template-columns: 1fr; } .beats-scene-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; } .beats-scene-nav .beats-section-heading { grid-column: 1 / -1; } .beats-scene-nav__item { margin: 0; } .beats-scene-nav__item strong, .beats-scene-nav__item small { max-width: 100px; } .beats-core-edit-grid, .beats-detail-grid { grid-template-columns: 1fr; } .beats-continuity-row { grid-template-columns: 1fr 1fr; } .beats-continuity-row textarea { grid-column: 1 / -1; } }
-@media (max-width: 420px) { .beats-episode-card, .beats-editor-shell, .beats-edit-card { padding: 12px; } .beats-summary-grid { grid-template-columns: 1fr; } .beats-scene-nav { grid-template-columns: 1fr; } .beats-scene-nav .beats-section-heading { grid-column: auto; } .beats-scene-nav__item strong, .beats-scene-nav__item small { max-width: none; } }
+@media (max-width: 700px) { .beats-command, .beats-editor-topbar { align-items: stretch; flex-direction: column; } .beats-command__actions { justify-content: flex-start; } .beats-command__actions > * { max-width: 100%; } .beats-editor-layout { grid-template-columns: 1fr; } .beats-scene-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; } .beats-scene-nav .beats-section-heading { grid-column: 1 / -1; } .beats-scene-nav__item { min-width: 0; margin: 0; } .beats-scene-nav__item strong, .beats-scene-nav__item small { max-width: none; } .beats-core-edit-grid, .beats-detail-grid { grid-template-columns: 1fr; } .beats-continuity-row { grid-template-columns: 1fr 1fr; } .beats-continuity-row textarea { grid-column: 1 / -1; } }
+@media (max-width: 420px) { .beats-episode-card, .beats-editor-shell, .beats-edit-card { padding: 12px; } .beats-summary-grid { grid-template-columns: 1fr; } .beats-scene-nav { grid-template-columns: 1fr; } .beats-scene-nav .beats-section-heading { grid-column: auto; } }
 @media (prefers-reduced-motion: reduce) { .beats-workspace *, .beats-workspace *::before, .beats-workspace *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; } }
 
 /* Optimization draft Beats editor follows the same focused hierarchy without changing its payload. */

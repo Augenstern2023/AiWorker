@@ -1,153 +1,17 @@
-<div id="project-beats-workspace">
-    <div class="d-flex justify-content-between align-items-end mb-3">
-        <div>
-            <h5 class="mb-1">单集 Beats</h5>
-            <div class="small text-muted" x-text="isFreeCreativeProject() ? '当前集可独立创建或生成，不要求先有大纲。' : '只生成场景节拍、目标、阻力和转折，不生成完整正文或台词'"></div>
-            <div class="small text-muted" x-text="`全剧草稿进度：${projectBeatsGenerationProgress().generated}/${projectBeatsGenerationProgress().required}；锁定：${lockedProjectBeatsProgress().locked}/${lockedProjectBeatsProgress().required}`"></div>
-        </div>
-        <div class="d-flex gap-2 align-items-end">
-            <button class="btn btn-outline-info btn-sm" type="button" @click="openPromptLibrary('beats')" title="选择 Beats 生成模板"><i class="bi bi-sliders me-1"></i>选择生成模板</button>
-            <div>
-                <label class="form-label small">集数</label>
-                <select class="form-select form-select-sm" style="width:170px" x-model.number="creativeWorkspace.selectedEpisode">
-                    <option :value="0">全集</option>
-                    <template x-for="episodeNumber in Array.from({length: Number(creativeWorkspace.project.target_episode_count || 0)}, (_, index) => index + 1)" :key="`beats-episode-${episodeNumber}`">
-                        <option :value="episodeNumber" x-text="projectBeatEpisodeLabel(episodeNumber)"></option>
-                    </template>
-                </select>
-            </div>
-            <button class="btn btn-primary btn-sm" @click="generateProjectBeats" :disabled="creativeWorkspace.selectedEpisode === 0 || creativeActionDisabled('beats') || (isFreeCreativeProject() && !freeStageCan('beats', 'can_generate'))"><span class="spinner-border spinner-border-sm me-1" x-show="creativeActionRunning('beats')"></span><i class="bi bi-arrow-clockwise me-1" x-show="!creativeActionRunning('beats') && selectedProjectBeats()"></i><i class="bi bi-magic me-1" x-show="!creativeActionRunning('beats') && !selectedProjectBeats()"></i><span x-text="creativeActionRunning('beats') ? '生成中' : projectBeatGenerationActionLabel()"></span></button>
+<div id="project-beats-workspace" class="beats-workspace" x-init="$data.selectedBeatOrder = $data.selectedBeatOrder || 1">
+    <div class="workspace-page-header beats-command mb-3">
+        <div class="workspace-page-header__context"><div class="workspace-kicker">BEATS / EPISODE EDITOR</div><h5 class="mb-1">单集 Beats</h5><div class="small text-muted">先看清场景、人物、转折与结尾钩子，再按需展开分析细节。</div><div class="small text-muted mt-1" x-text="`全剧草稿进度：${projectBeatsGenerationProgress().generated}/${projectBeatsGenerationProgress().required}；锁定：${lockedProjectBeatsProgress().locked}/${lockedProjectBeatsProgress().required}`"></div></div>
+        <div class="workspace-toolbar beats-command__actions">
+            <button class="btn btn-outline-info btn-sm" type="button" @click="openPromptLibrary('beats')"><i class="bi bi-sliders me-1"></i>选择生成模板</button>
+            <div><label class="form-label small mb-1" for="beats-episode-select">集数</label><select id="beats-episode-select" class="form-select form-select-sm" style="width:170px" x-model.number="creativeWorkspace.selectedEpisode"><option :value="0">全集</option><template x-for="episodeNumber in Array.from({length: Number(creativeWorkspace.project.target_episode_count || 0)}, (_, index) => index + 1)" :key="`beats-episode-${episodeNumber}`"><option :value="episodeNumber" x-text="projectBeatEpisodeLabel(episodeNumber)"></option></template></select></div>
+            <button class="btn btn-primary btn-sm" @click="generateProjectBeats" :disabled="creativeWorkspace.selectedEpisode === 0 || creativeActionDisabled('beats') || (isFreeCreativeProject() && !freeStageCan('beats', 'can_generate'))"><span class="spinner-border spinner-border-sm me-1" x-show="creativeActionRunning('beats')"></span><i class="bi bi-magic me-1" x-show="!creativeActionRunning('beats')"></i><span x-text="creativeActionRunning('beats') ? '生成中' : projectBeatGenerationActionLabel()"></span></button>
             <button class="btn btn-outline-light btn-sm" x-show="isFreeCreativeProject()" @click="createFreeBlankResource('beats')" :disabled="creativeWorkspace.selectedEpisode === 0 || !freeStageCan('beats', 'can_create_blank')"><i class="bi bi-plus-lg me-1"></i>空白版本</button>
-            <button class="btn btn-outline-primary btn-sm" @click="generateProjectBeatsSeries" :disabled="creativeActionDisabled('beats', {series: true})"><i class="bi bi-collection-play me-1"></i><span x-text="seriesGenerationActionLabel('beats')"></span></button>
-            <button class="btn btn-warning btn-sm" @click="completeProjectBeatsBatch" :disabled="creativeActionDisabled('beats') || !canBatchLockProjectBeats()" title="完成并锁定当前全部 Beats 草稿"><i class="bi bi-lock-fill me-1"></i><span x-text="isFreeCreativeProject() ? '全集完成并锁定' : '批量完成并锁定'"></span></button>
-            <button type="button" class="btn btn-outline-primary btn-sm" @click="openProjectScriptWorkspace" title="场次剧本" aria-label="场次剧本"><i class="bi bi-file-earmark-richtext me-1" aria-hidden="true"></i>场次剧本</button>
-            <a class="btn btn-outline-secondary btn-sm" x-show="currentGeneratedResourceId('beats')" :href="creativeGeneratedDownloadUrl('beats', 'md')" title="下载当前 Beats"><i class="bi bi-file-earmark-arrow-down"></i></a>
-            <button class="btn btn-outline-secondary btn-sm" type="button" x-show="projectStageEpisodeItems('beats').length" @click="openEpisodeDownload('beats')" title="选择多集或全集下载"><i class="bi bi-download me-1"></i>多集/全集下载</button>
+            <button class="btn btn-outline-primary btn-sm" @click="generateProjectBeatsSeries" :disabled="creativeActionDisabled('beats', {series: true})"><i class="bi bi-collection-play me-1"></i><span x-text="seriesGenerationActionLabel('beats')"></span></button><button class="btn btn-warning btn-sm" @click="completeProjectBeatsBatch" :disabled="creativeActionDisabled('beats') || !canBatchLockProjectBeats()"><i class="bi bi-lock-fill me-1"></i><span x-text="isFreeCreativeProject() ? '全集完成并锁定' : '批量完成并锁定'"></span></button><button type="button" class="btn btn-outline-primary btn-sm" @click="openProjectScriptWorkspace"><i class="bi bi-file-earmark-richtext me-1"></i>场次剧本</button><a class="btn btn-outline-secondary btn-sm" x-show="currentGeneratedResourceId('beats')" :href="creativeGeneratedDownloadUrl('beats', 'md')" title="下载当前 Beats"><i class="bi bi-file-earmark-arrow-down"></i></a><button class="btn btn-outline-secondary btn-sm" type="button" x-show="projectStageEpisodeItems('beats').length" @click="openEpisodeDownload('beats')" title="选择多集或全集下载"><i class="bi bi-download me-1"></i>多集/全集下载</button>
         </div>
     </div>
-
-    <div class="beats-generation-status border-top border-bottom py-2 mb-3" x-show="creativeWorkspace.startingAction === 'beats' || creativeWorkspace.activeAction === 'beats'" x-cloak>
-        <div class="d-flex justify-content-between align-items-center"><span class="small" x-text="creativeWorkspace.jobMessage || '正在创建生成任务'"></span><span class="small text-muted" x-text="creativeProgressText()"></span></div>
-        <div class="progress mt-2" style="height:6px"><div class="progress-bar" :class="creativeWorkspace.jobStatus === 'failed' ? 'bg-danger' : ''" :style="`width:${creativeProgressPercent()}%`"></div></div>
-    </div>
-
-    <div x-show="creativeWorkspace.selectedEpisode === 0" x-cloak>
-        <template x-for="item in projectStageEpisodeItems('beats')" :key="`all-beats-${item.id}`">
-            <section class="border border-secondary rounded p-3 mb-3">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <span class="fw-semibold" x-text="`第 ${item.episode_number} 集 · v${item.version} · ${creativeWorkflowStatusLabel(item.status)}`"></span>
-                    <a class="btn btn-outline-primary btn-sm" :href="creativeModuleUrl('beats', item.episode_number)">打开单集编辑</a>
-                </div>
-                <div class="small text-muted mb-2" data-template-provenance x-text="creativeTemplateProvenance(item)"></div>
-                <div class="table-responsive">
-                    <table class="table table-sm align-middle mb-0">
-                        <thead><tr><th style="width:55px">序号</th><th>场景</th><th>人物</th><th>行动目标</th><th>阻力</th><th>情绪变化</th><th>局面变化</th><th>代价</th><th>对抗策略</th><th>转折</th><th>结尾钩子</th></tr></thead>
-                        <tbody><template x-for="beat in (item.content?.beats || [])" :key="`all-${item.id}-${beat.order}`"><tr><td x-text="beat.order"></td><td x-text="beat.scene || '-' "></td><td x-text="listText(beat.characters) || '-' "></td><td x-text="beat.goal || '-' "></td><td x-text="beat.obstacle || '-' "></td><td x-text="beat.emotion_change || '-' "></td><td x-text="beat.state_change || '-' "></td><td x-text="beat.cost || '-' "></td><td x-text="beat.opposition_tactic || '-' "></td><td x-text="beat.turn || '-' "></td><td x-text="beat.hook || '-' "></td></tr></template></tbody>
-                    </table>
-                </div>
-            </section>
-        </template>
-        <div class="text-center text-muted py-4" x-show="!projectStageEpisodeItems('beats').length">尚未生成任何 Beats</div>
-    </div>
-
-    <template x-if="creativeWorkspace.selectedEpisode > 0 && selectedProjectBeats()">
-        <div>
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <span class="fw-semibold" x-text="`第 ${creativeWorkspace.selectedEpisode} 集 · v${selectedProjectBeats().version} · ${creativeWorkflowStatusLabel(selectedProjectBeats().status)}`"></span>
-                <div class="d-flex gap-2">
-                    <button class="btn btn-outline-light btn-sm" @click="saveProjectEpisode(selectedProjectBeats())" :disabled="!creativeResourceEditable(selectedProjectBeats())"><i class="bi bi-save me-1"></i>保存</button>
-                    <button class="btn btn-warning btn-sm" @click="completeProjectBeats" :disabled="!creativeResourceEditable(selectedProjectBeats())"><i class="bi bi-lock-fill me-1"></i>完成并锁定</button>
-                    <button class="btn btn-outline-info btn-sm" x-show="isFreeCreativeProject() && ['locked', 'approved'].includes(selectedProjectBeats().status)" @click="createFreeResourceRevision('beats')" :disabled="!freeStageCan('beats', 'can_create_revision')"><i class="bi bi-files me-1"></i>创建修订版</button>
-                    <span class="small text-muted">草稿 · 已完成 · 已替代</span>
-                </div>
-            </div>
-            <div class="small text-muted mb-2" data-template-provenance x-text="creativeTemplateProvenance(selectedProjectBeats())"></div>
-
-            <div class="table-responsive">
-                <table class="table table-sm align-middle">
-                    <thead><tr><th style="width:55px">序号</th><th>场景</th><th>人物</th><th>行动目标</th><th>阻力</th><th>情绪变化</th><th>局面变化</th><th>代价</th><th>对抗策略</th><th>转折</th><th>结尾钩子</th></tr></thead>
-                    <tbody>
-                        <template x-for="beat in selectedProjectBeats().content.beats" :key="beat.order">
-                            <tr>
-                                <td x-text="beat.order"></td>
-                                <td><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(beat.scene, 10)" x-model="beat.scene" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></td>
-                                <td><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(listText(beat.characters), 10)" :value="listText(beat.characters)" @input="setListField(beat, 'characters', $event.target.value)" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></td>
-                                <td><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(beat.goal, 10)" x-model="beat.goal" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></td>
-                                <td><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(beat.obstacle, 10)" x-model="beat.obstacle" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></td>
-                                <td><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(beat.emotion_change, 10)" x-model="beat.emotion_change" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></td>
-                                <td><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(beat.state_change, 10)" x-model="beat.state_change" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></td>
-                                <td><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(beat.cost, 10)" x-model="beat.cost" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></td>
-                                <td><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(beat.opposition_tactic, 10)" x-model="beat.opposition_tactic" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></td>
-                                <td><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(beat.turn, 10)" x-model="beat.turn" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></td>
-                                <td><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(beat.hook, 10)" x-model="beat.hook" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></td>
-                            </tr>
-                        </template>
-                    </tbody>
-                </table>
-            </div>
-
-            <div class="d-flex justify-content-between align-items-center mt-3">
-                <h6 class="small text-muted mb-0">连续性变更</h6>
-            </div>
-            <template x-for="beat in selectedProjectBeats().content.beats" :key="`continuity-${beat.order}`">
-                <section class="border-top py-3">
-                    <div class="d-flex justify-content-between align-items-center mb-2">
-                        <span class="small fw-semibold" x-text="`节拍 ${beat.order}`"></span>
-                        <button class="btn btn-outline-secondary btn-sm" type="button" @click="addContinuityUpdate(beat)" :disabled="!creativeResourceEditable(selectedProjectBeats())" title="新增连续性变更" aria-label="新增连续性变更"><i class="bi bi-plus-lg"></i></button>
-                    </div>
-                    <template x-for="(update, updateIndex) in (beat.continuity_updates || [])" :key="`update-${beat.order}-${updateIndex}`">
-                        <div class="border-bottom pb-3 mb-3">
-                            <div class="row g-2 align-items-end">
-                                <div class="col-md-2">
-                                    <label class="form-label small mb-1">类型</label>
-                                    <select class="form-select form-select-sm" x-model="update.kind" :disabled="!creativeResourceEditable(selectedProjectBeats())"><option value="state">状态</option><option value="resource">资源</option><option value="relationship">关系</option><option value="information">信息</option><option value="prop">道具</option></select>
-                                </div>
-                                <div class="col-md-3">
-                                    <label class="form-label small mb-1">名称</label>
-                                    <input class="form-control form-control-sm" x-model="update.name" :disabled="!creativeResourceEditable(selectedProjectBeats())">
-                                </div>
-                                <div class="col-md-5">
-                                    <label class="form-label small mb-1">事件</label>
-                                    <textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(update.event, 24)" x-model="update.event" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea>
-                                </div>
-                                <div class="col-md-1">
-                                    <label class="form-label small mb-1">状态</label>
-                                    <input class="form-control form-control-sm" x-model="update.status" :disabled="!creativeResourceEditable(selectedProjectBeats())">
-                                </div>
-                                <div class="col-md-1 d-flex justify-content-md-end">
-                                    <button class="btn btn-outline-danger btn-sm" type="button" @click="removeContinuityUpdate(beat, updateIndex)" :disabled="!creativeResourceEditable(selectedProjectBeats())" title="删除连续性变更" aria-label="删除连续性变更"><i class="bi bi-trash"></i></button>
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small mb-1">持有人/来源</label>
-                                    <input class="form-control form-control-sm" x-model="update.holder" :disabled="!creativeResourceEditable(selectedProjectBeats())">
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small mb-1">地点</label>
-                                    <input class="form-control form-control-sm" x-model="update.location" :disabled="!creativeResourceEditable(selectedProjectBeats())">
-                                </div>
-                                <div class="col-md-4">
-                                    <label class="form-label small mb-1">知情人</label>
-                                    <input class="form-control form-control-sm" :value="listText(update.known_by)" @input="setListField(update, 'known_by', $event.target.value)" :disabled="!creativeResourceEditable(selectedProjectBeats())">
-                                </div>
-                            </div>
-                        </div>
-                    </template>
-                    <div class="small text-muted py-2" x-show="!(beat.continuity_updates || []).length">本节拍暂无连续性变更</div>
-                </section>
-            </template>
-
-            <h6 class="small text-muted mt-3">连续性账本</h6>
-            <div class="table-responsive">
-                <table class="table table-sm align-middle">
-                    <thead><tr><th>类型</th><th>名称</th><th>事件</th><th>持有人/来源</th><th>地点</th><th>知情人</th><th>状态</th></tr></thead>
-                    <tbody>
-                        <template x-for="item in projectContinuityLedger()" :key="`${item.kind}:${item.name}`"><tr><td x-text="item.kind"></td><td x-text="item.name"></td><td x-text="item.event"></td><td x-text="item.holder"></td><td x-text="item.location"></td><td x-text="listText(item.known_by)"></td><td x-text="item.status"></td></tr></template>
-                        <tr x-show="!projectContinuityLedger().length"><td colspan="7" class="text-center text-muted">暂无连续性记录</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </template>
+    <div class="beats-generation-status border-top border-bottom py-2 mb-3" x-show="creativeWorkspace.startingAction === 'beats' || creativeWorkspace.activeAction === 'beats'" x-cloak><div class="d-flex justify-content-between align-items-center"><span class="small" x-text="creativeWorkspace.jobMessage || '正在创建生成任务'"></span><span class="small text-muted" x-text="creativeProgressText()"></span></div><div class="progress mt-2" style="height:6px"><div class="progress-bar" :class="creativeWorkspace.jobStatus === 'failed' ? 'bg-danger' : ''" :style="`width:${creativeProgressPercent()}%`"></div></div></div>
+    <div x-show="creativeWorkspace.selectedEpisode === 0" x-cloak><div class="beats-section-heading"><span>全集概览</span><span class="small text-muted">核心信息摘要 · 详细分析在单集页编辑</span></div><template x-for="item in projectStageEpisodeItems('beats')" :key="`all-beats-${item.id}`"><section class="beats-episode-card border mb-3" :class="{'is-over-limit': projectBeatsOverLimit(item)}"><div class="d-flex justify-content-between align-items-start gap-2 mb-3"><div><div class="beats-episode-card__title" x-text="`第 ${item.episode_number} 集`"></div><div class="small text-muted" x-text="`v${item.version} · ${creativeWorkflowStatusLabel(item.status)}`"></div></div><div class="d-flex align-items-center gap-2"><span class="beats-count-badge" :class="projectBeatsOverLimit(item) ? 'is-invalid' : ''" x-text="`${projectBeatsCount(item)}/3 场`"></span><a class="btn btn-outline-primary btn-sm" :href="creativeModuleUrl('beats', item.episode_number)">打开单集编辑</a></div></div><div class="small text-muted mb-3" data-template-provenance x-text="creativeTemplateProvenance(item)"></div><div class="beats-summary-grid"><template x-for="beat in (item.content?.beats || [])" :key="`all-${item.id}-${beat.order}`"><article class="beats-summary-card"><div class="beats-summary-card__index" x-text="`场次 ${beat.order}`"></div><div class="beats-core-field is-scene"><span class="beats-field-label">场景</span><div x-text="beat.scene || '未填写'"></div></div><div class="beats-core-field is-character"><span class="beats-field-label">人物</span><div x-text="listText(beat.characters) || '未填写'"></div></div><div class="beats-core-field is-turn"><span class="beats-field-label">转折</span><div x-text="beat.turn || '未填写'"></div></div><div class="beats-core-field is-hook"><span class="beats-field-label">结尾钩子</span><div x-text="beat.hook || '未填写'"></div></div></article></template></div><div class="beats-limit-alert" role="status" aria-live="polite" x-show="projectBeatsOverLimit(item)" x-text="`当前 ${projectBeatsCount(item)} 个场次，超过每集最多 3 个场次。请在单集编辑中删除或合并后再保存。`"></div></section></template><div class="text-center text-muted py-4" x-show="!projectStageEpisodeItems('beats').length">尚未生成任何 Beats</div></div>
+    <template x-if="creativeWorkspace.selectedEpisode > 0 && selectedProjectBeats()"><div class="beats-editor-shell" :class="{'has-over-limit': projectBeatsOverLimit(selectedProjectBeats())}"><div class="beats-editor-topbar"><div><div class="beats-episode-card__title" x-text="`第 ${creativeWorkspace.selectedEpisode} 集`"></div><div class="small text-muted" x-text="`v${selectedProjectBeats().version} · ${creativeWorkflowStatusLabel(selectedProjectBeats().status)}`"></div></div><div class="d-flex flex-wrap gap-2 align-items-center"><span class="beats-count-badge" :class="projectBeatsOverLimit(selectedProjectBeats()) ? 'is-invalid' : ''" x-text="`每集最多 3 个场次 · 当前 ${projectBeatsCount(selectedProjectBeats())}`"></span><button class="btn btn-outline-light btn-sm" @click="saveProjectEpisode(selectedProjectBeats())" :disabled="!creativeResourceEditable(selectedProjectBeats()) || projectBeatsOverLimit(selectedProjectBeats())"><i class="bi bi-save me-1"></i>保存</button><button class="btn btn-warning btn-sm" @click="completeProjectBeats" :disabled="!creativeResourceEditable(selectedProjectBeats()) || projectBeatsOverLimit(selectedProjectBeats()) || !projectBeatsCount(selectedProjectBeats())"><i class="bi bi-lock-fill me-1"></i>完成并锁定</button><button class="btn btn-outline-info btn-sm" x-show="isFreeCreativeProject() && ['locked', 'approved'].includes(selectedProjectBeats().status)" @click="createFreeResourceRevision('beats')" :disabled="!freeStageCan('beats', 'can_create_revision')"><i class="bi bi-files me-1"></i>创建修订版</button></div></div><div class="small text-muted mb-3" data-template-provenance x-text="creativeTemplateProvenance(selectedProjectBeats())"></div><div class="beats-limit-alert mb-3" role="status" aria-live="polite" x-show="projectBeatsOverLimit(selectedProjectBeats())" x-text="`当前 ${projectBeatsCount(selectedProjectBeats())} 个场次，超过每集最多 3 个场次。删除或合并场次后才能保存或锁定。`"></div><div class="beats-editor-layout"><nav class="beats-scene-nav" aria-label="Beats 场次导航"><div class="beats-section-heading"><span>场次</span><div class="d-flex gap-2 align-items-center"><span class="small text-muted" x-text="`${projectBeatsCount(selectedProjectBeats())}/3`"></span><button type="button" class="btn btn-outline-secondary btn-sm" @click="addProjectBeat(selectedProjectBeats())" :disabled="!creativeResourceEditable(selectedProjectBeats()) || projectBeatsCount(selectedProjectBeats()) >= 3" aria-label="新增场次">+</button></div></div><template x-for="beat in selectedProjectBeats().content.beats" :key="`nav-${beat.order}`"><button type="button" class="beats-scene-nav__item" :class="{'is-active': selectedBeatOrder === Number(beat.order)}" @click="selectedBeatOrder = Number(beat.order)"><span class="beats-scene-nav__number" x-text="beat.order"></span><span class="text-start"><strong x-text="beat.scene || '未命名场景'"></strong><small x-text="beat.hook || '未填写结尾钩子'"></small></span></button></template></nav><section class="beats-editor-main"><template x-for="beat in selectedProjectBeats().content.beats" :key="`editor-${beat.order}`"><article class="beats-edit-card" x-show="selectedBeatOrder === Number(beat.order)"><div class="beats-edit-card__heading"><span class="beats-summary-card__index" x-text="`场次 ${beat.order}`"></span><span class="small text-muted">核心字段</span></div><div class="beats-core-edit-grid"><label class="beats-input-group is-scene"><span class="beats-field-label">场景</span><textarea class="form-control" :rows="textareaRows(beat.scene, 38)" x-model="beat.scene" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label><label class="beats-input-group is-character"><span class="beats-field-label">人物</span><textarea class="form-control" :rows="textareaRows(listText(beat.characters), 38)" :value="listText(beat.characters)" @input="setListField(beat, 'characters', $event.target.value)" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label><label class="beats-input-group is-turn"><span class="beats-field-label">转折</span><textarea class="form-control" :rows="textareaRows(beat.turn, 38)" x-model="beat.turn" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label><label class="beats-input-group is-hook"><span class="beats-field-label">结尾钩子</span><textarea class="form-control" :rows="textareaRows(beat.hook, 38)" x-model="beat.hook" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label></div><details class="beats-details mt-3"><summary>展开详细分析：行动目标、阻力、情绪变化、局面变化、代价、对抗策略</summary><div class="beats-detail-grid mt-3"><label class="beats-input-group"><span>行动目标</span><textarea class="form-control" :rows="textareaRows(beat.goal, 34)" x-model="beat.goal" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label><label class="beats-input-group"><span>阻力</span><textarea class="form-control" :rows="textareaRows(beat.obstacle, 34)" x-model="beat.obstacle" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label><label class="beats-input-group"><span>情绪变化</span><textarea class="form-control" :rows="textareaRows(beat.emotion_change, 34)" x-model="beat.emotion_change" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label><label class="beats-input-group"><span>局面变化</span><textarea class="form-control" :rows="textareaRows(beat.state_change, 34)" x-model="beat.state_change" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label><label class="beats-input-group"><span>代价</span><textarea class="form-control" :rows="textareaRows(beat.cost, 34)" x-model="beat.cost" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label><label class="beats-input-group"><span>对抗策略</span><textarea class="form-control" :rows="textareaRows(beat.opposition_tactic, 34)" x-model="beat.opposition_tactic" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label></div></details></article></template></section><aside class="beats-inspect"><details class="beats-details"><summary>连续性检查</summary><div class="small text-muted mb-3">道具、信息和人物状态会汇入全剧连续性账本。</div><template x-for="beat in selectedProjectBeats().content.beats" :key="`continuity-${beat.order}`"><section class="beats-continuity-block"><div class="d-flex justify-content-between align-items-center mb-2"><span class="small fw-semibold" x-text="`场次 ${beat.order}`"></span><button class="btn btn-outline-secondary btn-sm" type="button" @click="addContinuityUpdate(beat)" :disabled="!creativeResourceEditable(selectedProjectBeats())" aria-label="新增连续性变更"><i class="bi bi-plus-lg"></i></button></div><template x-for="(update, updateIndex) in (beat.continuity_updates || [])" :key="`update-${beat.order}-${updateIndex}`"><div class="beats-continuity-row"><select class="form-select form-select-sm" x-model="update.kind" :disabled="!creativeResourceEditable(selectedProjectBeats())"><option value="state">状态</option><option value="resource">资源</option><option value="relationship">关系</option><option value="information">信息</option><option value="prop">道具</option></select><input class="form-control form-control-sm" placeholder="名称" x-model="update.name" :disabled="!creativeResourceEditable(selectedProjectBeats())"><textarea class="form-control form-control-sm" :rows="textareaRows(update.event, 28)" placeholder="事件" x-model="update.event" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea><input class="form-control form-control-sm" placeholder="持有人/来源" x-model="update.holder" :disabled="!creativeResourceEditable(selectedProjectBeats())"><input class="form-control form-control-sm" placeholder="地点" x-model="update.location" :disabled="!creativeResourceEditable(selectedProjectBeats())"><input class="form-control form-control-sm" placeholder="知情人（逗号分隔）" :value="listText(update.known_by)" @input="setListField(update, 'known_by', $event.target.value)" :disabled="!creativeResourceEditable(selectedProjectBeats())"><input class="form-control form-control-sm" placeholder="状态" x-model="update.status" :disabled="!creativeResourceEditable(selectedProjectBeats())"><button class="btn btn-outline-danger btn-sm" type="button" @click="removeContinuityUpdate(beat, updateIndex)" :disabled="!creativeResourceEditable(selectedProjectBeats())" aria-label="删除连续性变更"><i class="bi bi-trash"></i></button></div></template><div class="small text-muted py-2" x-show="!(beat.continuity_updates || []).length">本场次暂无连续性变更</div></section></template><h6 class="small text-muted mt-3">连续性账本</h6><div class="workspace-scroll-x"><table class="table table-sm align-middle"><thead><tr><th>名称</th><th>事件</th><th>状态</th></tr></thead><tbody><template x-for="item in projectContinuityLedger()" :key="`${item.kind}:${item.name}`"><tr><td x-text="item.name"></td><td x-text="item.event"></td><td x-text="item.status"></td></tr></template><tr x-show="!projectContinuityLedger().length"><td colspan="3" class="text-center text-muted">暂无连续性记录</td></tr></tbody></table></div></details></aside></div></div></template>
     <div class="text-center text-muted py-4" x-show="creativeWorkspace.selectedEpisode > 0 && !selectedProjectBeats()">当前集尚未生成 Beats</div>
 </div>
 {% include "common/workspace/prompt_library_modal.html" %}

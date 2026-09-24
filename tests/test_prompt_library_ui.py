@@ -47,11 +47,11 @@ def test_creative_template_provenance_does_not_guess_from_current_binding():
         [{"generation_meta": {"prompt_snapshot": {"template_key": "private-key", "title": "冻结标题", "revision": 3}, "manual_revision": True}}, "基于模板版本修订：冻结标题 · 模板 v3"],
         [{"direction_type": "original", "parent_version_id": 12, "generation_meta": {"prompt_snapshot": {"template_key": "private-key", "title": "冻结标题", "revision": 3}, "job_id": "old-job"}}, "基于模板版本修订：冻结标题 · 模板 v3"],
         [{"generation_meta": {"origin": "manual"}}, "手动创建/修订 · 未按生成模板生成"],
-        [{"generation_meta": {"manual_revision": True, "job_id": "old-job"}}, "手动修订 · 原模板来源未记录"],
+        [{"generation_meta": {"manual_revision": True, "job_id": "old-job"}}, "经典兼容模板"],
         [{"generation_meta": {"manual_revision": True, "prompt_source": "system"}}, "基于系统提示词版本修订 · 未使用模板库"],
         [{"generation_meta": {"job_id": "new-job", "prompt_source": "system"}}, "系统提示词生成 · 未使用模板库"],
-        [{"generation_meta": {"job_id": "legacy-job"}}, "历史生成 · 模板记录缺失"],
-        [{"generation_meta": {}}, "模板来源未记录"],
+        [{"generation_meta": {"job_id": "legacy-job"}}, "经典兼容模板"],
+        [{"generation_meta": {}}, "经典兼容模板"],
     ]
     program = (
         "global.window = {aiworkerModules: []}; "

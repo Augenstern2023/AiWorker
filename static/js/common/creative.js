@@ -712,14 +712,14 @@ window.aiworkerModules.push(() => ({
                     if (meta.manual_revision || (item.direction_type && item.parent_version_id && meta.job_id)) {
                         return meta.prompt_source === 'system'
                             ? '基于系统提示词版本修订 · 未使用模板库'
-                            : '手动修订 · 原模板来源未记录';
+                            : '经典兼容模板';
                     }
                     if (meta.origin === 'manual') return '手动创建/修订 · 未按生成模板生成';
                     if (meta.prompt_source === 'system') return '系统提示词生成 · 未使用模板库';
                     if (meta.job_id || meta.generation_context_id || meta.source === 'outline_field_rewrite') {
-                        return '历史生成 · 模板记录缺失';
+                        return '经典兼容模板';
                     }
-                    return '模板来源未记录';
+                    return '经典兼容模板';
                 },
 
                 freeStageVersionOptions(stage, episodeNumber = 0) {
@@ -1253,7 +1253,43 @@ window.aiworkerModules.push(() => ({
                 },
 
                 selectedProjectBeats() {
-                    return this.projectBeatsForEpisode(this.creativeWorkspace.selectedEpisode);
+                    const item = this.projectBeatsForEpisode(this.creativeWorkspace.selectedEpisode);
+                    const beats = item?.content?.beats;
+                    if (Array.isArray(beats) && beats.length
+                        && !beats.some(beat => Number(beat.order) === Number(this.selectedBeatOrder))) {
+                        this.selectedBeatOrder = Number(beats[0].order || 1);
+                    }
+                    return item;
+                },
+
+                projectBeatsCount(item) {
+                    return Array.isArray(item?.content?.beats) ? item.content.beats.length : 0;
+                },
+
+                projectBeatsOverLimit(item) {
+                    return this.projectBeatsCount(item) > 3;
+                },
+
+                addProjectBeat(item) {
+                    if (!item || !Array.isArray(item.content?.beats) || this.projectBeatsCount(item) >= 3) return;
+                    item.content.beats.push({
+                        order: item.content.beats.length + 1, scene: '', characters: [], goal: '', obstacle: '',
+                        emotion_change: '', turn: '', hook: '', state_change: '', cost: '', opposition_tactic: '',
+                        continuity_updates: [],
+                    });
+                    this.selectedBeatOrder = item.content.beats.length;
+                },
+
+                removeProjectBeat(item, order) {
+                    if (!item || !Array.isArray(item.content?.beats)
+                        || !this.creativeResourceEditable(item)) return;
+                    const index = item.content.beats.findIndex(beat => Number(beat.order) === Number(order));
+                    if (index < 0) return;
+                    item.content.beats.splice(index, 1);
+                    item.content.beats.forEach((beat, beatIndex) => { beat.order = beatIndex + 1; });
+                    this.selectedBeatOrder = Math.min(
+                        Number(this.selectedBeatOrder || 1), item.content.beats.length || 1
+                    );
                 },
 
                 projectBeatEpisodeLabel(episodeNumber) {
@@ -1296,7 +1332,8 @@ window.aiworkerModules.push(() => ({
                 },
 
                 canBatchLockProjectBeats() {
-                    return this.canBatchLockProjectEpisodes('beats');
+                    return !this.projectStageEpisodeItems('beats').some(item => this.projectBeatsOverLimit(item))
+                        && this.canBatchLockProjectEpisodes('beats');
                 },
 
                 canBatchLockProjectEpisodes(stage) {

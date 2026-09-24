@@ -229,20 +229,20 @@ def test_project_beats_uses_multiline_controls_for_long_content():
     beats = _read("templates/common/workspace/project_beats.html")
 
     fields = (
-        ("beat.scene", "beat.scene"),
-        ("listText(beat.characters)", "beat.characters"),
-        ("beat.goal", "beat.goal"),
-        ("beat.obstacle", "beat.obstacle"),
-        ("beat.emotion_change", "beat.emotion_change"),
-        ("beat.state_change", "beat.state_change"),
-        ("beat.cost", "beat.cost"),
-        ("beat.opposition_tactic", "beat.opposition_tactic"),
-        ("beat.turn", "beat.turn"),
-        ("beat.hook", "beat.hook"),
+        ("beat.scene", "beat.scene", 38),
+        ("listText(beat.characters)", "beat.characters", 38),
+        ("beat.goal", "beat.goal", 34),
+        ("beat.obstacle", "beat.obstacle", 34),
+        ("beat.emotion_change", "beat.emotion_change", 34),
+        ("beat.state_change", "beat.state_change", 34),
+        ("beat.cost", "beat.cost", 34),
+        ("beat.opposition_tactic", "beat.opposition_tactic", 34),
+        ("beat.turn", "beat.turn", 38),
+        ("beat.hook", "beat.hook", 38),
     )
-    for row_source, field in fields:
+    for row_source, field, rows in fields:
         assert re.search(
-            rf'<textarea[^>]+:rows="textareaRows\({re.escape(row_source)}, 10\)"[^>]+',
+            rf'<textarea[^>]+:rows="textareaRows\({re.escape(row_source)}, {rows}\)"[^>]+',
             beats,
         )
         assert field in beats

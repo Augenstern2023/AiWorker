@@ -371,13 +371,18 @@ def _validate_continuity_updates(updates: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def validate_beats(payload: dict[str, Any] | list[Any], *, allow_legacy: bool = False) -> dict[str, Any]:
+def validate_beats(
+    payload: dict[str, Any] | list[Any],
+    *,
+    allow_legacy: bool = False,
+    allow_scene_limit_overflow: bool = False,
+) -> dict[str, Any]:
     if isinstance(payload, list):
         payload = {"beats": payload}
     beats = payload.get("beats")
     if not isinstance(beats, list) or not beats:
         raise ValueError("beats 至少包含一个节拍")
-    if len(beats) > 3:
+    if len(beats) > 3 and not allow_scene_limit_overflow:
         raise ValueError("每集 Beats 数量必须为 1-3 个（场次不能超过 3 个）")
     enhanced_fields = {"state_change", "cost", "opposition_tactic", "continuity_updates"}
     if allow_legacy and all(

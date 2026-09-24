@@ -699,6 +699,9 @@ def test_beats_workspace_prioritizes_core_fields_and_collapses_secondary_analysi
     assert "removeProjectBeat" in script
     assert "新增场次" in html
     assert "删除当前场次" in html
+    assert "beatsBackUrl()" in html
+    assert "基于此版本新建" in html
+    assert ':disabled="!creativeResourceEditable(selectedProjectBeats())"' in html
 
 
 def test_review_findings_render_outline_anchors_with_writer_facing_labels():
@@ -969,7 +972,26 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
     assert 'class="table table-sm table-hover align-middle mb-4"' not in html
     assert "creativeWorkspace.projects[0]?.id" in html
     assert ':href="creativeProjectStageUrl(project)"' in html
-    assert "--bs-table-active-color: var(--text);" in html
+    assert "--bs-table-active-color: var(--text);" in _source("static/css/workspaces.css")
+
+
+def test_beats_overflow_revision_flag_is_only_forwarded_by_beats_endpoint():
+    api = _source("creative/api.py")
+    brief_route = api.split("async def create_project_blueprint(", 1)[1].split(
+        "async def derive_project_blueprint(", 1
+    )[0]
+    beats_route = api.split("async def create_project_episode_beats(", 1)[1].split(
+        "async def lock_episode_beats(", 1
+    )[0]
+
+    assert "allow_scene_limit_overflow" not in brief_route
+    assert "allow_scene_limit_overflow=payload.allow_scene_limit_overflow" in beats_route
+
+    service = _source("creative/application_service.py")
+    beats_revision = service.split('elif stage == "beats"', 1)[1].split(
+        'elif stage == "script"', 1
+    )[0]
+    assert "allow_scene_limit_overflow=allow_scene_limit_overflow" in beats_revision
 
 
 def test_blank_character_batch_links_the_active_workflow_task():

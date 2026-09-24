@@ -5304,8 +5304,13 @@ class CreativeRepository:
         expected_project_revision: int | None = None,
         expected_authority: dict[str, Any] | None = None,
         reject_if_locked: bool = False,
+        allow_scene_limit_overflow: bool = False,
     ) -> dict[str, Any]:
-        content = validate_beats(content, allow_legacy=True)
+        content = validate_beats(
+            content,
+            allow_legacy=True,
+            allow_scene_limit_overflow=allow_scene_limit_overflow,
+        )
         request_hash = self._operation_request_hash(
             project_id=project_id,
             stage="beats",
@@ -5320,6 +5325,7 @@ class CreativeRepository:
                 "expected_project_revision": expected_project_revision,
                 "expected_authority": expected_authority,
                 "reject_if_locked": reject_if_locked,
+                "allow_scene_limit_overflow": allow_scene_limit_overflow,
             },
         )
 
@@ -5349,12 +5355,19 @@ class CreativeRepository:
             now = time.time()
             if replaces_resource_id is not None:
                 parent = conn.execute(
-                    "SELECT id, version FROM creative_episodes WHERE id = ? "
+                    "SELECT id, version, status FROM creative_episodes WHERE id = ? "
                     "AND project_id = ? AND stage = 'beats' AND episode_number = ?",
                     (int(replaces_resource_id), project_id, int(episode_number)),
                 ).fetchone()
                 if parent is None:
                     raise ValueError("replacement Beats does not belong to this episode")
+                if allow_scene_limit_overflow and parent["status"] not in {
+                    "locked",
+                    "approved",
+                }:
+                    raise ValueError(
+                        "allow_scene_limit_overflow requires a locked Beats revision"
+                    )
             else:
                 parent = conn.execute(
                     "SELECT id, version FROM creative_episodes "

@@ -563,6 +563,18 @@ window.aiworkerModules.push(() => ({
                     }[stage] || '#';
                 },
 
+                beatsBackUrl() {
+                    return Number(this.creativeWorkspace?.selectedEpisode || 0) > 0
+                        ? this.creativeModuleUrl('beats', 0)
+                        : this.creativeModuleUrl('outline', 0);
+                },
+
+                beatsBackLabel() {
+                    return Number(this.creativeWorkspace?.selectedEpisode || 0) > 0
+                        ? '返回全集 Beats'
+                        : '返回分集大纲';
+                },
+
                 openCreativeEpisodeModule(stage) {
                     window.location.assign(this.creativeModuleUrl(stage, this.creativeWorkspace.selectedEpisode));
                 },

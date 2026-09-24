@@ -195,6 +195,7 @@ class EpisodeBeatsRequest(BaseModel):
     content: dict[str, Any]
     replaces_resource_id: str | None = Field(None, max_length=200)
     expected_project_revision: int | None = Field(None, ge=0)
+    allow_scene_limit_overflow: bool = False
     workflow_task_id: str | None = None
     operation_id: str | None = Field(None, max_length=200)
 

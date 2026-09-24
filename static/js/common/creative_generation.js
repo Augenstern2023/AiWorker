@@ -1025,6 +1025,49 @@ window.aiworkerModules.push(() => ({
                     } catch (error) { this.creativeWorkspace.error = error.message || '完成 Beats 失败'; }
                 },
 
+                async createProjectBeatsRevision() {
+                    const item = this.selectedProjectBeats();
+                    if (!item || this.isFreeCreativeProject()) return;
+                    if (!['locked', 'approved'].includes(item.status)) return;
+                    const project = this.creativeWorkspace.project;
+                    const projectId = project?.id;
+                    const episodeNumber = Number(item.episode_number);
+                    if (!projectId || !episodeNumber) return;
+                    const content = JSON.parse(JSON.stringify(item.content || {}));
+                    const sceneCount = Array.isArray(content.beats) ? content.beats.length : 0;
+                    try {
+                        const task = await this.resolveCreativeWorkflowTask('beats', projectId);
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/episodes/${episodeNumber}/beats`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    content,
+                                    replaces_resource_id: String(item.id),
+                                    workflow_task_id: task.id,
+                                    expected_project_revision: Number(project.revision || 0),
+                                    allow_scene_limit_overflow: sceneCount > 3,
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '创建 Beats 可编辑版本失败');
+                        this.creativeWorkspace.selectedEpisode = episodeNumber;
+                        await this.selectCreativeProject(projectId);
+                        this.showCreativeNotice(
+                            sceneCount > 3
+                                ? `已创建第 ${episodeNumber} 集可编辑草稿；当前有 ${sceneCount} 个场次，请删除或合并至 3 个以内后再保存。`
+                                : `已基于第 ${episodeNumber} 集 Beats 创建可编辑草稿`
+                        );
+                        return data;
+                    } catch (error) {
+                        this.creativeWorkspace.error = error.message || '创建 Beats 可编辑版本失败';
+                        this.showCreativeNotice(this.creativeWorkspace.error, 'error');
+                        return null;
+                    }
+                },
+
                 async completeProjectScript() {
                     const item = this.selectedProjectScript();
                     if (!item) return;

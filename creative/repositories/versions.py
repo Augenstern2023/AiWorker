@@ -2024,8 +2024,13 @@ class VersionsRepository:
         expected_project_revision: int | None = None,
         expected_authority: dict[str, Any] | None = None,
         reject_if_locked: bool = False,
+        allow_scene_limit_overflow: bool = False,
     ) -> dict[str, Any]:
-        content = validate_beats(content, allow_legacy=True)
+        content = validate_beats(
+            content,
+            allow_legacy=True,
+            allow_scene_limit_overflow=allow_scene_limit_overflow,
+        )
         request_hash = self._operation_request_hash(
             project_id=project_id,
             stage="beats",
@@ -2040,6 +2045,7 @@ class VersionsRepository:
                 "expected_project_revision": expected_project_revision,
                 "expected_authority": expected_authority,
                 "reject_if_locked": reject_if_locked,
+                "allow_scene_limit_overflow": allow_scene_limit_overflow,
             },
         )
 
@@ -2075,7 +2081,11 @@ class VersionsRepository:
             now = utc_now()
             if replaces_resource_id is not None:
                 parent = connection.execute(
-                    select(creative_episodes.c.id, creative_episodes.c.version)
+                    select(
+                        creative_episodes.c.id,
+                        creative_episodes.c.version,
+                        creative_episodes.c.status,
+                    )
                     .where(
                         creative_episodes.c.id == int(replaces_resource_id),
                         creative_episodes.c.project_id == int(project_id),
@@ -2086,6 +2096,13 @@ class VersionsRepository:
                 if parent is None:
                     raise ValueError(
                         "replacement Beats does not belong to this episode"
+                    )
+                if allow_scene_limit_overflow and parent[2] not in {
+                    "locked",
+                    "approved",
+                }:
+                    raise ValueError(
+                        "allow_scene_limit_overflow requires a locked Beats revision"
                     )
             else:
                 parent = connection.execute(

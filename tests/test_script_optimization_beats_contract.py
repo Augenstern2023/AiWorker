@@ -34,6 +34,34 @@ def test_legacy_beats_with_four_items_are_rejected_without_truncation() -> None:
     assert len(payload["beats"]) == 4
 
 
+def test_locked_revision_can_preserve_overflow_without_truncation() -> None:
+    payload = {"beats": [{"order": number} for number in range(1, 5)]}
+
+    normalized = validate_beats(
+        payload,
+        allow_legacy=True,
+        allow_scene_limit_overflow=True,
+    )
+
+    assert len(normalized["beats"]) == 4
+    assert len(payload["beats"]) == 4
+
+
+def test_scene_limit_overflow_flag_is_only_forwarded_by_beats_route() -> None:
+    api_source = (Path(__file__).parents[1] / "creative/api.py").read_text(
+        encoding="utf-8"
+    )
+    brief_route = api_source.split("async def create_project_blueprint(", 1)[1].split(
+        "async def derive_project_blueprint(", 1
+    )[0]
+    beats_route = api_source.split("async def create_project_episode_beats(", 1)[1].split(
+        "async def lock_episode_beats(", 1
+    )[0]
+
+    assert "allow_scene_limit_overflow" not in brief_route
+    assert "allow_scene_limit_overflow=payload.allow_scene_limit_overflow" in beats_route
+
+
 @pytest.mark.parametrize(
     ("path", "method", "transaction_call"),
     [

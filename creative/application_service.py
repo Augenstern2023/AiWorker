@@ -656,6 +656,7 @@ class CreativeApplicationService:
         *,
         replaces_resource_id: str | None = None,
         expected_project_revision: int | None = None,
+        allow_scene_limit_overflow: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Preserve legacy response bodies while enforcing the revision boundary."""
@@ -664,6 +665,12 @@ class CreativeApplicationService:
         if (replaces_resource_id is None) != (expected_project_revision is None):
             raise ValueError(
                 "replaces_resource_id and expected_project_revision are required together"
+            )
+        if allow_scene_limit_overflow and (
+            kwargs["stage"] != "beats" or replaces_resource_id is None
+        ):
+            raise ValueError(
+                "allow_scene_limit_overflow is only valid when creating a Beats revision"
             )
         if replaces_resource_id is None:
             if stage != "brief" and self.repository.has_locked_stage_resource(
@@ -681,6 +688,7 @@ class CreativeApplicationService:
                 **kwargs,
                 replaces_resource_id=str(replaces_resource_id),
                 expected_project_revision=int(expected_project_revision),
+                allow_scene_limit_overflow=allow_scene_limit_overflow,
             )
         return self.hydrate_resource_ref(ref)
 
@@ -896,6 +904,7 @@ class CreativeApplicationService:
         actor: Principal,
         episode_number: int | None = None,
         expected_context: dict[str, Any] | None = None,
+        allow_scene_limit_overflow: bool = False,
     ) -> dict[str, Any]:
         self.assert_stage_write_access(project_id, stage, actor)
         self.validate_task_for_creation(workflow_task_id, project_id, stage, actor)
@@ -933,6 +942,7 @@ class CreativeApplicationService:
                     replaces_resource_id=replaces_resource_id,
                     expected_project_revision=expected_project_revision,
                     expected_authority=expected_authority,
+                    allow_scene_limit_overflow=allow_scene_limit_overflow,
                 )
             elif stage == "outline":
                 resource = self.repository.create_outline_batch(
@@ -949,6 +959,7 @@ class CreativeApplicationService:
                     replaces_resource_id=replaces_resource_id,
                     expected_project_revision=expected_project_revision,
                     expected_authority=expected_authority,
+                    allow_scene_limit_overflow=allow_scene_limit_overflow,
                 )
             elif stage == "script" and episode_number is not None:
                 resource = self.repository.create_episode_script(

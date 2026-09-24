@@ -6139,6 +6139,7 @@ def build_creative_router(
                 operation_id=payload.operation_id or uuid.uuid4().hex,
                 replaces_resource_id=payload.replaces_resource_id,
                 expected_project_revision=payload.expected_project_revision,
+                allow_scene_limit_overflow=payload.allow_scene_limit_overflow,
                 actor=principal,
                 episode_number=episode_number,
             )

@@ -72,3 +72,22 @@ prompt templates: single/batch 1-3; builtin max_beats <= 3; override 4 rejected
 
 - PostgreSQL 相关自由模式和优化 API 集成测试因环境 fixture 不可用而未实际执行；代码路径已补充共同 validator，但建议在具备 PostgreSQL 的 CI/验收环境复跑对应测试。
 - 空白自由 Beats 草稿仍允许暂存，锁定/采纳时必须通过非空的 1-3 校验，符合计划中的空草稿例外。
+
+## 后续修复：自由模式边界（2026-09-24）
+
+- 修复 `creative/free_mode_service.py` 中 `create_episode_resource` 的错误校验位置，确保不会引用未定义的 `resource_ref`。
+- `update_resource`、`update_item` 对非空 Beats 内容调用 `validate_beats(..., allow_legacy=True)`。
+- `lock_resource` 在 Beats 更新状态前读取当前资源内容并校验；超限时事务提前失败，不执行状态更新。
+- 新增 `tests/test_free_mode_beats_validation.py`，覆盖创建、资源更新、单项更新和锁定前拒绝超限。
+
+本次验证：
+
+```text
+uv run pytest tests/test_free_mode_beats_validation.py -q
+4 passed in 0.17s
+
+uv run pytest tests/test_creative_free_mode.py -q
+2 passed, 40 skipped in 0.55s
+```
+
+自由模式主测试仍有 PostgreSQL 依赖项被跳过；新增测试不依赖数据库并实际执行通过。

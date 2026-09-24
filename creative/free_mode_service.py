@@ -682,15 +682,6 @@ class FreeCreativeModeService:
             project = self._raw_project(conn, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
-            if stage == "beats":
-                row = conn.execute(
-                    "SELECT content_json FROM creative_episodes WHERE id = ? AND project_id = ? "
-                    "AND resource_scope = 'free' AND stage = 'beats'",
-                    (int(resource_ref), int(project_id)),
-                ).fetchone()
-                if row is None:
-                    raise ValueError("自由创作资源不存在或无法锁定")
-                validate_beats(json.loads(row["content_json"]), allow_legacy=True)
             number = int(episode_number)
             if not 1 <= number <= int(project["target_episode_count"]):
                 raise ValueError("集数超出项目范围")
@@ -748,6 +739,8 @@ class FreeCreativeModeService:
         content: dict[str, Any],
     ) -> dict[str, Any]:
         stage = self._assert_stage(stage)
+        if stage == "beats" and (content.get("beats") or []):
+            validate_beats(content, allow_legacy=True)
         with self.repository._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             project = self._raw_project(conn, project_id)
@@ -814,6 +807,8 @@ class FreeCreativeModeService:
                 stage = str(row["stage"])
             if stage not in FREE_STAGES:
                 raise ValueError("自由创作资源类型错误")
+            if stage == "beats" and (content.get("beats") or []):
+                validate_beats(content, allow_legacy=True)
             if row["status"] != "draft":
                 raise ValueError("已锁定的自由创作资源不能修改")
             conn.execute(
@@ -973,6 +968,16 @@ class FreeCreativeModeService:
                     (now, now, int(project_id), str(resource_ref)),
                 )
             else:
+                if stage == "beats":
+                    resource = conn.execute(
+                        "SELECT content_json FROM creative_episodes WHERE id = ? AND project_id = ? "
+                        "AND stage = 'beats' AND episode_number = ? AND resource_scope = 'free' "
+                        "AND status IN ('draft', 'locked')",
+                        (int(resource_ref), int(project_id), number),
+                    ).fetchone()
+                    if resource is None:
+                        raise ValueError("自由创作资源不存在或无法锁定")
+                    validate_beats(json.loads(resource["content_json"]), allow_legacy=True)
                 cursor = conn.execute(
                     "UPDATE creative_episodes SET status = 'locked', locked_at = ?, updated_at = ? "
                     "WHERE id = ? AND project_id = ? AND stage = ? AND episode_number = ? "

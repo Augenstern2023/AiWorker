@@ -44,14 +44,29 @@
                     <a class="btn btn-outline-primary btn-sm" :href="creativeModuleUrl('beats', item.episode_number)">打开单集编辑</a>
                 </div>
                 <div class="small text-muted mb-2" data-template-provenance x-text="creativeTemplateProvenance(item)"></div>
-                <details class="beats-all-scenes">
-                    <summary>展开场景摘要</summary>
-                    <ol class="beats-all-scene-list mb-0">
-                        <template x-for="beat in (item.content?.beats || [])" :key="`all-${item.id}-${beat.order}`">
-                            <li><div class="fw-semibold" x-text="`${beat.order}. ${beat.scene || '未命名场景'}`"></div><div class="small text-muted" x-text="`人物：${listText(beat.characters) || '-'}`"></div><div class="small text-muted" x-text="`转折：${beat.turn || '-'} · 结尾钩子：${beat.hook || '-'}`"></div></li>
-                        </template>
-                    </ol>
-                </details>
+                <ol class="beats-all-scene-list mb-0">
+                    <template x-for="beat in (item.content?.beats || [])" :key="`all-${item.id}-${beat.order}`">
+                        <li class="beats-all-scene-card">
+                            <div class="beats-all-scene-heading">
+                                <span class="beats-scene-order" x-text="String(beat.order).padStart(2, '0')"></span>
+                                <div class="min-w-0"><div class="fw-semibold beats-all-scene-title" x-text="beat.scene || '未命名场景'"></div><div class="small text-muted" x-text="`人物：${listText(beat.characters) || '-'}`"></div></div>
+                            </div>
+                            <div class="beats-all-scene-turn"><span>转折</span><span x-text="beat.turn || '-'" ></span></div>
+                            <div class="beats-hook-callout"><span class="beats-hook-label"><i class="bi bi-lightning-charge-fill me-1" aria-hidden="true"></i>结尾钩子</span><strong x-text="beat.hook || '待补充结尾钩子'"></strong></div>
+                            <details class="beats-all-scene-details">
+                                <summary><span>查看完整分析</span><span>行动目标、阻力、情绪变化、局面变化、代价、对抗策略</span></summary>
+                                <dl class="beats-all-scene-analysis mb-0">
+                                    <div><dt>行动目标</dt><dd x-text="beat.goal || '-'" ></dd></div>
+                                    <div><dt>阻力</dt><dd x-text="beat.obstacle || '-'" ></dd></div>
+                                    <div><dt>情绪变化</dt><dd x-text="beat.emotion_change || '-'" ></dd></div>
+                                    <div><dt>局面变化</dt><dd x-text="beat.state_change || '-'" ></dd></div>
+                                    <div><dt>代价</dt><dd x-text="beat.cost || '-'" ></dd></div>
+                                    <div><dt>对抗策略</dt><dd x-text="beat.opposition_tactic || '-'" ></dd></div>
+                                </dl>
+                            </details>
+                        </li>
+                    </template>
+                </ol>
             </section>
         </template>
         <div class="text-center text-muted py-4" x-show="!projectStageEpisodeItems('beats').length">尚未生成任何 Beats</div>
@@ -73,8 +88,8 @@
 
             <div class="beats-editor-layout">
                 <aside class="beats-scene-rail" aria-label="场景导航">
-                    <div class="beats-panel-heading">场景</div>
-                    <template x-for="beat in (selectedProjectBeats().content?.beats || [])" :key="`beat-rail-${beat.order}`">
+                    <div class="beats-scene-rail-header"><div class="beats-panel-heading mb-0">场景 <span class="beats-scene-count" x-text="`${beatsSceneCount(selectedProjectBeats())}/3`"></span></div><button class="btn btn-outline-primary btn-sm beats-add-scene" type="button" @click="addProjectBeat" :disabled="!creativeResourceEditable(selectedProjectBeats()) || beatsSceneCount(selectedProjectBeats()) >= 3" :title="!creativeResourceEditable(selectedProjectBeats()) ? '当前版本只读，请重新生成或创建可编辑版本' : beatsSceneCount(selectedProjectBeats()) >= 3 ? '每集最多 3 个场次' : '新增场次'"><i class="bi bi-plus-lg me-1" aria-hidden="true"></i>新增</button></div>
+                    <template x-for="beat in beatsForEditor()" :key="`beat-rail-${beat.order}`">
                         <button class="beats-scene-rail-item" type="button" @click="selectProjectBeat(beat.order)" :class="{'is-active': Number(selectedProjectBeat()?.order) === Number(beat.order)}" :aria-current="Number(selectedProjectBeat()?.order) === Number(beat.order) ? 'true' : null">
                             <span class="beats-scene-order" x-text="String(beat.order).padStart(2, '0')"></span><span class="beats-scene-rail-copy"><span class="beats-scene-name" x-text="beat.scene || '未命名场景'"></span><span class="beats-scene-status" :class="(beat.goal && beat.hook) ? 'is-complete' : ''" x-text="(beat.goal && beat.hook) ? '完整' : '待完善'"></span></span>
                         </button>
@@ -84,15 +99,15 @@
                 <section class="beats-focus-editor" aria-label="当前场景编辑器">
                     <template x-if="selectedProjectBeat()">
                         <div>
-                            <header class="beats-focus-editor-header"><div><span class="beats-panel-heading">当前场景</span><h6 class="mb-0" x-text="`${selectedProjectBeat().order}. ${selectedProjectBeat().scene || '未命名场景'}`"></h6></div><span class="small text-muted" x-text="creativeResourceEditable(selectedProjectBeats()) ? '编辑中的原始场景数据将随保存写入' : '当前版本只读'"></span></header>
-                            <section class="beats-editor-group"><h6>核心信息</h6><div class="beats-field-grid beats-field-grid-core beats-field-grid-primary">
+                            <header class="beats-focus-editor-header"><div><span class="beats-panel-heading">当前场景</span><h6 class="mb-0" x-text="`${selectedProjectBeat().order}. ${selectedProjectBeat().scene || '未命名场景'}`"></h6></div><div class="beats-focus-editor-actions"><span class="small text-muted" x-text="creativeResourceEditable(selectedProjectBeats()) ? '编辑中的原始场景数据将随保存写入' : '当前版本只读，请重新生成或创建可编辑版本'"></span><button class="btn btn-outline-danger btn-sm" type="button" @click="removeProjectBeat(selectedProjectBeat().order)" :disabled="!creativeResourceEditable(selectedProjectBeats()) || beatsSceneCount(selectedProjectBeats()) <= 1" :title="!creativeResourceEditable(selectedProjectBeats()) ? '当前版本只读' : beatsSceneCount(selectedProjectBeats()) <= 1 ? '至少保留 1 个场次' : '删除当前场次'"><i class="bi bi-trash3 me-1" aria-hidden="true"></i>删除当前场次</button></div></header>
+                            <section class="beats-editor-group"><h6>核心信息 <span class="small text-muted">场景 · 人物 · 转折 · 结尾钩子</span></h6><div class="beats-field-grid beats-field-grid-core beats-field-grid-primary">
                                 <label>场景<textarea aria-label="场景" class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(selectedProjectBeat().scene, 10)" x-model="selectedProjectBeat().scene" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label>
                                 <label>人物<textarea aria-label="人物" class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(listText(selectedProjectBeat().characters), 10)" :value="listText(selectedProjectBeat().characters)" @input="setListField(selectedProjectBeat(), 'characters', $event.target.value)" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label>
                                 <label>转折<textarea aria-label="转折" class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(selectedProjectBeat().turn, 10)" x-model="selectedProjectBeat().turn" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label>
-                                <label class="beats-field-wide">结尾钩子<textarea aria-label="结尾钩子" class="form-control form-control-sm creative-inline-textarea beats-hook-field" :rows="textareaRows(selectedProjectBeat().hook, 10)" x-model="selectedProjectBeat().hook" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label>
+                                <label class="beats-field-wide beats-hook-editor-field">结尾钩子 <span>优先填写</span><textarea aria-label="结尾钩子" class="form-control form-control-sm creative-inline-textarea beats-hook-field" :rows="textareaRows(selectedProjectBeat().hook, 10)" x-model="selectedProjectBeat().hook" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label>
                             </div></section>
                             <details class="beats-secondary-details">
-                                <summary>展开详细分析 <span>行动目标、阻力、情绪变化、局面变化、代价、对抗策略</span></summary>
+                                <summary><span>查看完整分析字段</span> <span>行动目标、阻力、情绪变化、局面变化、代价、对抗策略</span></summary>
                                 <section class="beats-editor-group"><h6>冲突推进</h6><div class="beats-field-grid">
                                 <label>行动目标<textarea aria-label="行动目标" class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(selectedProjectBeat().goal, 10)" x-model="selectedProjectBeat().goal" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label>
                                 <label>阻力<textarea aria-label="阻力" class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(selectedProjectBeat().obstacle, 10)" x-model="selectedProjectBeat().obstacle" :disabled="!creativeResourceEditable(selectedProjectBeats())"></textarea></label>

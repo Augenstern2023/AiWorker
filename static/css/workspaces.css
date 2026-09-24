@@ -273,6 +273,9 @@
             min-width: 0; border: 1px solid #35435a; border-radius: 8px; background: #1b202a;
         }
         .beats-scene-rail { padding: 8px; }
+        .beats-scene-rail-header { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 6px; }
+        .beats-scene-count { color: var(--muted); font-size: 11px; font-weight: 400; letter-spacing: 0; }
+        .beats-add-scene { padding: 3px 7px; font-size: 11px; }
         .beats-panel-heading {
             display: block; margin: 3px 5px 7px; color: #79b2ff; font-size: 11px;
             font-weight: 750; letter-spacing: .08em; text-transform: uppercase;
@@ -294,6 +297,7 @@
             display: flex; align-items: start; justify-content: space-between; gap: 12px;
             padding-bottom: 12px; border-bottom: 1px solid #35435a;
         }
+        .beats-focus-editor-actions { display: grid; justify-items: end; gap: 8px; min-width: 0; text-align: right; }
         .beats-editor-group { padding: 14px 0; border-bottom: 1px solid #2b3545; }
         .beats-editor-group h6 { margin-bottom: 10px; color: #f2f5fa; font-size: 13px; }
         .beats-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -311,11 +315,24 @@
         .beats-ledger-item { display: grid; gap: 4px; padding: 8px; border-radius: 5px; background: #151922; font-size: 12px; }
         .beats-ledger-item strong { color: #dbeafe; }
         .beats-ledger-item small { color: var(--muted); line-height: 1.45; }
-        .beats-all-scenes { border-top: 1px solid #35435a; padding-top: 9px; }
-        .beats-all-scenes summary { cursor: pointer; color: #b9d6ff; font-size: 13px; }
-        .beats-all-scene-list { display: grid; gap: 9px; margin-top: 10px; padding-left: 23px; }
-        .beats-all-scene-list li { padding-bottom: 9px; border-bottom: 1px solid #2b3545; }
-        .beats-all-scene-list li:last-child { border-bottom: 0; padding-bottom: 0; }
+        .beats-all-scene-list { display: grid; gap: 12px; margin-top: 10px; padding-left: 0; list-style: none; }
+        .beats-all-scene-card { display: grid; gap: 9px; padding: 12px; border: 1px solid #35435a; border-radius: 6px; background: rgba(15, 23, 42, .28); }
+        .beats-all-scene-heading { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+        .beats-all-scene-title { overflow-wrap: anywhere; color: #f2f5fa; }
+        .beats-all-scene-turn { display: grid; gap: 3px; color: #d7e3f4; font-size: 12px; overflow-wrap: anywhere; }
+        .beats-all-scene-turn span:first-child { color: #9fb7d3; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+        .beats-hook-callout { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid rgba(167, 139, 250, .7); border-left: 3px solid #a78bfa; border-radius: 5px; background: rgba(124, 58, 237, .14); color: #f5f3ff; overflow-wrap: anywhere; }
+        .beats-hook-label { color: #c4b5fd; font-size: 11px; font-weight: 700; letter-spacing: .06em; }
+        .beats-all-scene-details { border-top: 1px solid #2b3545; padding-top: 8px; }
+        .beats-all-scene-details summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; cursor: pointer; color: #b9d6ff; font-size: 13px; }
+        .beats-all-scene-details summary span:last-child { color: var(--muted); font-size: 11px; font-weight: 400; }
+        .beats-all-scene-details[open] summary { color: #fff; }
+        .beats-all-scene-analysis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 14px; margin-top: 10px; }
+        .beats-all-scene-analysis > div { min-width: 0; }
+        .beats-all-scene-analysis dt { color: #9fb7d3; font-size: 11px; }
+        .beats-all-scene-analysis dd { margin: 3px 0 0; color: #d7e3f4; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+        .beats-hook-editor-field { color: #e9ddff; }
+        .beats-hook-editor-field > span { color: #c4b5fd; font-size: 11px; font-weight: 600; }
         .beats-hook-field { border-color: rgba(167, 139, 250, .6); box-shadow: 0 0 0 1px rgba(167, 139, 250, .14); }
         .beats-secondary-details,
         .beats-inspector-details { border-top: 1px solid #35435a; }
@@ -344,6 +361,8 @@
             .editor-episode-select { width: min(100%, 240px); }
             .beats-editor-layout { grid-template-columns: 1fr; }
             .beats-scene-rail { display: flex; align-items: stretch; gap: 4px; overflow-x: auto; }
+            .beats-scene-rail-header { display: contents; }
+            .beats-scene-rail-header .beats-add-scene { order: 2; flex: 0 0 auto; }
             .beats-scene-rail .beats-panel-heading { display: none; }
             .beats-scene-rail-item { min-width: 146px; }
             .beats-field-grid,
@@ -352,6 +371,9 @@
             .beats-inspector { grid-column: auto; grid-template-columns: 1fr; }
             .beats-inspector-section { border-right: 0; border-bottom: 1px solid #35435a; }
             .beats-inspector-section:last-child { border-bottom: 0; }
+            .beats-focus-editor-header { flex-direction: column; }
+            .beats-focus-editor-actions { justify-items: start; text-align: left; }
+            .beats-all-scene-analysis { grid-template-columns: 1fr; }
         }
         .creative-save-status {
             display: block;

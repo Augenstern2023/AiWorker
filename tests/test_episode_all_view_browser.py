@@ -225,7 +225,9 @@ def test_episode_workspace_all_view_and_multi_download_modal(
 
         assert page.locator(visible_selector).count() >= 2
         if stage == "beats":
-            page.locator(".beats-all-scenes").nth(1).locator("summary").click()
+            # Core fields are intentionally visible in the all-episodes view;
+            # only the secondary analysis is behind an explicit disclosure.
+            assert page.locator(".beats-all-scene-details").count() >= 2
             assert page.get_by_text(expected_text).is_visible()
         else:
             assert page.get_by_text(expected_text, exact=True).is_visible()
@@ -686,7 +688,7 @@ def test_beats_focus_editor_selects_and_updates_the_original_scene() -> None:
         page.locator(".beats-focus-editor").wait_for(state="visible")
         page.locator("details.beats-secondary-details").evaluate("element => element.open = true")
 
-        scene_rail = page.locator(".beats-scene-rail button")
+        scene_rail = page.locator(".beats-scene-rail-item")
         scene_rail.nth(1).click()
         goal = page.get_by_label("行动目标")
         assert goal.input_value() == "第二场目标"
@@ -694,6 +696,24 @@ def test_beats_focus_editor_selects_and_updates_the_original_scene() -> None:
         assert page.evaluate(
             "Alpine.$data(document.querySelector('main')).selectedProjectBeats().content.beats[1].goal"
         ) == "修改后的第二场目标"
+
+        assert page.locator(".beats-add-scene").is_enabled()
+        page.locator(".beats-add-scene").click()
+        assert page.evaluate(
+            "Alpine.$data(document.querySelector('main')).selectedProjectBeats().content.beats.length"
+        ) == 3
+        assert page.locator(".beats-scene-rail-item").count() == 3
+        assert page.evaluate(
+            "Alpine.$data(document.querySelector('main')).selectedProjectBeats().content.beats.length"
+        ) == 3
+        page.locator("button[title='删除当前场次']").click()
+        page.wait_for_function(
+            "document.querySelectorAll('.beats-scene-rail-item').length === 2"
+        )
+        assert page.locator(".beats-scene-rail-item").count() == 2
+        assert page.evaluate(
+            "Alpine.$data(document.querySelector('main')).selectedProjectBeats().content.beats.length"
+        ) == 2
 
         scene_rail.nth(0).click()
         assert goal.input_value() == "第一场目标"

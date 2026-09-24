@@ -1,7 +1,18 @@
 window.aiworkerModules = window.aiworkerModules || [];
 window.aiworkerModules.push(() => ({
     selectedBeatOrder: 1,
+    beatsEditorRevision: 0,
+    refreshBeatsEditor() {
+        this.beatsEditorRevision += 1;
+    },
+    beatsForEditor() {
+        void this.beatsEditorRevision;
+        return this.selectedProjectBeats()?.content?.beats || [];
+    },
     beatsSceneCount(item = this.selectedProjectBeats()) {
+        // Keep Alpine's x-for/count bindings reactive when a test or caller
+        // returns the original resource object instead of its proxy.
+        void this.beatsEditorRevision;
         return Array.isArray(item?.content?.beats) ? item.content.beats.length : 0;
     },
     beatsWithinSceneLimit(item = this.selectedProjectBeats()) {
@@ -15,6 +26,50 @@ window.aiworkerModules.push(() => ({
     },
     selectProjectBeat(order) {
         this.selectedBeatOrder = Number(order || 1);
+    },
+    addProjectBeat() {
+        const item = this.selectedProjectBeats();
+        if (!item || !this.creativeResourceEditable(item)) return;
+        item.content = item.content || {};
+        const beats = Array.isArray(item.content.beats) ? item.content.beats : [];
+        if (beats.length >= 3) {
+            this.showCreativeNotice?.('每集 Beats 最多 3 个场次，请先删除或合并现有场次。', 'error');
+            return;
+        }
+        const order = beats.length + 1;
+        beats.push({
+            order,
+            scene: `新场次 ${order}`,
+            characters: [],
+            goal: '',
+            obstacle: '',
+            emotion_change: '',
+            state_change: '',
+            cost: '',
+            opposition_tactic: '',
+            turn: '',
+            hook: '',
+            continuity_updates: [],
+        });
+        item.content.beats = beats;
+        this.selectedBeatOrder = order;
+        this.refreshBeatsEditor();
+    },
+    removeProjectBeat(order = this.selectedBeatOrder) {
+        const item = this.selectedProjectBeats();
+        if (!item || !this.creativeResourceEditable(item)) return;
+        const beats = Array.isArray(item.content?.beats) ? item.content.beats : [];
+        if (beats.length <= 1) {
+            this.showCreativeNotice?.('至少保留 1 个场次；如需重建，请重新生成或创建空白版本。', 'error');
+            return;
+        }
+        const index = beats.findIndex((beat) => Number(beat.order) === Number(order));
+        if (index < 0) return;
+        beats.splice(index, 1);
+        beats.forEach((beat, beatIndex) => { beat.order = beatIndex + 1; });
+        item.content.beats = beats;
+        this.selectedBeatOrder = beats[Math.min(index, beats.length - 1)].order;
+        this.refreshBeatsEditor();
     },
     selectedProjectBeat() {
         const beats = this.selectedProjectBeats()?.content?.beats || [];

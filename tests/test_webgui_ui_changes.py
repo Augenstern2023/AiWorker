@@ -687,10 +687,18 @@ def test_beats_workspace_prioritizes_core_fields_and_collapses_secondary_analysi
     assert "每集最多 3 个场次" in html
     assert "beatsWithinSceneLimit" in html
     assert "场景：${beat.scene" not in html
-    assert "转折：${beat.turn || '-'} · 结尾钩子：${beat.hook || '-'}" in html
+    assert "class=\"beats-hook-callout\"" in html
+    assert "结尾钩子" in html
+    assert "class=\"beats-all-scene-details\"" in html
+    assert "查看完整分析" in html
     assert "class=\"beats-secondary-details\"" in html
+    assert "查看完整分析字段" in html
     assert "行动目标、阻力、情绪变化、局面变化、代价、对抗策略" in html
     assert "beatsSceneLimitMessage" in script
+    assert "addProjectBeat" in script
+    assert "removeProjectBeat" in script
+    assert "新增场次" in html
+    assert "删除当前场次" in html
 
 
 def test_review_findings_render_outline_anchors_with_writer_facing_labels():

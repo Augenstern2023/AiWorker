@@ -72,6 +72,17 @@
         hasUnsavedChanges = Boolean(value);
     }
 
+    const MAX_BEATS = 3;
+
+    function beatsOverLimit(content) {
+        return Array.isArray(content?.beats) && content.beats.length > MAX_BEATS;
+    }
+
+    function autoSizeTextarea(control) {
+        control.style.height = 'auto';
+        control.style.height = `${Math.max(control.scrollHeight, 72)}px`;
+    }
+
     window.addEventListener('beforeunload', (event) => {
         if (!hasUnsavedChanges) return;
         event.preventDefault();
@@ -373,13 +384,18 @@
         caption.textContent = label;
         const control = document.createElement(multiline ? 'textarea' : 'input');
         control.className = 'form-control form-control-sm';
-        if (multiline) control.rows = 2;
+        if (multiline) {
+            control.rows = 2;
+            control.classList.add('optimization-draft-autosize');
+        }
         else control.type = type;
         control.value = value || '';
         control.addEventListener('input', () => {
             update(control.value);
+            if (multiline) autoSizeTextarea(control);
             setUnsavedChanges(true);
         });
+        if (multiline) autoSizeTextarea(control);
         wrap.append(caption, control);
         return wrap;
     }
@@ -437,6 +453,10 @@
     }
 
     async function saveOptimizationDraft(draft, content, button, message) {
+        if (draft.kind === 'beats' && beatsOverLimit(content)) {
+            message.textContent = `当前有 ${content.beats.length} 个场次，超过每集最多 ${MAX_BEATS} 个场次，无法保存。`;
+            return;
+        }
         button.disabled = true;
         message.textContent = '正在保存草稿...';
         try {
@@ -474,6 +494,10 @@
     }
 
     async function acceptAndLockOptimizationDraft(draft, content, button, message) {
+        if (draft.kind === 'beats' && beatsOverLimit(content)) {
+            message.textContent = `当前有 ${content.beats.length} 个场次，超过每集最多 ${MAX_BEATS} 个场次，无法锁定并采纳。`;
+            return;
+        }
         const confirmation = draft.kind === 'beats'
             ? '锁定 Beats 后将不能继续编辑，并立即标记为已采纳。确定继续吗？'
             : '应用后将立即锁定这个场次剧本版本，确定锁定并采纳吗？';
@@ -617,12 +641,25 @@
         const editor = document.createElement('div');
         const message = document.createElement('div');
         message.className = 'small text-muted mt-3';
+        const limitStatus = document.createElement('div');
+        limitStatus.className = 'optimization-beats-limit mt-2';
+        limitStatus.setAttribute('role', 'status');
+        limitStatus.setAttribute('aria-live', 'polite');
 
         const reindex = () => {
             content.beats.forEach((beat, index) => { beat.order = index + 1; });
         };
         const rerender = () => {
             editor.replaceChildren();
+            const overLimit = beatsOverLimit(content);
+            limitStatus.className = `optimization-beats-limit mt-2${overLimit ? ' is-invalid' : ''}`;
+            limitStatus.textContent = overLimit
+                ? `当前 ${content.beats.length}/${MAX_BEATS} 个场次：超过上限，删除或合并场次后才能保存、锁定并采纳。`
+                : `场次数量：${content.beats.length}/${MAX_BEATS}`;
+            save.disabled = overLimit;
+            acceptAndLock.disabled = overLimit;
+            save.title = overLimit ? '场次超过 3 个，无法保存' : '';
+            acceptAndLock.title = overLimit ? '场次超过 3 个，无法锁定并采纳' : '';
             content.beats.forEach((beat, beatIndex) => {
                 const beatSection = document.createElement('section');
                 beatSection.className = 'border rounded p-3 mb-3';
@@ -674,17 +711,33 @@
                 fields.append(
                     editorField('场景', beat.scene, (value) => { beat.scene = value; }, {multiline: true, column: 'col-md-6'}),
                     editorField('人物（逗号分隔）', (beat.characters || []).join('、'), (value) => setList(beat, 'characters', value), {multiline: true, column: 'col-md-6'}),
+                    editorField('转折', beat.turn, (value) => { beat.turn = value; }, {multiline: true, column: 'col-md-6'}),
+                    editorField('结尾钩子', beat.hook, (value) => { beat.hook = value; }, {multiline: true, column: 'col-md-6'}),
+                );
+                beatSection.append(beatHeader, fields);
+
+                const details = document.createElement('details');
+                details.className = 'optimization-beats-details mt-3';
+                const detailsSummary = document.createElement('summary');
+                detailsSummary.textContent = '展开详细分析：行动目标、阻力、情绪变化、局面变化、代价、对抗策略';
+                const detailFields = document.createElement('div');
+                detailFields.className = 'row g-2 mt-1';
+                detailFields.append(
                     editorField('行动目标', beat.goal, (value) => { beat.goal = value; }, {multiline: true, column: 'col-md-6'}),
                     editorField('阻力', beat.obstacle, (value) => { beat.obstacle = value; }, {multiline: true, column: 'col-md-6'}),
                     editorField('情绪变化', beat.emotion_change, (value) => { beat.emotion_change = value; }, {multiline: true, column: 'col-md-6'}),
                     editorField('局面变化', beat.state_change, (value) => { beat.state_change = value; }, {multiline: true, column: 'col-md-6'}),
                     editorField('代价', beat.cost, (value) => { beat.cost = value; }, {multiline: true, column: 'col-md-6'}),
                     editorField('对抗策略', beat.opposition_tactic, (value) => { beat.opposition_tactic = value; }, {multiline: true, column: 'col-md-6'}),
-                    editorField('转折', beat.turn, (value) => { beat.turn = value; }, {multiline: true, column: 'col-md-6'}),
-                    editorField('结尾钩子', beat.hook, (value) => { beat.hook = value; }, {multiline: true, column: 'col-md-6'}),
                 );
-                beatSection.append(beatHeader, fields);
+                details.append(detailsSummary, detailFields);
+                beatSection.append(details);
 
+                const continuity = document.createElement('details');
+                continuity.className = 'optimization-beats-details mt-3';
+                const continuitySummary = document.createElement('summary');
+                continuitySummary.textContent = '展开连续性变更';
+                const continuityBody = document.createElement('div');
                 const continuityHeader = document.createElement('div');
                 continuityHeader.className = 'd-flex justify-content-between align-items-center mt-3 mb-2';
                 const continuityTitle = document.createElement('div');
@@ -703,9 +756,9 @@
                     rerender();
                 });
                 continuityHeader.append(continuityTitle, addContinuity);
-                beatSection.append(continuityHeader);
+                continuityBody.append(continuityHeader);
                 const updates = Array.isArray(beat.continuity_updates) ? beat.continuity_updates : [];
-                if (!updates.length) appendText(beatSection, '本节拍暂无连续性变更', 'small text-muted');
+                if (!updates.length) appendText(continuityBody, '本节拍暂无连续性变更', 'small text-muted');
                 updates.forEach((update, updateIndex) => {
                     const updateRow = document.createElement('div');
                     updateRow.className = 'row g-2 border-top pt-2 mt-2';
@@ -734,15 +787,18 @@
                         editorField('知情人（逗号分隔）', (update.known_by || []).join('、'), (value) => setList(update, 'known_by', value), {column: 'col-md-4'}),
                         removeUpdateWrap,
                     );
-                    beatSection.append(updateRow);
+                    continuityBody.append(updateRow);
                 });
+                continuity.append(continuitySummary, continuityBody);
+                beatSection.append(continuity);
                 editor.append(beatSection);
             });
             const addBeat = document.createElement('button');
             addBeat.type = 'button';
             addBeat.className = 'btn btn-outline-primary btn-sm';
-            addBeat.textContent = '新增节拍';
-            addBeat.disabled = content.beats.length >= 6;
+            addBeat.textContent = '新增场次 / 新增节拍';
+            addBeat.disabled = content.beats.length >= MAX_BEATS;
+            addBeat.title = addBeat.disabled ? `每集最多 ${MAX_BEATS} 个场次` : '';
             addBeat.addEventListener('click', () => {
                 content.beats.push({
                     order: content.beats.length + 1,
@@ -761,7 +817,7 @@
         acceptAndLock.addEventListener('click', () => acceptAndLockOptimizationDraft(
             draft, content, acceptAndLock, message,
         ));
-        section.append(header, editor, message);
+        section.append(header, limitStatus, editor, message);
         rerender();
         if (after?.parentElement) after.insertAdjacentElement('afterend', section);
         else mount(section);

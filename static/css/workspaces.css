@@ -1285,3 +1285,15 @@
             #originalProjectModal input,
             #originalProjectModal select { max-width: 100%; }
         }
+
+/* Optimization draft Beats editor follows the same focused hierarchy without changing its payload. */
+.optimization-beats-limit { padding: 8px 10px; border: 1px solid rgba(96, 165, 250, .35); border-radius: 8px; color: #bfdbfe; font-size: .82rem; }
+.optimization-beats-limit.is-invalid { border-color: rgba(248, 113, 113, .7); background: rgba(127, 29, 29, .2); color: #fecaca; }
+.optimization-beats-details { border: 1px solid rgba(148, 163, 184, .2); border-radius: 9px; padding: 9px 11px; }
+.optimization-beats-details > summary { cursor: pointer; color: #cbd5e1; font-size: .84rem; font-weight: 650; }
+.optimization-beats-details > summary::marker { color: #60a5fa; }
+.optimization-draft-autosize { min-height: 72px; line-height: 1.6; resize: vertical; overflow-y: hidden; }
+@media (max-width: 576px) {
+    .optimization-beats-details { padding-inline: 8px; }
+    .optimization-draft-autosize { min-height: 84px; }
+}

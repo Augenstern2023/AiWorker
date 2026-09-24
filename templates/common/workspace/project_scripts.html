@@ -146,7 +146,7 @@
                         <div class="small fw-semibold mb-2" x-text="`[${scene.sequence_no}]-[${scene.scene_no}] [${scene.time_of_day || ''}] [${scene.interior_exterior || ''}] [${scene.location || ''}]`"></div>
                         <div class="small text-muted mb-2" x-text="`道具：${listText(scene.props) || '无'}　出场人物：${listText(scene.characters) || '无'}`"></div>
                         <template x-for="(block, blockIndex) in (scene.blocks || [])" :key="`all-block-${item.id}-${scene.sequence_no}-${scene.scene_no}-${blockIndex}`">
-                            <p class="mb-2" x-text="scriptBlockDisplayText(block)"></p>
+                            <p class="mb-2 workspace-prose" x-text="scriptBlockDisplayText(block)"></p>
                         </template>
                     </div>
                 </template>
@@ -192,7 +192,7 @@
                             <div class="col-md-2"><select class="form-select form-select-sm" x-model="block.type" :disabled="!selectedProjectScriptEditable()"><option value="action">动作</option><option value="dialogue">台词</option><option value="voiceover">画外音</option><option value="inner_voice">内心独白</option><option value="cut">切镜</option></select></div>
                             <div class="col-md-2" x-show="['dialogue', 'voiceover', 'inner_voice'].includes(block.type)"><input class="form-control form-control-sm" placeholder="人物" x-model="block.speaker" :disabled="!selectedProjectScriptEditable()"></div>
                             <div class="col-md-2" x-show="block.type === 'dialogue'"><input class="form-control form-control-sm" placeholder="情绪" x-model="block.modifier" :disabled="!selectedProjectScriptEditable()"></div>
-                            <div class="col"><textarea class="form-control form-control-sm" rows="2" x-model="block.text" :disabled="!selectedProjectScriptEditable()"></textarea></div>
+                            <div class="col"><textarea class="form-control form-control-sm workspace-prose-editor" rows="2" x-model="block.text" :disabled="!selectedProjectScriptEditable()"></textarea></div>
                         </div>
                     </template>
                 </div>

@@ -223,7 +223,7 @@ uv run pytest tests/test_original_project_browser.py tests/test_episode_all_view
 - 修改：`tests/test_frontend_performance_contract.py`
 - 修改：`tests/test_role_page_content.py`
 
-- [ ] **步骤 1：先增加正文排版契约测试**
+- [x] **步骤 1：先增加正文排版契约测试**
 
 在 `tests/test_frontend_performance_contract.py` 增加按页面路径/模板的契约测试，检查四个页面都渲染 `workspace-prose` 或 `workspace-prose-editor`；在 `static/css/workspaces.css` 中检查同一语义类同时声明以下三个值：
 
@@ -235,7 +235,7 @@ assert "letter-spacing: 2px" in css
 
 测试还要断言正文类没有应用到 `.btn`、导航项、标签或状态徽标，避免为满足字号契约而扩大控件尺寸。
 
-- [ ] **步骤 2：运行新增契约并确认当前实现缺口**
+- [x] **步骤 2：运行新增契约并确认当前实现缺口**
 
 运行：
 
@@ -245,7 +245,7 @@ uv run pytest tests/test_frontend_performance_contract.py -k "prose or typograph
 
 预期：在正文类或四个页面尚未全部接入时失败，并明确列出缺少的页面/选择器；不得通过放宽断言或移除页面断言来掩盖缺口。
 
-- [ ] **步骤 3：实现共享正文语义类**
+- [x] **步骤 3：实现共享正文语义类**
 
 在 `static/css/workspaces.css` 的工作台语义区域加入并保持以下实现，不复制到页面内联样式：
 
@@ -267,11 +267,11 @@ uv run pytest tests/test_frontend_performance_contract.py -k "prose or typograph
 
 如果已有同名或等价令牌，合并规则而不是创建重复选择器；表单控件仅在正文编辑区使用该类，按钮和导航继续使用现有控件令牌。
 
-- [ ] **步骤 4：接入 Brief、人物关系、分集大纲和场次剧本**
+- [x] **步骤 4：接入 Brief、人物关系、分集大纲和场次剧本**
 
 在四个页面及其实际输出正文的 workspace include 上，仅增加 `workspace-prose`/`workspace-prose-editor` 类和必要的语义包裹层，保留原有 `id`、`name`、`x-model`、`x-show`、`@click`、保存 payload 与权限条件。分别覆盖：Brief 的正文/编辑区、人物关系的关系说明与人物描述、分集大纲的集概要与场次描述、场次剧本的场景正文与预览。
 
-- [ ] **步骤 5：运行定向测试并检查三种视口**
+- [x] **步骤 5：运行定向测试并检查三种视口**
 
 运行：
 
@@ -303,3 +303,5 @@ git commit -m "style: 统一创作页面正文排版"
 - 已验证：`uv run pytest tests/test_frontend_performance_contract.py tests/test_page_authorization.py tests/test_role_page_content.py tests/test_episode_all_view_browser.py tests/test_original_project_browser.py tests/test_prompt_workspace_browser.py tests/test_prompt_marketplace_browser.py tests/test_role_page_access_browser.py tests/test_selection_dashboard_browser.py tests/test_selection_project_creation_browser.py -q`（123 passed）；`uv run ruff check .`、`uv lock --check`、75 个模板 Jinja 解析通过。
 - `tests/test_webgui_ui_changes.py` 仍受环境阻塞：系统数据库必须提供 `postgresql+psycopg://` 且处于 Alembic head；未修改业务代码绕过该前置条件。
 - CUA 浏览器面不可用；已用 Playwright 对隔离端口登录入口做三种视口 smoke（1440×900、1024×768、390×844），页面级 `scrollWidth == innerWidth`。真实登录态工作台逐页视觉验收仍需在可用浏览器/数据库环境完成。
+- 正文排版任务已完成：`workspace-prose`/`workspace-prose-editor` 统一使用 `16px`、`1.8` 行高和 `2px` 字间距，并接入 Brief、人物关系、分集大纲、场次剧本的实际长文本控件与剧本预览；按钮保持原有控件排版。
+- 本轮验证：`uv run pytest tests/test_frontend_performance_contract.py tests/test_role_page_content.py -q`（45 passed）；Playwright 在 `1440×900`、`1024×768`、`390×844` 验证正文计算样式和页面级无横向滚动。

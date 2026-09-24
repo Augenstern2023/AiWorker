@@ -290,6 +290,23 @@ def test_project_brief_uses_multiline_controls_for_generated_long_text():
         assert f'<input class="form-control form-control-sm" x-model="{field}"' not in blueprint
 
 
+def test_creative_long_form_fields_use_shared_prose_editor_semantics():
+    expected = {
+        "project_blueprints.html": "workspace-prose-editor",
+        "project_characters.html": "workspace-prose-editor",
+        "project_outlines.html": "workspace-prose-editor",
+        "project_beats.html": "workspace-prose-editor",
+        "project_scripts.html": "workspace-prose",
+    }
+    for filename, class_name in expected.items():
+        html = _read(f"templates/common/workspace/{filename}")
+        assert class_name in html, filename
+
+    scripts = _read("templates/common/workspace/project_scripts.html")
+    assert 'x-model="block.text"' in scripts
+    assert 'x-model="block.text"' in scripts and "workspace-prose-editor" in scripts
+
+
 def test_project_brief_long_text_controls_wrap_without_clipping():
     blueprint = _read("templates/common/workspace/project_blueprints.html")
     workspace_css = _read("static/css/workspaces.css")

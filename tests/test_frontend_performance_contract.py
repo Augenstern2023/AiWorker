@@ -108,6 +108,29 @@ def test_workspace_tokens_define_one_accent_and_semantic_states():
     assert "prefers-reduced-motion: reduce" in css
 
 
+def test_creative_prose_typography_is_scoped_to_long_form_content():
+    css = source("static/css/workspaces.css")
+    assert ".workspace-prose," in css
+    assert ".workspace-prose-editor" in css
+    assert "font-size: 16px" in css
+    assert "line-height: 1.8" in css
+    assert "letter-spacing: 2px" in css
+    assert ".workspace-prose .btn" not in css
+    assert ".workspace-prose-editor .btn" not in css
+
+    for template in (
+        "planning/brief.html",
+        "planning/characters.html",
+        "writing/outlines.html",
+        "writing/scripts.html",
+        "writing/beats.html",
+    ):
+        page = rendered_page(template)
+        assert page.has_element(classes={"workspace-prose"}) or page.has_element(
+            classes={"workspace-prose-editor"}
+        ), template
+
+
 def test_heavy_libraries_are_route_scoped():
     base = source("templates/layouts/base.html")
     analytics = source("templates/admin/analytics.html")

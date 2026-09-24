@@ -1629,6 +1629,34 @@
         .workspace-inspector__body { padding: var(--space-4); }
         .workspace-editor-pane { padding: var(--space-4); }
         .workspace-inspector { align-self: start; background: rgba(25, 29, 39, .72); }
+        /* Long-form creative copy uses a calmer reading rhythm than controls. */
+        .workspace-prose,
+        .workspace-prose-editor,
+        .workspace-stage-editor--brief textarea,
+        .workspace-stage-editor--characters textarea,
+        .workspace-stage-editor--outlines .outline-overview-textarea,
+        .workspace-stage-editor--outlines .outline-field-textarea,
+        .workspace-stage-editor--beats textarea,
+        .workspace-stage-editor--scripts textarea {
+            font-size: 16px;
+            line-height: 1.8;
+            letter-spacing: 2px;
+            overflow-wrap: anywhere;
+        }
+        .workspace-prose {
+            color: var(--color-text);
+            white-space: pre-wrap;
+        }
+        .workspace-prose-editor {
+            min-height: 8rem;
+            height: auto;
+            white-space: pre-wrap;
+            resize: vertical;
+        }
+        .workspace-prose-editor:disabled {
+            opacity: .9;
+            color: var(--color-text);
+        }
         .workspace-list-pane__item {
             display: block;
             width: 100%;

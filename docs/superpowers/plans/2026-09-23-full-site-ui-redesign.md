@@ -4,20 +4,32 @@
 
 **目标：** 在不改变既有路由、API、字段、权限和 Alpine 行为绑定的前提下，把选择、策划、写作与 Prompt 页面统一为可操作的工作台界面。
 
-**架构：** 共享 `workspaces.css` 提供语义令牌、页面头部、上下文工具栏、双栏/三栏布局和状态块；Jinja 模板只增加包裹层和信息层级，保留既有 DOM id、`x-*`、`@click` 与 data 属性。页面族按选题、创作、Prompt 分开改动，使用独立子代理和独立测试。
+**架构：** 共享 `workspaces.css` 提供语义令牌、页面头部、上下文工具栏、双栏/三栏布局、统一正文排版和状态块；Jinja 模板只增加包裹层和信息层级，保留既有 DOM id、`x-*`、`@click` 与 data 属性。页面族按选题、创作、Prompt 分开改动，使用独立子代理和独立测试。
 
 **技术栈：** FastAPI、Jinja2、Bootstrap 5、Bootstrap Icons、Alpine.js、原生 JavaScript、pytest、Playwright。
 
 ---
 
+## 全站统一正文排版规范
+
+以下规则适用于 Brief、人物关系、分集大纲、Beats、场次剧本，以及选题和 Prompt 页面中的正文阅读区；只作用于正文内容，不覆盖按钮、导航、标签、表单控件和状态徽标，避免破坏控件密度与可读性。
+
+- 正文字号：`15–16px`；长文本编辑器与阅读区优先使用 `16px`，辅助正文可使用 `15px`。
+- 正文行高：`1.7–1.85`；多行字段、卡片摘要和预览文本不得继续使用紧凑的 `1.2–1.5`。
+- 正文字间距：`2px`（CSS `letter-spacing: 2px`）。
+- 长文本允许自然增高和换行，不使用会截断正文的固定短高度；移动端仍保持上述正文层级，必要时仅调整容器宽度和内边距。
+- 统一通过 `workspaces.css` 的语义类/令牌实现；模板只给正文容器增加类名，不在各页面复制内联样式。
+
+验收时必须分别检查默认可见正文、编辑 textarea/contenteditable、预览/摘要和错误说明，确认字号、行高、字间距在四个创作页面均生效，且不产生页面级横向滚动。
+
 ## 文件职责与写入边界
 
-- 修改 `static/css/workspaces.css`：全站工作台令牌、页面壳、工具栏、split layout、状态与响应式。
+- 修改 `static/css/workspaces.css`：全站工作台令牌、页面壳、工具栏、split layout、正文排版、状态与响应式。
 - 修改 `templates/layouts/base.html`：工作台页面头部插槽与统一语义容器，不添加页面专属资源。
 - 修改 `templates/selection/*.html` 及 `templates/common/workspace/selection_*.html`：选题 Filter / Inspect 结构。
-- 修改 `templates/planning/*.html`、`templates/writing/*.html` 及 `templates/common/workspace/project_*.html`：Command / Inspect 结构。
+- 修改 `templates/planning/*.html`、`templates/writing/*.html` 及 `templates/common/workspace/project_*.html`：Command / Inspect 结构与正文容器；明确覆盖 Brief、人物关系、分集大纲、Beats、场次剧本五类创作页面。
 - 修改 `templates/common/workspace/prompt_template_center.html`、`prompt_template_effects.html` 及 prompt 相关 include：Step / Library / Effects 结构。
-- 修改 `tests/test_frontend_performance_contract.py`、`tests/test_webgui_ui_changes.py`、`tests/test_role_page_content.py`：固化页面族结构、资源边界和可访问性契约。
+- 修改 `tests/test_frontend_performance_contract.py`、`tests/test_webgui_ui_changes.py`、`tests/test_role_page_content.py`：固化页面族结构、正文排版、资源边界和可访问性契约。
 - 不修改 `web/`、API handler、数据库模型、业务脚本中的保存 payload；除非测试证明某个现有选择器因包裹层回归，才在对应页面族内最小调整。
 
 ## 实施顺序
@@ -199,11 +211,88 @@ uv run pytest tests/test_original_project_browser.py tests/test_episode_all_view
 
 运行 `uv run ruff check .`、`uv lock --check` 和最终定向测试；检查 `git status --short` 只包含预期文档/代码。提交：`git commit -m "feat: 完成全站工作台 UI 重构"`。
 
+### 任务 6：统一四个创作页面的正文阅读体验
+
+**文件：**
+- 修改：`static/css/workspaces.css`
+- 修改：`templates/planning/brief.html`
+- 修改：`templates/planning/characters.html`
+- 修改：`templates/writing/outlines.html`
+- 修改：`templates/writing/scripts.html`
+- 修改：对应的 `templates/common/workspace/project_*.html` include（若正文实际由 include 输出）
+- 修改：`tests/test_frontend_performance_contract.py`
+- 修改：`tests/test_role_page_content.py`
+
+- [ ] **步骤 1：先增加正文排版契约测试**
+
+在 `tests/test_frontend_performance_contract.py` 增加按页面路径/模板的契约测试，检查四个页面都渲染 `workspace-prose` 或 `workspace-prose-editor`；在 `static/css/workspaces.css` 中检查同一语义类同时声明以下三个值：
+
+```python
+assert "font-size: 16px" in css
+assert "line-height: 1.8" in css
+assert "letter-spacing: 2px" in css
+```
+
+测试还要断言正文类没有应用到 `.btn`、导航项、标签或状态徽标，避免为满足字号契约而扩大控件尺寸。
+
+- [ ] **步骤 2：运行新增契约并确认当前实现缺口**
+
+运行：
+
+```powershell
+uv run pytest tests/test_frontend_performance_contract.py -k "prose or typography" -q
+```
+
+预期：在正文类或四个页面尚未全部接入时失败，并明确列出缺少的页面/选择器；不得通过放宽断言或移除页面断言来掩盖缺口。
+
+- [ ] **步骤 3：实现共享正文语义类**
+
+在 `static/css/workspaces.css` 的工作台语义区域加入并保持以下实现，不复制到页面内联样式：
+
+```css
+.workspace-prose,
+.workspace-prose-editor {
+  font-size: 16px;
+  line-height: 1.8;
+  letter-spacing: 2px;
+  overflow-wrap: anywhere;
+}
+
+.workspace-prose-editor {
+  min-height: 8rem;
+  height: auto;
+  white-space: pre-wrap;
+}
+```
+
+如果已有同名或等价令牌，合并规则而不是创建重复选择器；表单控件仅在正文编辑区使用该类，按钮和导航继续使用现有控件令牌。
+
+- [ ] **步骤 4：接入 Brief、人物关系、分集大纲和场次剧本**
+
+在四个页面及其实际输出正文的 workspace include 上，仅增加 `workspace-prose`/`workspace-prose-editor` 类和必要的语义包裹层，保留原有 `id`、`name`、`x-model`、`x-show`、`@click`、保存 payload 与权限条件。分别覆盖：Brief 的正文/编辑区、人物关系的关系说明与人物描述、分集大纲的集概要与场次描述、场次剧本的场景正文与预览。
+
+- [ ] **步骤 5：运行定向测试并检查三种视口**
+
+运行：
+
+```powershell
+uv run pytest tests/test_frontend_performance_contract.py tests/test_role_page_content.py -q
+```
+
+然后在隔离端口依次检查 Brief、人物关系、分集大纲、场次剧本的 `1440×900`、`1024×768`、`390×844`：正文计算字号为 `15–16px`、行高为 `1.7–1.85`、字间距为 `2px`；长文本完整换行；无页面级横向滚动；按钮、导航和徽标未被放大。通过后提交：
+
+```powershell
+git add static/css/workspaces.css templates/planning/brief.html templates/planning/characters.html templates/writing/outlines.html templates/writing/scripts.html tests/test_frontend_performance_contract.py tests/test_role_page_content.py
+git commit -m "style: 统一创作页面正文排版"
+```
+
 ## 完成标准
 
 - 选择、策划、写作、Prompt 页面有明显且一致的 UI 结构变化，而非仅追加脚本。
 - 所有现有业务动作保持可用，既有浏览器测试通过。
 - 共享 CSS 令牌、状态、focus 和响应式规则通过静态契约。
+- Brief、人物关系、分集大纲、Beats、场次剧本正文统一使用 `15–16px`、`1.7–1.85` 行高和 `2px` 字间距；按钮、导航、标签和状态徽标不被正文规则覆盖。
+- 多行正文和编辑内容可自然换行、完整阅读，不因固定短高度被截断。
 - 三种视口通过人工验收；没有影响当前 `8899` 服务。
 - 无 React、Vue、Tailwind、新依赖或新构建链；无用户原有改动被覆盖或提交。
 

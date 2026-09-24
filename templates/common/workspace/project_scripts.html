@@ -1,5 +1,6 @@
-<div id="project-script-workspace" class="workspace-stage-editor workspace-stage-editor--scripts">
-    <div class="d-flex justify-content-between align-items-end mb-3">
+<div id="project-script-workspace" class="workspace-stage-editor workspace-stage-editor--scripts workspace-section">
+    <section class="workspace-section" aria-label="剧本操作栏">
+    <div class="d-flex justify-content-between align-items-end mb-3 flex-wrap gap-3">
         <div>
             <h5 class="mb-1">场次剧本</h5>
             <div class="small text-muted" x-text="isFreeCreativeProject() ? '当前集可独立创作；完成剧本后同样进入审核、优化和最终交付。' : '基于已锁定 Beats 生成可拍摄场次与台词'"></div>
@@ -32,6 +33,7 @@
             <button class="btn btn-outline-secondary btn-sm" type="button" x-show="projectStageEpisodeItems('script').length" @click="openEpisodeDownload('script', {forceAll: true})" title="选择模板并下载多集或全集"><i class="bi bi-download me-1"></i>多集/全集下载</button>
         </div>
     </div>
+    </section>
 
     <section class="card border-secondary mb-3" x-show="videoParameterSourceCount() > 0" x-cloak aria-labelledby="video-parameter-heading">
         <div class="card-header d-flex justify-content-between align-items-start gap-3 flex-wrap">
@@ -133,20 +135,23 @@
         </div>
     </section>
 
-    <div x-show="creativeWorkspace.selectedEpisode === 0" x-cloak>
+    <div class="workspace-card-grid" x-show="creativeWorkspace.selectedEpisode === 0" x-cloak>
         <template x-for="item in projectStageEpisodeItems('script')" :key="`all-script-${item.id}`">
-            <section class="border border-secondary rounded p-3 mb-3">
+            <section class="workspace-card border border-secondary rounded p-3 mb-3 workspace-section">
                 <div class="d-flex justify-content-between align-items-center mb-3">
                     <div><span class="fw-semibold" x-text="`第 ${item.episode_number} 集 · ${item.content?.episode_title || '未命名'} `"></span><span class="small text-muted" x-text="`v${item.version} · ${creativeWorkflowStatusLabel(item.status)}`"></span></div>
                     <a class="btn btn-outline-primary btn-sm" :href="creativeModuleUrl('script', item.episode_number)">打开单集编辑</a>
                 </div>
                 <div class="small text-muted mb-2" data-template-provenance x-text="creativeTemplateProvenance(item)"></div>
                 <template x-for="scene in (item.content?.scenes || [])" :key="`all-scene-${item.id}-${scene.sequence_no}-${scene.scene_no}`">
-                    <div class="border-top py-3">
+                    <div class="workspace-scene-card border-top py-3 workspace-section">
                         <div class="small fw-semibold mb-2" x-text="`[${scene.sequence_no}]-[${scene.scene_no}] [${scene.time_of_day || ''}] [${scene.interior_exterior || ''}] [${scene.location || ''}]`"></div>
                         <div class="small text-muted mb-2" x-text="`道具：${listText(scene.props) || '无'}　出场人物：${listText(scene.characters) || '无'}`"></div>
                         <template x-for="(block, blockIndex) in (scene.blocks || [])" :key="`all-block-${item.id}-${scene.sequence_no}-${scene.scene_no}-${blockIndex}`">
-                            <p class="mb-2 workspace-prose" x-text="scriptBlockDisplayText(block)"></p>
+                            <div class="workspace-script-block mb-2" :data-block-type="block.type">
+                                <div class="workspace-script-block__type small fw-semibold mb-1" x-text="({action: '动作', dialogue: '台词', voiceover: '画外音', inner_voice: '内心独白', cut: '切镜'})[block.type] || '内容'"></div>
+                                <p class="workspace-prose mb-0" x-text="scriptBlockDisplayText(block)"></p>
+                            </div>
                         </template>
                     </div>
                 </template>
@@ -156,8 +161,8 @@
     </div>
 
     <template x-if="creativeWorkspace.selectedEpisode > 0 && (creativeWorkspace.selectedScriptVersionId || projectEpisodeScript(creativeWorkspace.selectedEpisode))">
-        <div>
-            <div class="d-flex justify-content-between align-items-center mb-2">
+        <div class="workspace-card workspace-section">
+            <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
                 <div>
                     <span class="fw-semibold" x-text="`第 ${creativeWorkspace.selectedEpisode} 集 · v${selectedProjectScript().version} · ${creativeWorkflowStatusLabel(selectedProjectScript().status)}`"></span>
                     <span class="badge text-bg-warning ms-2" x-show="selectedProjectScriptIsHistorical()">历史版本 · 只读</span>
@@ -177,7 +182,7 @@
             <div class="small text-muted mb-2" data-template-provenance x-text="creativeTemplateProvenance(selectedProjectScript())"></div>
             <div class="mb-3"><label class="form-label small">集标题</label><input class="form-control form-control-sm" x-model="selectedProjectScript().content.episode_title" :disabled="!selectedProjectScriptEditable()"></div>
             <template x-for="scene in selectedProjectScript().content.scenes" :key="`${scene.sequence_no}-${scene.scene_no}`">
-                <div class="border-top py-3">
+                <section class="workspace-scene-card border-top py-3 workspace-section">
                     <div class="row g-2">
                         <div class="col-3"><label class="form-label small">段</label><input class="form-control form-control-sm" type="number" min="1" x-model.number="scene.sequence_no" :disabled="!selectedProjectScriptEditable()"></div>
                         <div class="col-3"><label class="form-label small">场</label><input class="form-control form-control-sm" type="number" min="1" x-model.number="scene.scene_no" :disabled="!selectedProjectScriptEditable()"></div>
@@ -188,14 +193,14 @@
                         <div class="col-md-3"><label class="form-label small">出场人物</label><input class="form-control form-control-sm" :value="listText(scene.characters)" @input="setListField(scene, 'characters', $event.target.value)" :disabled="!selectedProjectScriptEditable()"></div>
                     </div>
                     <template x-for="block in scene.blocks">
-                        <div class="row g-2 mt-1">
-                            <div class="col-md-2"><select class="form-select form-select-sm" x-model="block.type" :disabled="!selectedProjectScriptEditable()"><option value="action">动作</option><option value="dialogue">台词</option><option value="voiceover">画外音</option><option value="inner_voice">内心独白</option><option value="cut">切镜</option></select></div>
+                        <div class="workspace-script-block row g-2 mt-1" :data-block-type="block.type">
+                            <div class="col-md-2"><label class="form-label small">内容类型</label><select class="form-select form-select-sm" x-model="block.type" :disabled="!selectedProjectScriptEditable()"><option value="action">动作</option><option value="dialogue">台词</option><option value="voiceover">画外音</option><option value="inner_voice">内心独白</option><option value="cut">切镜</option></select></div>
                             <div class="col-md-2" x-show="['dialogue', 'voiceover', 'inner_voice'].includes(block.type)"><input class="form-control form-control-sm" placeholder="人物" x-model="block.speaker" :disabled="!selectedProjectScriptEditable()"></div>
                             <div class="col-md-2" x-show="block.type === 'dialogue'"><input class="form-control form-control-sm" placeholder="情绪" x-model="block.modifier" :disabled="!selectedProjectScriptEditable()"></div>
                             <div class="col"><textarea class="form-control form-control-sm workspace-prose-editor" rows="2" x-model="block.text" :disabled="!selectedProjectScriptEditable()"></textarea></div>
                         </div>
                     </template>
-                </div>
+                </section>
             </template>
         </div>
     </template>

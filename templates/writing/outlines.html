@@ -17,8 +17,8 @@
 {% set creative_module = "outline" %}
 <section class="workspace-context-bar" x-show="creativeWorkspace.project" x-cloak aria-label="大纲项目上下文"><div class="workspace-context-bar__primary"><div class="workspace-section-label">当前项目</div><strong x-text="creativeWorkspace.project?.name || '未命名项目'"></strong></div><div class="workspace-context-bar__meta"><span>全剧大纲</span><span x-text="creativeProjectWorkflowModeLabel(creativeWorkspace.project)"></span></div></section>
 {% include "common/workspace/project_module_navigation.html" %}
-<div class="workspace-split workspace-split--inspect">
-    <template x-if="creativeWorkspace.project"><div class="workspace-editor-pane">{% include "common/workspace/project_outlines.html" %}</div></template>
+<div class="workspace-split workspace-split--inspect workspace-section">
+    <template x-if="creativeWorkspace.project"><div class="workspace-editor-pane workspace-section">{% include "common/workspace/project_outlines.html" %}</div></template>
     {% include "common/workspace/project_progress.html" %}
 </div>
 {% include "common/workspace/creative_progress_modal.html" %}

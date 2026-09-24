@@ -83,6 +83,13 @@
         control.style.height = `${Math.max(control.scrollHeight, 72)}px`;
     }
 
+    function refreshDetailsTextareas(details) {
+        if (!details.open) return;
+        const resize = () => details.querySelectorAll('textarea').forEach(autoSizeTextarea);
+        resize();
+        window.requestAnimationFrame(resize);
+    }
+
     window.addEventListener('beforeunload', (event) => {
         if (!hasUnsavedChanges) return;
         event.preventDefault();
@@ -731,6 +738,7 @@
                     editorField('对抗策略', beat.opposition_tactic, (value) => { beat.opposition_tactic = value; }, {multiline: true, column: 'col-md-6'}),
                 );
                 details.append(detailsSummary, detailFields);
+                details.addEventListener('toggle', () => refreshDetailsTextareas(details));
                 beatSection.append(details);
 
                 const continuity = document.createElement('details');
@@ -790,6 +798,7 @@
                     continuityBody.append(updateRow);
                 });
                 continuity.append(continuitySummary, continuityBody);
+                continuity.addEventListener('toggle', () => refreshDetailsTextareas(continuity));
                 beatSection.append(continuity);
                 editor.append(beatSection);
             });

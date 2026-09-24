@@ -71,7 +71,7 @@ from creative.database_schema import (
     script_reviews,
 )
 from creative.repositories.base import jsonb_copy, utc_now
-from creative.script_service import normalize_script_content
+from creative.script_service import normalize_script_content, validate_beats
 
 
 def _review_request_key(row: Mapping[str, Any]) -> str:
@@ -656,6 +656,15 @@ class ReviewsRepository:
     ) -> dict[str, Any]:
         """Commit a whole episode before the next model request starts."""
 
+        validated_drafts: list[dict[str, Any]] = []
+        for draft in drafts:
+            normalized = dict(draft)
+            if str(normalized.get("kind") or "") == "beats":
+                normalized["content"] = validate_beats(
+                    normalized.get("content") or {}, allow_legacy=True
+                )
+            validated_drafts.append(normalized)
+        drafts = validated_drafts
         now = utc_now()
         with self.transaction_scope() as connection:
             row = connection.execute(
@@ -763,6 +772,15 @@ class ReviewsRepository:
         optimization = self.get_script_optimization(optimization_id)
         if not optimization:
             raise ValueError("优化任务不存在")
+        validated_drafts: list[dict[str, Any]] = []
+        for draft in drafts:
+            normalized = dict(draft)
+            if str(normalized.get("kind") or "") == "beats":
+                normalized["content"] = validate_beats(
+                    normalized.get("content") or {}, allow_legacy=True
+                )
+            validated_drafts.append(normalized)
+        drafts = validated_drafts
         now = utc_now()
         # Draft rows, the structure peer links and the task status land in one
         # transaction: a partially written optimization must never be readable.

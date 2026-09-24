@@ -91,3 +91,21 @@ uv run pytest tests/test_creative_free_mode.py -q
 ```
 
 自由模式主测试仍有 PostgreSQL 依赖项被跳过；新增测试不依赖数据库并实际执行通过。
+
+## 后续修复：Prompt 工作区测试契约（2026-09-24）
+
+- 将 `tests/test_prompt_workspace_browser.py` 中个人模板的 `max_beats` 及显示/原始 JSON 断言从 5 更新为 3。
+- 将现有 validator 边界测试参数化，明确覆盖 1、2、3 个 Beats 通过及第 4 个拒绝。
+
+验证：
+
+```text
+uv run pytest tests/test_prompt_workspace_browser.py -q
+6 passed in 11.75s
+
+uv run pytest tests/test_creative_phase4_generation.py -q
+114 skipped in 1.48s（PostgreSQL fixture 环境不可用）
+
+独立 validator 边界检查：
+1/2/3 accepted; 4 rejected
+```

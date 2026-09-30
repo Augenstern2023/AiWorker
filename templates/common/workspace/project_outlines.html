@@ -1,15 +1,34 @@
 <div class="outline-workspace workspace-stage-editor workspace-stage-editor--outlines workspace-section" x-effect="syncOutlineEpisodeCardContext(creativeWorkspace.project)">
-    <div class="d-flex justify-content-between align-items-center mb-3 outline-section-heading">
-        <div><h5 class="mb-1">分集大纲 <span class="badge text-bg-secondary" x-text="creativeWorkflowStatusLabel(currentOutlineBatchStatus())"></span></h5><div class="small text-muted" x-text="isFreeCreativeProject() ? '始终按全剧创建；不要求已有 Brief 或人物。' : '先规划全剧阶段弧线；完成并锁定后可生成单集 Beats'"></div></div>
+    <section class="workspace-card border border-secondary rounded-3 p-3 p-lg-4 mb-3 outline-command-deck" aria-labelledby="outline-page-title">
+    <div class="d-flex justify-content-between align-items-start mb-3 outline-section-heading flex-wrap gap-3">
+        <div><div class="small text-info text-uppercase fw-semibold">Story map / 01</div><h5 class="mb-1 mt-2" id="outline-page-title">分集大纲 <span class="badge text-bg-secondary" x-text="creativeWorkflowStatusLabel(currentOutlineBatchStatus())"></span></h5><div class="small text-muted" x-text="isFreeCreativeProject() ? '始终按全剧创建；不要求已有 Brief 或人物。' : '先规划全剧阶段弧线；完成并锁定后可生成单集 Beats'"></div></div>
         <div class="d-flex gap-2 outline-primary-actions"><a class="btn btn-outline-info btn-sm" x-show="!isFreeCreativeProject() && projectHasGeneratedScripts()" :href="mergedScriptDownloadUrl()" title="合并下载已生成场次剧本"><i class="bi bi-download me-1"></i>剧本下载</a><button class="btn btn-primary btn-sm" @click="generateProjectOutlines" :disabled="creativeActionDisabled('outlines')"><span class="spinner-border spinner-border-sm me-1" x-show="creativeActionRunning('outlines')"></span><i class="bi bi-list-ol me-1" x-show="!creativeActionRunning('outlines')"></i><span x-text="creativeActionRunning('outlines') ? (creativeWorkspace.startingAction === 'outlines' ? '正在启动' : '生成中') : outlineGenerationActionLabel()"></span></button><button class="btn btn-outline-light btn-sm" x-show="isFreeCreativeProject()" @click="createFreeBlankResource('outline')" :disabled="!freeStageCan('outline', 'can_create_blank')"><i class="bi bi-plus-lg me-1"></i>空白全剧版本</button><button class="btn btn-warning btn-sm" x-show="currentProjectOutlines().length && creativeResourceEditable(currentProjectOutlines()[0])" @click="completeProjectOutlines" :disabled="!(currentProjectOutlines().length === Number(creativeWorkspace.project.target_episode_count || 0)) || !latestOutlineBatchId() || !creativeResourceEditable(currentProjectOutlines()[0])"><i class="bi bi-lock-fill me-1"></i>完成并锁定</button><button class="btn btn-outline-info btn-sm" x-show="isFreeCreativeProject() && ['locked', 'approved'].includes(currentOutlineBatchStatus())" @click="createFreeResourceRevision('outline')" :disabled="!freeStageCan('outline', 'can_create_revision')"><i class="bi bi-files me-1"></i>创建修订版</button><a class="btn btn-outline-secondary btn-sm" x-show="currentGeneratedResourceId('outline')" :href="creativeGeneratedDownloadUrl('outline', 'md')" title="下载完整当前大纲版本"><i class="bi bi-file-earmark-arrow-down"></i></a><button class="btn btn-outline-secondary btn-sm" type="button" x-show="currentProjectOutlines().length" @click="openEpisodeDownload('outline')" title="选择多集或全集下载"><i class="bi bi-download me-1"></i>多集/全集下载</button></div>
     </div>
-    <div class="row g-2 align-items-end mb-3" x-show="!isFreeCreativeProject() && availableLockedBriefs().length">
+    <div class="row g-2 pt-3 border-top" aria-label="大纲进度摘要">
+        <div class="col-6 col-lg-3"><div class="border border-secondary rounded-3 p-3 h-100"><div class="small text-muted">已规划</div><div class="fs-4 fw-semibold" x-text="currentProjectOutlines().length"></div></div></div>
+        <div class="col-6 col-lg-3"><div class="border border-secondary rounded-3 p-3 h-100"><div class="small text-muted">目标集数</div><div class="fs-4 fw-semibold" x-text="Number(creativeWorkspace.project?.target_episode_count || 0)"></div></div></div>
+        <div class="col-6 col-lg-3"><div class="border border-secondary rounded-3 p-3 h-100"><div class="small text-muted">当前视图</div><div class="fw-semibold mt-1" x-text="creativeWorkspace.outlineQuery?.trim() ? '筛选中' : '全集弧线'"></div></div></div>
+        <div class="col-6 col-lg-3"><div class="border border-secondary rounded-3 p-3 h-100"><div class="small text-muted">下游动作</div><div class="fw-semibold mt-1">打开 Beats</div></div></div>
+    </div>
+    </section>
+    <section class="outline-command-strip" aria-label="大纲工作台概览">
+        <div class="outline-command-strip__intro"><span class="workspace-section-label">OUTLINE CONTROL ROOM</span><strong>从全剧弧线定位每一集的推进任务</strong><span>先看整体，再打开单集编辑；搜索、展开和生成入口保持在同一操作带。</span></div>
+        <div class="outline-command-strip__stats">
+            <div><span>已规划</span><strong x-text="currentProjectOutlines().length"></strong><small x-text="`/ ${Number(creativeWorkspace.project?.target_episode_count || 0)} 集`"></small></div>
+            <div><span>当前视图</span><strong x-text="creativeWorkspace.outlineQuery?.trim() ? '筛选中' : '全集'"></strong><small>剧情弧线</small></div>
+            <div class="is-accent"><span>下一步</span><strong>打开单集</strong><small>Beats / 剧本</small></div>
+        </div>
+    </section>
+    <section class="border border-secondary rounded-3 p-3 mb-3" x-show="!isFreeCreativeProject() && availableLockedBriefs().length" aria-label="上游版本选择">
+        <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap mb-3"><div><div class="small text-info text-uppercase fw-semibold">Context</div><h6 class="mb-0 mt-1">锁定上游版本</h6></div><span class="small text-muted">Brief 与人物关系决定本轮大纲上下文</span></div>
+    <div class="row g-2 align-items-end">
         <div class="col-md-4"><label class="form-label small">创作方向（锁定 Brief）</label><select class="form-select form-select-sm" x-model.number="creativeWorkspace.selectedOutlineBriefId"><template x-for="brief in availableLockedBriefs()" :key="`outline-brief-${brief.id}`"><option :value="brief.id" x-text="`${brief.content.title || '未命名方向'} · v${brief.version}`"></option></template></select></div>
         <div class="col-md-auto"><button class="btn btn-outline-primary btn-sm" @click="selectOutlineBrief" :disabled="Number(creativeWorkspace.selectedOutlineBriefId) === Number(creativeWorkspace.project.locked_brief_id)"><i class="bi bi-arrow-repeat me-1"></i>切换方向</button></div>
         <div class="col-md-5"><label class="form-label small">人物关系版本（已锁定）</label><select class="form-select form-select-sm" x-model="creativeWorkspace.selectedOutlineCharacterBatchId" :disabled="!availableLockedCharacterBatches().length"><option value="" x-show="!availableLockedCharacterBatches().length">暂无与当前创作方向匹配的已锁定人物关系</option><template x-for="batch in availableLockedCharacterBatches()" :key="`outline-character-${batch.batch_id}`"><option :value="batch.batch_id" x-text="`v${batch.version} · ${batch.names.join('、') || '未命名角色'}`"></option></template></select></div>
         <div class="col-md-auto"><button class="btn btn-outline-primary btn-sm" x-show="availableLockedCharacterBatches().length" @click="selectOutlineCharacterBatch" :disabled="String(creativeWorkspace.selectedOutlineCharacterBatchId || '') === String(creativeWorkspace.project.character_batch_id || '')"><i class="bi bi-arrow-repeat me-1"></i>切换版本</button><a class="btn btn-outline-warning btn-sm" x-show="!availableLockedCharacterBatches().length" :href="`/writing/projects/${creativeWorkspace.project.id}/characters`"><i class="bi bi-people me-1"></i>前往人物关系</a></div>
     </div>
-    <section class="outline-series-overview workspace-section" aria-labelledby="outline-series-overview-title">
+    </section>
+    <section class="outline-series-overview workspace-card border border-secondary rounded-3 p-3 p-lg-4 mb-3 workspace-section" aria-labelledby="outline-series-overview-title">
         <header class="outline-overview-header">
             <div class="outline-overview-heading">
                 <h6 class="mb-0" id="outline-series-overview-title">全集剧情概览</h6>
@@ -46,7 +65,9 @@
             </div>
         </div>
     </section>
-    <div class="outline-list-toolbar" aria-label="分集大纲列表工具栏">
+    <section class="border border-secondary rounded-3 p-3 mb-3" aria-label="分集大纲列表工具栏">
+    <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap mb-3"><div><div class="small text-info text-uppercase fw-semibold">Episodes</div><h6 class="mb-0 mt-1">分集工作区</h6></div><span class="small text-muted">先看核心事件，再展开编辑字段</span></div>
+    <div class="outline-list-toolbar">
         <div class="outline-search-wrap">
             <label class="visually-hidden" for="outline-episode-search">搜索集数或核心事件</label>
             <i class="bi bi-search outline-search-icon" aria-hidden="true"></i>
@@ -58,28 +79,30 @@
             <button class="btn btn-outline-primary btn-sm" id="outline-expand-all" type="button" @click="expandAllOutlineEpisodes" :disabled="!filteredProjectOutlines().length"><i class="bi bi-arrows-expand me-1" aria-hidden="true"></i>全部展开</button>
         </div>
     </div>
+    </section>
 
     <div class="outline-episode-list workspace-card-grid" x-show="currentProjectOutlines().length">
         <template x-for="item in filteredProjectOutlines()" :key="item.id">
-            <article class="outline-episode-card workspace-card" :class="{'is-expanded': outlineEpisodeExpanded(item.episode_number)}" :data-episode-number="item.episode_number" x-init="item.content = item.content || {}">
-                <header class="outline-episode-header workspace-card__header">
-                    <div class="outline-episode-identity">
+            <article class="outline-episode-card workspace-card border border-secondary rounded-3 overflow-hidden" :class="{'is-expanded': outlineEpisodeExpanded(item.episode_number)}" :data-episode-number="item.episode_number" x-init="item.content = item.content || {}">
+                <header class="outline-episode-header workspace-card__header p-3">
+                    <div class="outline-episode-identity d-flex align-items-center gap-2 flex-wrap">
                         <span class="outline-episode-number" x-text="`第 ${item.episode_number} 集`"></span>
                         <span class="badge text-bg-secondary outline-episode-status" x-text="creativeWorkflowStatusLabel(item.status)"></span>
                         <span class="small text-muted" data-template-provenance x-text="creativeTemplateProvenance(item)"></span>
                         <a class="badge text-bg-success text-decoration-none outline-script-status" x-show="projectEpisodeScript(item.episode_number)" :href="`/writing/projects/${creativeWorkspace.project.id}/episodes/${item.episode_number}/scripts`" @click.stop title="打开场次剧本" x-text="projectEpisodeScriptLabel(item.episode_number)"></a>
                         <button class="badge outline-update-status" type="button" x-show="hasProjectEpisodeUpdates(item.episode_number)" @click.stop="openOutlineEpisodeUpdates(item.episode_number)" title="查看 Beats 与剧本更新记录" aria-label="查看 Beats 与剧本更新记录"><i class="bi bi-clock-history" aria-hidden="true"></i><span x-text="projectEpisodeUpdateSummary(item.episode_number)"></span></button>
                     </div>
-                    <button class="outline-episode-toggle" type="button" @click="toggleOutlineEpisode(item.episode_number)" :aria-expanded="outlineEpisodeExpanded(item.episode_number) ? 'true' : 'false'" :aria-controls="`outline-episode-details-${item.id}`" :aria-label="`${outlineEpisodeExpanded(item.episode_number) ? '收起' : '展开'}第 ${item.episode_number} 集`">
+                    <button class="outline-episode-toggle w-100 text-start mt-3" type="button" @click="toggleOutlineEpisode(item.episode_number)" :aria-expanded="outlineEpisodeExpanded(item.episode_number) ? 'true' : 'false'" :aria-controls="`outline-episode-details-${item.id}`" :aria-label="`${outlineEpisodeExpanded(item.episode_number) ? '收起' : '展开'}第 ${item.episode_number} 集`">
                         <span class="outline-event-preview" :title="String(item.content.core_event || '')" x-text="item.content.core_event || '暂无核心事件'"></span>
                         <i class="bi bi-chevron-down outline-toggle-icon" aria-hidden="true"></i>
                     </button>
-                    <div class="outline-episode-actions" aria-label="单集操作">
+                    <div class="outline-episode-actions d-flex gap-2 flex-wrap mt-3" aria-label="单集操作">
                         <button class="btn btn-sm btn-outline-light outline-save-action" type="button" x-show="creativeResourceEditable(item)" @click="saveProjectEpisode(item)" :disabled="!creativeResourceEditable(item)" title="保存大纲" :aria-label="`保存第 ${item.episode_number} 集大纲`"><i class="bi bi-save" aria-hidden="true"></i><span class="d-none d-sm-inline ms-1">保存</span></button>
                         <a class="btn btn-sm btn-outline-primary outline-beats-action" :href="`/writing/projects/${creativeWorkspace.project.id}/episodes/${item.episode_number}/beats`" @click.stop title="打开单集节拍表" :aria-label="`打开第 ${item.episode_number} 集 Beats`"><i class="bi bi-arrow-right" aria-hidden="true"></i><span class="d-none d-sm-inline ms-1">打开 Beats</span></a>
                     </div>
                 </header>
-                <div class="outline-episode-details workspace-card__body workspace-section" :id="`outline-episode-details-${item.id}`" x-show="outlineEpisodeExpanded(item.episode_number)" x-transition.opacity.duration.120ms x-cloak>
+                <div class="outline-episode-details workspace-card__body workspace-section border-top p-3" :id="`outline-episode-details-${item.id}`" x-show="outlineEpisodeExpanded(item.episode_number)" x-transition.opacity.duration.120ms x-cloak>
+                    <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap mb-3"><div><div class="small text-info text-uppercase fw-semibold">Episode brief</div><h6 class="mb-0 mt-1">第 <span x-text="item.episode_number"></span> 集叙事字段</h6></div><span class="small text-muted">展开后编辑并保存</span></div>
                     <div class="outline-field-grid">
                         <div class="outline-field-group"><div class="outline-field-header"><label class="outline-field-label" :for="`outline-core-event-${item.id}`">核心事件</label><button type="button" class="btn btn-link btn-sm outline-field-ai-action" data-outline-ai-field="core_event" x-show="outlineFieldRewriteAllowed(item)" @click="openOutlineFieldRewrite(item, 'core_event', '核心事件')" aria-label="AI 重写核心事件"><i class="bi bi-stars" aria-hidden="true"></i><span>AI 重写</span></button></div><textarea class="form-control form-control-sm outline-field-textarea" :id="`outline-core-event-${item.id}`" rows="4" x-model="item.content.core_event" :disabled="!creativeResourceEditable(item)"></textarea></div>
                         <div class="outline-field-group"><div class="outline-field-header"><label class="outline-field-label" :for="`outline-conflict-${item.id}`">冲突</label><button type="button" class="btn btn-link btn-sm outline-field-ai-action" data-outline-ai-field="conflict" x-show="outlineFieldRewriteAllowed(item)" @click="openOutlineFieldRewrite(item, 'conflict', '冲突')" aria-label="AI 重写冲突"><i class="bi bi-stars" aria-hidden="true"></i><span>AI 重写</span></button></div><textarea class="form-control form-control-sm outline-field-textarea" :id="`outline-conflict-${item.id}`" rows="4" x-model="item.content.conflict" :disabled="!creativeResourceEditable(item)"></textarea></div>

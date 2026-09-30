@@ -18,6 +18,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -187,6 +188,31 @@ def test_douyin_today_rank_uses_switchable_rank_and_heat_boards():
     assert "this.todayRankSectionKey = parts[2] || '榜单'" in script
     assert "todayRankPlatform === 'dy'" in template
     assert "setTodayRankRoute('dy', section.key)" in template
+
+
+def test_today_rank_uses_full_width_results_without_redundant_inspector():
+    template = _source("templates/common/workspace/selection_ranks.html")
+    styles = _source("static/css/workspaces.css")
+
+    assert "workspace-split--single" in template
+    assert "workspace-split--inspect" not in template
+    assert "workspace-inspector" not in template
+    assert ">Inspect<" not in template
+    assert re.search(
+        r"\.today-rank-table \.scroll-pane\s*\{[^}]*"
+        r"max-width:\s*100%;[^}]*overflow:\s*auto;",
+        styles,
+        re.S,
+    )
+
+
+def test_today_hits_uses_full_width_results_without_redundant_inspector():
+    template = _source("templates/common/workspace/selection_hits.html")
+
+    assert "workspace-split--single" in template
+    assert "workspace-split--inspect" not in template
+    assert "workspace-inspector" not in template
+    assert ">Inspect<" not in template
 
 
 def test_hongguo_today_rank_opens_explanations_from_an_info_icon():

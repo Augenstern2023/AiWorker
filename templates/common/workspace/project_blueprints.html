@@ -1,15 +1,42 @@
 <div class="workspace-stage-editor workspace-stage-editor--brief workspace-editor-pane">
+<section class="workspace-section workspace-brief-command" aria-labelledby="brief-command-heading">
+    <div class="row g-3 align-items-end">
+        <div class="col-xl-8">
+            <div class="workspace-section-label">BRIEF / COMMAND</div>
+            <h4 id="brief-command-heading" class="mb-1">把方向收敛成一份可执行 Brief</h4>
+            <p class="small text-muted mb-0">先比较候选方向的命题、冲突与风险，再进入编辑器完成锁定。候选卡负责判断，编辑器负责生产。</p>
+        </div>
+        <div class="col-xl-4">
+            <div class="d-flex flex-wrap justify-content-xl-end gap-2" aria-label="Brief 工作流">
+                <span class="badge rounded-pill text-bg-secondary">01 方向候选</span>
+                <span class="badge rounded-pill text-bg-secondary">02 Command 编辑</span>
+                <span class="badge rounded-pill text-bg-secondary">03 Inspect 锁定</span>
+            </div>
+        </div>
+    </div>
+</section>
+<section class="workspace-brief-snapshot" aria-label="Brief 工作台概览">
+    <div class="workspace-brief-snapshot__intro"><span class="workspace-section-label">BRIEF SNAPSHOT</span><strong>先做选择，再进入编辑</strong><span>候选方向是决策卡；锁定后才会进入后续创作链路。</span></div>
+    <div class="workspace-brief-stats">
+        <div class="workspace-brief-stat"><span>方向候选</span><strong x-text="latestProjectBlueprints().length"></strong><small>当前可比较</small></div>
+        <div class="workspace-brief-stat"><span>当前版本</span><strong x-text="selectedProjectBlueprint() ? `v${selectedProjectBlueprint().version}` : '—'"></strong><small x-text="selectedProjectBlueprint() ? creativeWorkflowStatusLabel(selectedProjectBlueprint().status) : '尚未选择'"></small></div>
+        <div class="workspace-brief-stat workspace-brief-stat--accent"><span>下一步</span><strong x-text="selectedProjectBlueprint() ? '编辑 Brief' : '选择方向'"></strong><small>Command / Inspect</small></div>
+    </div>
+</section>
 <div class="d-flex justify-content-between align-items-center gap-2 mb-3" x-show="isFreeCreativeProject()" x-cloak>
     <div><h5 class="mb-1">自由 Brief</h5><div class="small text-muted">直接创建，或仅使用项目种子与显式选择的锁定资源生成。</div></div>
     <div class="d-flex gap-2"><button class="btn btn-primary btn-sm" @click="generateProjectBlueprints" :disabled="creativeActionDisabled('blueprints') || !freeStageCan('brief', 'can_generate')"><i class="bi bi-stars me-1"></i>AI 生成</button><button class="btn btn-outline-light btn-sm" @click="createFreeBlankResource('brief')" :disabled="!freeStageCan('brief', 'can_create_blank')"><i class="bi bi-plus-lg me-1"></i>空白版本</button></div>
 </div>
-<section class="workspace-section" aria-labelledby="brief-directions-heading">
-    <div class="workspace-section__header"><h6 id="brief-directions-heading">方向候选</h6><span class="small text-muted">先比较核心命题，再进入下方编辑器</span></div>
+<section class="workspace-section workspace-brief-deck" aria-labelledby="brief-directions-heading">
+    <div class="workspace-section__header">
+        <div><div class="workspace-section-label">01 / CHOOSE</div><h6 id="brief-directions-heading">方向候选</h6></div>
+        <span class="small text-muted">卡片是决策面；点击铅笔进入下方 Command 编辑</span>
+    </div>
     <div class="workspace-card-grid">
         <template x-for="item in latestProjectBlueprints()" :key="`brief-card-${item.id}`">
             <article class="workspace-card workspace-blueprint-card" :class="{'is-selected': creativeWorkspace.selectedBlueprintId === item.id}">
                 <div class="workspace-card__header">
-                    <div class="d-flex align-items-start gap-2 min-w-0"><input class="form-check-input mt-1" type="checkbox" :checked="creativeWorkspace.preservedBlueprintIds.includes(item.id)" :disabled="item.status !== 'draft'" @change="togglePreservedBlueprint(item.id, $event.target.checked)" :aria-label="`保留${item.content.title || '方向'}`"><div class="min-w-0"><div class="workspace-card__title" x-text="item.content.title || '未命名方向'"></div><div class="workspace-card__meta" x-text="`v${item.version} · ${creativeWorkflowStatusLabel(item.status)}`"></div></div></div>
+                    <div class="d-flex align-items-start gap-2 min-w-0"><input class="form-check-input mt-1" type="checkbox" :checked="creativeWorkspace.preservedBlueprintIds.includes(item.id)" :disabled="item.status !== 'draft'" @change="togglePreservedBlueprint(item.id, $event.target.checked)" :aria-label="`保留${item.content.title || '方向'}`"><div class="min-w-0"><div class="workspace-card__meta mb-1">方向候选</div><div class="workspace-card__title" x-text="item.content.title || '未命名方向'"></div><div class="workspace-card__meta" x-text="`v${item.version} · ${creativeWorkflowStatusLabel(item.status)}`"></div></div></div>
                     <button class="btn btn-sm btn-outline-light" type="button" @click="openProjectBlueprintEditor(item.id)" :aria-label="`编辑方向：${item.content.title || '未命名方向'}`" title="编辑方向"><i class="bi bi-pencil" aria-hidden="true"></i></button>
                 </div>
                 <div class="workspace-field-grid workspace-blueprint-summary">
@@ -32,8 +59,8 @@
     </div>
     <div class="original-seed-editor mb-3" x-show="creativeWorkspace.project?.seed"><label class="form-label small">当前灵感版本 <span class="text-muted" x-text="`v${creativeWorkspace.project.seed.version} · ${creativeWorkspace.project.seed.status === 'frozen' ? '已冻结' : '草稿'}`"></span></label><div class="input-group"><textarea class="form-control form-control-sm workspace-prose-editor" rows="2" maxlength="500" x-model="creativeWorkspace.project.seed.seed_text"></textarea><button class="btn btn-outline-light" type="button" @click="saveOriginalSeed" title="冻结版本会另存为新版本"><i class="bi bi-save"></i></button></div></div>
     <div class="table-responsive original-direction-grid creative-direction-grid d-none" aria-hidden="true"><table class="table table-sm align-middle creative-direction-table creative-direction-table-original"><colgroup><col class="col-direction-preserve"><col class="col-direction-title"><col class="col-direction-detail"><col class="col-direction-detail"><col class="col-direction-detail"><col class="col-direction-detail"><col class="col-direction-detail"><col class="col-direction-detail"><col class="col-direction-action"></colgroup><thead><tr><th>保留</th><th>方向</th><th>核心命题</th><th>主角</th><th>核心冲突</th><th>差异化卖点</th><th>成本</th><th>创作风险</th><th>操作</th></tr></thead><tbody><template x-for="item in latestProjectBlueprints()" :key="item.id"><tr :class="{'table-active': creativeWorkspace.selectedBlueprintId === item.id}"><td data-label="保留"><input class="form-check-input" type="checkbox" :checked="creativeWorkspace.preservedBlueprintIds.includes(item.id)" :disabled="item.status !== 'draft'" @change="togglePreservedBlueprint(item.id, $event.target.checked)" :aria-label="`保留${item.content.title || '方向'}`"></td><td data-label="方向" class="fw-semibold" x-text="item.content.title || '未命名方向'"></td><td data-label="核心命题" x-text="item.content.theme || '-'"></td><td data-label="主角" x-text="item.content.protagonist || '-'"></td><td data-label="核心冲突" x-text="item.content.core_conflict || '-'"></td><td data-label="差异化卖点" x-text="listText(item.content.differentiators) || '-'"></td><td data-label="成本" x-text="item.content.cost_level || '-'"></td><td data-label="创作风险" x-text="listText(item.content.risks) || '-'"></td><td data-label="操作" class="direction-action-cell"><button class="btn btn-sm btn-outline-light" type="button" @click="openProjectBlueprintEditor(item.id)" :aria-label="`编辑方向：${item.content.title || '未命名方向'}`" title="编辑方向">编辑</button></td></tr></template><tr x-show="!latestProjectBlueprints().length"><td colspan="9" class="text-center text-muted py-4">尚未生成原创方向</td></tr></tbody></table></div>
-    <template x-if="selectedProjectBlueprint()"><div class="border-top pt-3 original-direction-editor workspace-editor-pane workspace-section" data-creative-blueprint-editor>
-        <div class="workspace-section__header"><div><div class="workspace-section-label">Command</div><h6 class="mb-1">编辑原创 Brief</h6></div><span class="small text-muted">选中方向后编辑、保存或锁定</span></div>
+        <template x-if="selectedProjectBlueprint()"><div class="border-top pt-3 original-direction-editor workspace-editor-pane workspace-section" data-creative-blueprint-editor>
+        <div class="workspace-section__header"><div><div class="workspace-section-label">02 / COMMAND</div><h6 class="mb-1">编辑原创 Brief</h6></div><span class="small text-muted">选中方向后编辑、保存或锁定</span></div>
         <div class="small text-muted mb-2" data-template-provenance x-text="creativeTemplateProvenance(selectedProjectBlueprint())"></div>
         <aside class="workspace-inspector mb-3" aria-label="原创 Brief Inspect"><div class="workspace-inspector__header"><div><div class="workspace-section-label">Inspect</div><strong>版本状态</strong></div><i class="bi bi-file-earmark-text text-info" aria-hidden="true"></i></div><div class="workspace-inspector__body d-flex flex-wrap gap-3 align-items-center"><div><div class="small text-muted">当前版本</div><strong x-text="`v${selectedProjectBlueprint().version}`"></strong></div><div class="small text-muted" x-text="creativeWorkflowStatusLabel(selectedProjectBlueprint().status)"></div><div class="small text-muted" x-show="!creativeResourceEditable(selectedProjectBlueprint())"><i class="bi bi-lock me-1" aria-hidden="true"></i>已锁定，只读；请基于此版本新建。</div><div class="small text-success" x-show="creativeResourceEditable(selectedProjectBlueprint())"><i class="bi bi-pencil me-1" aria-hidden="true"></i>可编辑草稿</div></div></aside>
         <section class="border-bottom pb-3 mb-3" aria-labelledby="original-project-settings-heading">

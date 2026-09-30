@@ -188,6 +188,10 @@ window.aiworkerModules.push(() => ({
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '读取项目失败');
                         this.creativeWorkspace.project = data;
+                        this.creativeWorkspace.selectedCharacterId = null;
+                        this.creativeWorkspace.characterEditorDraft = {};
+                        this.creativeWorkspace.selectedRelationshipId = null;
+                        this.creativeWorkspace.relationshipEditorDraft = {};
                         this.creativeWorkspace.selectedScriptVersionId = '';
                         await this.loadCreativeModuleCapabilities(data.id);
                         this.creativeWorkspace.selectedSeedId = data.seed?.id || null;
@@ -640,6 +644,10 @@ window.aiworkerModules.push(() => ({
                 riskLabel(level) { return {low: '低', medium: '中', high: '高'}[level] || level || '-'; },
                 riskBadgeClass(level) { return level === 'high' ? 'bg-danger' : level === 'medium' ? 'bg-warning text-dark' : 'bg-success'; },
                 listText(value) { return Array.isArray(value) ? value.join('\n') : String(value || ''); },
+                creativeFieldPreview(value, fallback = '未填写') {
+                    const text = String(value || '').replace(/\s+/g, ' ').trim();
+                    return text || fallback;
+                },
                 imitationReason(content) {
                     const reason = String(content?.imitation_reason || '').trim();
                     if (reason) return reason;
@@ -925,6 +933,81 @@ window.aiworkerModules.push(() => ({
                 currentProjectRelationships() {
                     const batch = this.latestCharacterBatchId();
                     return (this.creativeWorkspace.project?.relationships || []).filter(item => item.batch_id === batch);
+                },
+
+                selectedProjectCharacter() {
+                    const characters = this.currentProjectCharacters();
+                    return characters.find(item => String(item.id) === String(this.creativeWorkspace.selectedCharacterId)) || characters[0] || null;
+                },
+
+                openCharacterEditor(item) {
+                    if (!item?.id) return;
+                    const selectedId = this.creativeWorkspace.selectedCharacterId;
+                    if (String(selectedId) === String(item.id) && Object.keys(this.creativeWorkspace.characterEditorDraft || {}).length) return;
+                    this.creativeWorkspace.selectedCharacterId = item.id;
+                    this.creativeWorkspace.characterEditorDraft = this.cloneCreativeJson(item.content, {});
+                    this.creativeWorkspace.characterEditorRevision = Number(this.creativeWorkspace.characterEditorRevision || 0) + 1;
+                },
+
+                syncCharacterEditorField(element, field, listField = false) {
+                    if (!element) return;
+                    const item = this.selectedProjectCharacter();
+                    const revision = Number(this.creativeWorkspace.characterEditorRevision || 0);
+                    const syncKey = `${item?.id || 'none'}:${revision}:${field}`;
+                    if (element.dataset.characterEditorKey === syncKey) return;
+                    const value = this.creativeWorkspace.characterEditorDraft?.[field];
+                    element.textContent = listField ? this.listText(value) : String(value || '');
+                    element.dataset.characterEditorKey = syncKey;
+                },
+
+                updateCharacterEditorField(field, value, listField = false) {
+                    if (listField) {
+                        this.setListField(this.creativeWorkspace.characterEditorDraft, field, value);
+                        return;
+                    }
+                    this.creativeWorkspace.characterEditorDraft[field] = String(value || '').replace(/\r/g, '');
+                },
+
+                async saveCharacterEditor() {
+                    const item = this.selectedProjectCharacter();
+                    if (!item || !this.creativeResourceEditable(item)) return null;
+                    item.content = this.cloneCreativeJson(this.creativeWorkspace.characterEditorDraft, item.content);
+                    return this.saveProjectCharacter(item);
+                },
+
+                selectedProjectRelationship() {
+                    const relationships = this.currentProjectRelationships();
+                    return relationships.find(item => String(item.id) === String(this.creativeWorkspace.selectedRelationshipId)) || relationships[0] || null;
+                },
+
+                openRelationshipEditor(item) {
+                    if (!item?.id) return;
+                    const selectedId = this.creativeWorkspace.selectedRelationshipId;
+                    if (String(selectedId) === String(item.id) && Object.keys(this.creativeWorkspace.relationshipEditorDraft || {}).length) return;
+                    this.creativeWorkspace.selectedRelationshipId = item.id;
+                    this.creativeWorkspace.relationshipEditorDraft = this.cloneCreativeJson(item.content, {});
+                    this.creativeWorkspace.relationshipEditorRevision = Number(this.creativeWorkspace.relationshipEditorRevision || 0) + 1;
+                },
+
+                syncRelationshipEditorField(element, field) {
+                    if (!element) return;
+                    const item = this.selectedProjectRelationship();
+                    const revision = Number(this.creativeWorkspace.relationshipEditorRevision || 0);
+                    const syncKey = `${item?.id || 'none'}:${revision}:${field}`;
+                    if (element.dataset.relationshipEditorKey === syncKey) return;
+                    element.textContent = String(this.creativeWorkspace.relationshipEditorDraft?.[field] || '');
+                    element.dataset.relationshipEditorKey = syncKey;
+                },
+
+                updateRelationshipEditorField(field, value) {
+                    this.creativeWorkspace.relationshipEditorDraft[field] = String(value || '').replace(/\r/g, '');
+                },
+
+                async saveRelationshipEditor() {
+                    const item = this.selectedProjectRelationship();
+                    if (!item || !this.creativeResourceEditable(item)) return null;
+                    item.content = this.cloneCreativeJson(this.creativeWorkspace.relationshipEditorDraft, item.content);
+                    return this.saveProjectRelationship(item);
                 },
 
                 currentCharacterBatchStatus() {

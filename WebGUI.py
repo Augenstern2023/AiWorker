@@ -133,6 +133,20 @@ from workflow.transition_service import TransitionService
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent
+
+
+def _resolve_qrcode_login_state_file() -> Path:
+    """Resolve the shared QR login state when running from a worktree."""
+    configured = os.environ.get("AIWORKER_QRCODE_LOGIN_STATE_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    filename = "qrcode_login_state.json"
+    for directory in (WORKSPACE_ROOT, *WORKSPACE_ROOT.parents):
+        candidate = directory / filename
+        if candidate.is_file():
+            return candidate
+    return WORKSPACE_ROOT / filename
+
 HONGGUO_REVIEW_CAPTURE_SERVICE_URL = os.getenv(
     "HONGGUO_REVIEW_CAPTURE_SERVICE_URL", "http://127.0.0.1:8766"
 ).rstrip("/")
@@ -1997,9 +2011,8 @@ def build_command(config: CrawlerConfig, project_map_json: str = "{}"):
         try:
             state_file = Path(QRCODE_LOGIN_STATE_FILE)
             state.log(f"[调试] 查找登录状态文件: {state_file.absolute()}", "info")
-            if state_file.exists():
-                with open(state_file, "r", encoding="utf-8") as f:
-                    state_data = json.load(f)
+            state_data = _load_saved_login_state()
+            if state_data:
                 timestamp = state_data.get("timestamp", 0)
                 state.log(f"[调试] 找到登录状态文件，时间戳: {timestamp}", "info")
                 # 检查是否过期（7天）
@@ -2267,10 +2280,8 @@ def build_comment_command(ids: List[str], project_name: str):
 
     # 加载保存的二维码登录状态
     try:
-        state_file = Path(QRCODE_LOGIN_STATE_FILE)
-        if state_file.exists():
-            with open(state_file, "r", encoding="utf-8") as f:
-                state_data = json.load(f)
+        state_data = _load_saved_login_state()
+        if state_data:
             timestamp = state_data.get("timestamp", 0)
             # 检查是否过期（7天）
             if time.time() - timestamp <= 7 * 24 * 3600:
@@ -4583,7 +4594,38 @@ async def get_server_ip():
 
 # --- QR Code Login Functions ---
 
-QRCODE_LOGIN_STATE_FILE = "qrcode_login_state.json"
+QRCODE_LOGIN_STATE_FILE = _resolve_qrcode_login_state_file()
+
+
+def _login_state_candidates() -> list[Path]:
+    candidates = [QRCODE_LOGIN_STATE_FILE]
+    for directory in (WORKSPACE_ROOT, *WORKSPACE_ROOT.parents):
+        candidates.append(directory / "browser_data" / "douyin_series_cookies.json")
+    result: list[Path] = []
+    for path in candidates:
+        if path not in result and path.is_file():
+            result.append(path)
+    return result
+
+
+def _read_login_state_file(path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if isinstance(raw, dict) and isinstance(raw.get("cookies"), list):
+        state_data = dict(raw)
+        state_data.setdefault("timestamp", path.stat().st_mtime)
+        return state_data
+    if isinstance(raw, list):
+        return {"platform": "douyin", "timestamp": path.stat().st_mtime, "cookies": raw, "source": "browser_data"}
+    return {}
+
+
+def _load_saved_login_state() -> dict[str, Any]:
+    states = [_read_login_state_file(path) for path in _login_state_candidates()]
+    states = [state for state in states if state.get("cookies")]
+    return max(states, key=lambda state: float(state.get("timestamp") or 0), default={})
 
 async def check_login_state_douyin(browser_context) -> bool:
     # Check Douyin login state.
@@ -4637,13 +4679,7 @@ async def save_login_state(browser_context, platform: str = "douyin"):
 
 def load_login_state() -> dict:
     # Load login state from file.
-    try:
-        if os.path.exists(QRCODE_LOGIN_STATE_FILE):
-            with open(QRCODE_LOGIN_STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception as e:
-        print(f"加载登录状态失败: {e}")
-    return {}
+    return _load_saved_login_state()
 
 
 async def perform_qrcode_login(platform: str = "douyin"):

@@ -301,7 +301,7 @@ def test_project_brief_uses_multiline_controls_for_generated_long_text():
 def test_creative_long_form_fields_use_shared_prose_editor_semantics():
     expected = {
         "project_blueprints.html": "workspace-prose-editor",
-        "project_characters.html": "workspace-prose-editor",
+        "project_characters.html": "workspace-character-editor",
         "project_outlines.html": "workspace-prose-editor",
         "project_beats.html": "workspace-prose-editor",
         "project_scripts.html": "workspace-prose",
@@ -322,8 +322,8 @@ def test_creative_includes_keep_component_class_contracts_explicit():
             "workspace-card-grid", "workspace-blueprint-card", "creative-direction-grid",
         },
         "project_characters.html": {
-            "workspace-stage-editor--characters", "workspace-prose-editor",
-            "workspace-card-grid", "character-card", "relationship-card",
+            "workspace-stage-editor--characters", "workspace-character-editor",
+            "workspace-character-workbench", "workspace-character-list-card", "relationship-card",
         },
         "project_outlines.html": {
             "workspace-stage-editor--outlines", "workspace-card-grid",
@@ -342,6 +342,56 @@ def test_creative_includes_keep_component_class_contracts_explicit():
     for filename, required_classes in expected.items():
         classes = _class_tokens(_read(f"templates/common/workspace/{filename}"))
         assert required_classes <= classes, (filename, required_classes - classes)
+
+
+def test_character_page_uses_side_editor_without_multiline_character_controls():
+    html = _read("templates/common/workspace/project_characters.html")
+    css = _read("static/css/workspaces.css")
+    script = _read("static/js/common/creative.js")
+
+    assert 'aria-label="人物编辑窗口"' in html
+    assert "saveCharacterEditor()" in html
+    assert "creativeWorkspace.characterEditorDraft" in html
+    assert "<textarea" not in html
+    assert "character-card" not in html
+    assert html.count("workspace-character-content-field") == 13
+    assert html.count('role="textbox"') == 16
+    assert "syncCharacterEditorField($el, 'desire')" in html
+    assert "updateCharacterEditorField('desire', $el.innerText)" in html
+    assert "syncCharacterEditorField(element, field, listField = false)" in script
+    assert "updateCharacterEditorField(field, value, listField = false)" in script
+    assert re.search(
+        r"\.workspace-character-content-field,\s*"
+        r"\.workspace-relationship-content-field\s*\{[^}]*"
+        r"overflow-wrap:\s*anywhere;[^}]*white-space:\s*pre-wrap;",
+        css,
+        re.S,
+    )
+
+
+def test_relationship_page_uses_side_editor_with_complete_wrapping_fields():
+    html = _read("templates/common/workspace/project_characters.html")
+    css = _read("static/css/workspaces.css")
+    script = _read("static/js/common/creative.js")
+
+    assert 'aria-label="人物关系列表"' in html
+    assert 'aria-label="人物关系编辑窗口"' in html
+    assert "workspace-relationship-list-card" in html
+    assert "saveRelationshipEditor()" in html
+    assert "creativeWorkspace.relationshipEditorDraft" in html
+    assert html.count("workspace-relationship-content-field") == 3
+    for field in ("relation", "conflict", "change_arc"):
+        assert f"syncRelationshipEditorField($el, '{field}')" in html
+        assert f"updateRelationshipEditorField('{field}', $el.innerText)" in html
+    assert "selectedProjectRelationship()" in script
+    assert "syncRelationshipEditorField(element, field)" in script
+    assert "updateRelationshipEditorField(field, value)" in script
+    assert re.search(
+        r"\.workspace-relationship-content-field\s*\{[^}]*"
+        r"overflow-wrap:\s*anywhere;[^}]*white-space:\s*pre-wrap;",
+        css,
+        re.S,
+    )
 
 
 def test_project_brief_long_text_controls_wrap_without_clipping():

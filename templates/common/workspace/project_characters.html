@@ -1,4 +1,20 @@
 <div class="workspace-stage-editor workspace-stage-editor--characters workspace-editor-pane">
+    <section class="workspace-section workspace-character-command" aria-labelledby="characters-command-heading">
+        <div class="row g-3 align-items-end">
+            <div class="col-xl-8">
+                <div class="workspace-section-label">CHARACTERS / COMMAND</div>
+                <h4 id="characters-command-heading" class="mb-1">先建立人物资产，再展开关系网络</h4>
+                <p class="small text-muted mb-0">人物卡是核心身份，行为与表现是可执行约束，关系卡负责呈现人物之间的张力。</p>
+            </div>
+            <div class="col-xl-4">
+                <div class="d-flex flex-wrap justify-content-xl-end gap-2" aria-label="人物工作流">
+                    <span class="badge rounded-pill text-bg-secondary">01 核心身份</span>
+                    <span class="badge rounded-pill text-bg-secondary">02 行为约束</span>
+                    <span class="badge rounded-pill text-bg-secondary">03 关系网络</span>
+                </div>
+            </div>
+        </div>
+    </section>
     <section class="workspace-section workspace-section--command">
         <div class="d-flex flex-column flex-xl-row justify-content-between align-items-xl-center gap-3">
             <div>
@@ -15,6 +31,14 @@
             </div>
         </div>
     </section>
+    <section class="workspace-character-snapshot" aria-label="人物资产概览">
+        <div class="workspace-character-snapshot__intro"><span class="workspace-section-label">CHARACTER ASSET BOARD</span><strong>把人物从设定变成可执行资产</strong><span>身份、行为、表现和关系分层编辑，避免所有字段挤在一张表里。</span></div>
+        <div class="workspace-character-stats">
+            <div><span>人物卡</span><strong x-text="currentProjectCharacters().length"></strong><small>核心身份</small></div>
+            <div><span>关系卡</span><strong x-text="currentProjectRelationships().length"></strong><small>关系网络</small></div>
+            <div class="is-accent"><span>当前状态</span><strong x-text="creativeWorkflowStatusLabel(currentCharacterBatchStatus())"></strong><small>保存 / 锁定</small></div>
+        </div>
+    </section>
 
     <div class="alert alert-info py-2 small mb-3 workspace-section" x-show="currentProjectCharacters().length && !creativeResourceEditable(currentProjectCharacters()[0])" role="status"><i class="bi bi-lock me-1" aria-hidden="true"></i>此版本已锁定，不可编辑。自由创作中可基于它创建修订版，原版本保持不变。</div>
     <div class="small text-muted mb-2 workspace-section" data-template-provenance x-show="currentProjectCharacters().length" x-text="creativeTemplateProvenance(currentProjectCharacters()[0])"></div>
@@ -26,68 +50,102 @@
         </div>
     </section>
 
-    <section class="workspace-section">
-        <div class="workspace-section__header d-flex flex-wrap align-items-baseline justify-content-between gap-2 mb-3"><div><h6 class="mb-1">人物卡</h6><span class="small text-muted">核心身份、欲望与成长线</span></div><span class="small text-muted">每张卡独立保存</span></div>
-        <div class="workspace-card-grid">
-            <template x-for="item in currentProjectCharacters()" :key="item.id">
-                <article class="workspace-card character-card h-100">
-                    <div class="workspace-card__header">
-                        <div class="flex-grow-1 min-w-0"><div class="workspace-card__meta mb-1">人物卡</div><input class="form-control form-control-sm fw-semibold" aria-label="角色名" x-model="item.content.name" :disabled="!creativeResourceEditable(item)"></div>
-                        <div class="d-flex align-items-start gap-2 flex-shrink-0"><span class="badge text-bg-secondary" x-show="!creativeResourceEditable(item)"><i class="bi bi-lock-fill me-1" aria-hidden="true"></i>已锁定</span><button class="btn btn-sm btn-outline-light" @click="saveProjectCharacter(item)" :disabled="!creativeResourceEditable(item) || creativeWorkspace.saveState['character-' + item.id] === 'saving'" :title="!creativeResourceEditable(item) ? '人物版本已完成并锁定' : '保存人物卡'" :aria-label="!creativeResourceEditable(item) ? '人物版本已完成并锁定' : '保存人物卡'"><i class="bi bi-save" x-show="creativeWorkspace.saveState['character-' + item.id] !== 'saving' && creativeWorkspace.saveState['character-' + item.id] !== 'saved'"></i><span class="spinner-border spinner-border-sm" x-show="creativeWorkspace.saveState['character-' + item.id] === 'saving'"></span><i class="bi bi-check2 text-success" x-show="creativeWorkspace.saveState['character-' + item.id] === 'saved'"></i></button></div>
+    <section class="workspace-section workspace-character-workbench" x-effect="openCharacterEditor(selectedProjectCharacter())">
+        <div class="workspace-section__header d-flex flex-wrap align-items-baseline justify-content-between gap-2 mb-3">
+            <div><div class="workspace-section-label">01 / CHARACTER ASSETS</div><h6 class="mb-1">人物资产</h6><span class="small text-muted">左侧浏览人物摘要，右侧编辑当前人物。卡片不再塞入多行文本框。</span></div>
+            <span class="small text-muted">点击人物卡切换编辑窗口</span>
+        </div>
+        <div class="workspace-character-workbench__layout">
+            <div class="workspace-character-list" aria-label="人物卡列表">
+                <template x-for="item in currentProjectCharacters()" :key="item.id">
+                    <article class="workspace-character-list-card" :class="{'is-selected': selectedProjectCharacter()?.id === item.id}" :aria-current="selectedProjectCharacter()?.id === item.id ? 'true' : null" tabindex="0" @click="openCharacterEditor(item)" @keydown.enter="openCharacterEditor(item)">
+                        <div class="workspace-character-list-card__header">
+                            <div class="min-w-0"><div class="workspace-card__meta">人物卡</div><strong class="workspace-card__title" x-text="creativeFieldPreview(item.content.name, '未命名人物')"></strong></div>
+                            <span class="badge text-bg-secondary" x-show="!creativeResourceEditable(item)"><i class="bi bi-lock-fill me-1" aria-hidden="true"></i>已锁定</span>
+                        </div>
+                        <div class="workspace-character-list-card__identity"><span class="workspace-field-label">身份</span><span x-text="creativeFieldPreview(item.content.identity)"></span></div>
+                        <div class="workspace-character-list-card__facts"><span><b>年龄</b><em x-text="creativeFieldPreview(item.content.age_range)"></em></span><span><b>欲望</b><em x-text="creativeFieldPreview(item.content.desire)"></em></span><span><b>成长线</b><em x-text="creativeFieldPreview(item.content.growth_arc)"></em></span></div>
+                        <div class="workspace-character-list-card__footer"><span x-text="creativeResourceEditable(item) ? '点击编辑' : '只读版本'"></span><small x-text="creativeItemSaveLabel(item, 'character-' + item.id)"></small></div>
+                    </article>
+                </template>
+                <div class="workspace-empty" x-show="!currentProjectCharacters().length"><div><div class="workspace-state__title">暂无人物卡</div><div class="small">生成人物关系或创建空白版本后，可在这里编辑人物核心设定。</div></div></div>
+            </div>
+
+            <aside class="workspace-character-editor" aria-label="人物编辑窗口" x-show="selectedProjectCharacter()">
+                <div class="workspace-character-editor__header">
+                    <div><div class="workspace-section-label">INSPECT / EDIT</div><h6 class="mb-1">人物编辑窗口</h6><span class="small text-muted" x-text="`正在编辑：${creativeFieldPreview(selectedProjectCharacter()?.content?.name, '未命名人物')}`"></span></div>
+                    <span class="badge" :class="creativeResourceEditable(selectedProjectCharacter()) ? 'text-bg-primary' : 'text-bg-secondary'" x-text="creativeResourceEditable(selectedProjectCharacter()) ? '可编辑' : '已锁定'"></span>
+                </div>
+                <div class="workspace-character-editor__body">
+                    <div class="workspace-character-editor__group"><div class="workspace-character-editor__group-title">核心身份</div><div class="workspace-character-editor__fields">
+                        <label>姓名<input class="form-control form-control-sm" x-model="creativeWorkspace.characterEditorDraft.name" :disabled="!creativeResourceEditable(selectedProjectCharacter())"></label>
+                        <label>年龄段<input class="form-control form-control-sm" x-model="creativeWorkspace.characterEditorDraft.age_range" :disabled="!creativeResourceEditable(selectedProjectCharacter())"></label>
+                        <label class="is-wide">身份<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'identity')" @input="updateCharacterEditorField('identity', $el.innerText)"></div></label>
+                        <label>内在欲望<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'desire')" @input="updateCharacterEditorField('desire', $el.innerText)"></div></label>
+                        <label>秘密<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'secret')" @input="updateCharacterEditorField('secret', $el.innerText)"></div></label>
+                        <label class="is-wide">成长线<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'growth_arc')" @input="updateCharacterEditorField('growth_arc', $el.innerText)"></div></label>
+                    </div></div>
+                    <div class="workspace-character-editor__group"><div class="workspace-character-editor__group-title">行为约束</div><div class="workspace-character-editor__fields">
+                        <label>行动目标<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'action_goal')" @input="updateCharacterEditorField('action_goal', $el.innerText)"></div></label>
+                        <label>最怕失去<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'fear_of_loss')" @input="updateCharacterEditorField('fear_of_loss', $el.innerText)"></div></label>
+                        <label>行为矛盾<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'behavioral_contradiction')" @input="updateCharacterEditorField('behavioral_contradiction', $el.innerText)"></div></label>
+                        <label>压力反应<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'pressure_response')" @input="updateCharacterEditorField('pressure_response', $el.innerText)"></div></label>
+                        <label class="is-wide">底线<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'bottom_line')" @input="updateCharacterEditorField('bottom_line', $el.innerText)"></div></label>
+                    </div></div>
+                    <div class="workspace-character-editor__group"><div class="workspace-character-editor__group-title">表现设置</div><div class="workspace-character-editor__fields">
+                        <label class="is-wide">外在标签<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'external_tags', true)" @input="updateCharacterEditorField('external_tags', $el.innerText, true)" data-placeholder="用逗号或换行分隔"></div></label>
+                        <label>台词风格<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'dialogue_style')" @input="updateCharacterEditorField('dialogue_style', $el.innerText)"></div></label>
+                        <label>造型 Prompt<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'appearance_prompt')" @input="updateCharacterEditorField('appearance_prompt', $el.innerText)"></div></label>
+                        <label>声音 Prompt<div class="form-control form-control-sm workspace-character-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectCharacter()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectCharacter()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectCharacter())}" x-effect="syncCharacterEditorField($el, 'voice_prompt')" @input="updateCharacterEditorField('voice_prompt', $el.innerText)"></div></label>
+                    </div></div>
+                </div>
+                <div class="workspace-character-editor__footer"><small class="creative-save-status" x-text="selectedProjectCharacter() ? creativeItemSaveLabel(selectedProjectCharacter(), 'character-' + selectedProjectCharacter().id) : ''"></small><button class="btn btn-primary btn-sm" @click="saveCharacterEditor()" :disabled="!creativeResourceEditable(selectedProjectCharacter()) || creativeWorkspace.saveState['character-' + selectedProjectCharacter()?.id] === 'saving'"><i class="bi bi-save me-1"></i><span x-text="creativeWorkspace.saveState['character-' + selectedProjectCharacter()?.id] === 'saving' ? '保存中' : '保存人物' "></span></button></div>
+            </aside>
+        </div>
+    </section>
+
+    <section class="workspace-section workspace-character-lane workspace-character-lane--relations workspace-relationship-workbench" x-effect="openRelationshipEditor(selectedProjectRelationship())">
+        <div class="workspace-section__header d-flex flex-wrap align-items-baseline justify-content-between gap-2 mb-3"><div><div class="workspace-section-label">02 / RELATIONS</div><h6 class="mb-1">人物关系</h6><span class="small text-muted">左侧浏览关系摘要，右侧完整查看并编辑关系、冲突与变化弧线。</span></div><span class="small text-muted">点击关系卡切换编辑窗口</span></div>
+        <div class="workspace-character-workbench__layout workspace-relationship-workbench__layout">
+            <div class="workspace-character-list workspace-relationship-list" aria-label="人物关系列表">
+                <template x-for="item in currentProjectRelationships()" :key="item.id">
+                    <article class="workspace-character-list-card workspace-relationship-list-card relationship-card" :class="{'is-selected': selectedProjectRelationship()?.id === item.id}" :aria-current="selectedProjectRelationship()?.id === item.id ? 'true' : null" tabindex="0" @click="openRelationshipEditor(item)" @keydown.enter="openRelationshipEditor(item)">
+                        <div class="workspace-character-list-card__header">
+                            <div class="min-w-0"><div class="workspace-card__meta">关系卡</div><strong class="workspace-relationship-list-card__nodes"><span x-text="creativeFieldPreview(item.content.from, '未命名人物')"></span><i aria-hidden="true">↔</i><span x-text="creativeFieldPreview(item.content.to, '未命名人物')"></span></strong></div>
+                            <span class="badge text-bg-secondary" x-show="!creativeResourceEditable(item)"><i class="bi bi-lock-fill me-1" aria-hidden="true"></i>已锁定</span>
+                        </div>
+                        <div class="workspace-relationship-list-card__featured"><span class="workspace-field-label">关系</span><span x-text="creativeFieldPreview(item.content.relation)"></span></div>
+                        <div class="workspace-relationship-list-card__facts"><span><b>冲突</b><em x-text="creativeFieldPreview(item.content.conflict)"></em></span><span><b>变化弧线</b><em x-text="creativeFieldPreview(item.content.change_arc)"></em></span></div>
+                        <div class="workspace-character-list-card__footer"><span x-text="creativeResourceEditable(item) ? '点击编辑' : '只读版本'"></span><small x-text="creativeItemSaveLabel(item, 'relationship-' + item.id)"></small></div>
+                    </article>
+                </template>
+                <div class="workspace-empty" x-show="!currentProjectRelationships().length"><div><div class="workspace-state__title">暂无人物关系</div><div class="small">人物关系生成后会在这里按关系卡逐条编辑。</div></div></div>
+            </div>
+
+            <aside class="workspace-character-editor workspace-relationship-editor" aria-label="人物关系编辑窗口" x-show="selectedProjectRelationship()">
+                <div class="workspace-character-editor__header">
+                    <div><div class="workspace-section-label">INSPECT / EDIT</div><h6 class="mb-1">关系编辑窗口</h6><span class="small text-muted" x-text="`正在编辑：${creativeFieldPreview(selectedProjectRelationship()?.content?.from, '未命名人物')} ↔ ${creativeFieldPreview(selectedProjectRelationship()?.content?.to, '未命名人物')}`"></span></div>
+                    <span class="badge" :class="creativeResourceEditable(selectedProjectRelationship()) ? 'text-bg-primary' : 'text-bg-secondary'" x-text="creativeResourceEditable(selectedProjectRelationship()) ? '可编辑' : '已锁定'"></span>
+                </div>
+                <div class="workspace-character-editor__body">
+                    <div class="workspace-character-editor__group">
+                        <div class="workspace-character-editor__group-title">关系双方</div>
+                        <div class="workspace-character-editor__fields">
+                            <label>角色 A<input class="form-control form-control-sm" x-model="creativeWorkspace.relationshipEditorDraft.from" :disabled="!creativeResourceEditable(selectedProjectRelationship())"></label>
+                            <label>角色 B<input class="form-control form-control-sm" x-model="creativeWorkspace.relationshipEditorDraft.to" :disabled="!creativeResourceEditable(selectedProjectRelationship())"></label>
+                        </div>
                     </div>
-                    <div class="row g-3">
-                        <div class="col-12 col-sm-5"><label class="workspace-field-label d-block mb-1">年龄段</label><input class="form-control form-control-sm" x-model="item.content.age_range" :disabled="!creativeResourceEditable(item)"></div>
-                        <div class="col-12"><label class="workspace-field-label d-block mb-1">身份</label><textarea class="form-control form-control-sm creative-inline-textarea workspace-prose-editor" :rows="textareaRows(item.content.identity, 24)" x-model="item.content.identity" :disabled="!creativeResourceEditable(item)"></textarea></div>
-                        <div class="col-12 col-md-6"><label class="workspace-field-label d-block mb-1">内在欲望</label><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(item.content.desire, 24)" x-model="item.content.desire" :disabled="!creativeResourceEditable(item)"></textarea></div>
-                        <div class="col-12 col-md-6"><label class="workspace-field-label d-block mb-1">秘密</label><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(item.content.secret, 24)" x-model="item.content.secret" :disabled="!creativeResourceEditable(item)"></textarea></div>
-                        <div class="col-12"><label class="workspace-field-label d-block mb-1">成长线</label><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(item.content.growth_arc, 24)" x-model="item.content.growth_arc" :disabled="!creativeResourceEditable(item)"></textarea></div>
+                    <div class="workspace-character-editor__group">
+                        <div class="workspace-character-editor__group-title">关系进程</div>
+                        <div class="workspace-character-editor__fields">
+                            <label class="is-wide">关系<div class="form-control form-control-sm workspace-relationship-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectRelationship()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectRelationship()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectRelationship())}" x-effect="syncRelationshipEditorField($el, 'relation')" @input="updateRelationshipEditorField('relation', $el.innerText)"></div></label>
+                            <label class="is-wide">冲突<div class="form-control form-control-sm workspace-relationship-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectRelationship()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectRelationship()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectRelationship())}" x-effect="syncRelationshipEditorField($el, 'conflict')" @input="updateRelationshipEditorField('conflict', $el.innerText)"></div></label>
+                            <label class="is-wide">变化弧线<div class="form-control form-control-sm workspace-relationship-content-field" role="textbox" :contenteditable="creativeResourceEditable(selectedProjectRelationship()) ? 'true' : 'false'" :aria-readonly="creativeResourceEditable(selectedProjectRelationship()) ? 'false' : 'true'" :class="{'is-readonly': !creativeResourceEditable(selectedProjectRelationship())}" x-effect="syncRelationshipEditorField($el, 'change_arc')" @input="updateRelationshipEditorField('change_arc', $el.innerText)"></div></label>
+                        </div>
                     </div>
-                    <small class="creative-save-status" :title="item.updated_at ? `保存时间：${formatDate(item.updated_at)}` : ''" x-text="creativeItemSaveLabel(item, 'character-' + item.id)"></small>
-                </article>
-            </template>
-            <div class="workspace-empty" x-show="!currentProjectCharacters().length"><div><div class="workspace-state__title">暂无人物卡</div><div class="small">生成人物关系或创建空白版本后，可在这里编辑人物核心设定。</div></div></div>
-        </div>
-    </section>
-
-    <section class="workspace-section">
-        <div class="workspace-section__header d-flex flex-wrap align-items-baseline justify-content-between gap-2 mb-3"><div><h6 class="mb-1">可行动人物设置</h6><span class="small text-muted">把人物设定转化为可执行的行为约束</span></div><span class="small text-muted">与人物卡共享保存状态</span></div>
-        <div class="workspace-card-grid">
-            <template x-for="item in currentProjectCharacters()" :key="`action-${item.id}`">
-                <article class="workspace-card character-action-card h-100">
-                    <div class="workspace-card__header"><div class="min-w-0"><div class="workspace-card__meta mb-1">可行动设置</div><strong class="workspace-card__title" x-text="item.content.name"></strong></div><div class="d-flex align-items-start gap-2 flex-shrink-0"><span class="badge text-bg-secondary" x-show="!creativeResourceEditable(item)"><i class="bi bi-lock-fill me-1" aria-hidden="true"></i>已锁定</span><button class="btn btn-sm btn-outline-light" @click="saveProjectCharacter(item)" :disabled="!creativeResourceEditable(item) || creativeWorkspace.saveState['character-' + item.id] === 'saving'" title="保存可行动人物设置" aria-label="保存可行动人物设置"><i class="bi bi-save" x-show="creativeWorkspace.saveState['character-' + item.id] !== 'saving' && creativeWorkspace.saveState['character-' + item.id] !== 'saved'"></i><span class="spinner-border spinner-border-sm" x-show="creativeWorkspace.saveState['character-' + item.id] === 'saving'"></span><i class="bi bi-check2 text-success" x-show="creativeWorkspace.saveState['character-' + item.id] === 'saved'"></i></button></div></div>
-                    <div class="row g-3"><div class="col-12 col-md-6"><label class="workspace-field-label d-block mb-1">行动目标</label><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(item.content.action_goal, 24)" x-model="item.content.action_goal" :disabled="!creativeResourceEditable(item)"></textarea></div><div class="col-12 col-md-6"><label class="workspace-field-label d-block mb-1">最怕失去</label><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(item.content.fear_of_loss, 24)" x-model="item.content.fear_of_loss" :disabled="!creativeResourceEditable(item)"></textarea></div><div class="col-12 col-md-6"><label class="workspace-field-label d-block mb-1">行为矛盾</label><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(item.content.behavioral_contradiction, 24)" x-model="item.content.behavioral_contradiction" :disabled="!creativeResourceEditable(item)"></textarea></div><div class="col-12 col-md-6"><label class="workspace-field-label d-block mb-1">压力反应</label><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(item.content.pressure_response, 24)" x-model="item.content.pressure_response" :disabled="!creativeResourceEditable(item)"></textarea></div><div class="col-12"><label class="workspace-field-label d-block mb-1">底线</label><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(item.content.bottom_line, 24)" x-model="item.content.bottom_line" :disabled="!creativeResourceEditable(item)"></textarea></div></div>
-                    <small class="creative-save-status" :title="item.updated_at ? `保存时间：${formatDate(item.updated_at)}` : ''" x-text="creativeItemSaveLabel(item, 'character-' + item.id)"></small>
-                </article>
-            </template>
-            <div class="workspace-empty" x-show="!currentProjectCharacters().length"><div><div class="workspace-state__title">暂无可行动人物设置</div><div class="small">先创建人物卡，再补充目标、底线与压力反应。</div></div></div>
-        </div>
-    </section>
-
-    <section class="workspace-section">
-        <div class="workspace-section__header d-flex flex-wrap align-items-baseline justify-content-between gap-2 mb-3"><div><h6 class="mb-1">角色表现设置</h6><span class="small text-muted">统一人物的可视化与声音表达</span></div><span class="small text-muted">保存后供后续创作阶段使用</span></div>
-        <div class="workspace-card-grid">
-            <template x-for="item in currentProjectCharacters()" :key="`style-${item.id}`">
-                <article class="workspace-card character-style-card h-100">
-                    <div class="workspace-card__header"><div class="min-w-0"><div class="workspace-card__meta mb-1">表现设置</div><strong class="workspace-card__title" x-text="item.content.name"></strong></div><div class="d-flex align-items-start gap-2 flex-shrink-0"><span class="badge text-bg-secondary" x-show="!creativeResourceEditable(item)"><i class="bi bi-lock-fill me-1" aria-hidden="true"></i>已锁定</span><button class="btn btn-sm btn-outline-light" @click="saveProjectCharacter(item)" :disabled="!creativeResourceEditable(item) || creativeWorkspace.saveState['character-' + item.id] === 'saving'" :title="!creativeResourceEditable(item) ? '人物版本已完成并锁定' : '保存角色表现设置'" :aria-label="!creativeResourceEditable(item) ? '人物版本已完成并锁定' : '保存角色表现设置'"><i class="bi bi-save" x-show="creativeWorkspace.saveState['character-' + item.id] !== 'saving' && creativeWorkspace.saveState['character-' + item.id] !== 'saved'"></i><span class="spinner-border spinner-border-sm" x-show="creativeWorkspace.saveState['character-' + item.id] === 'saving'"></span><i class="bi bi-check2 text-success" x-show="creativeWorkspace.saveState['character-' + item.id] === 'saved'"></i></button></div></div>
-                    <div class="row g-3"><div class="col-12 col-md-6"><label class="workspace-field-label d-block mb-1">外在标签</label><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(listText(item.content.external_tags), 28)" :value="listText(item.content.external_tags)" @input="setListField(item.content, 'external_tags', $event.target.value)" :disabled="!creativeResourceEditable(item)"></textarea></div><div class="col-12 col-md-6"><label class="workspace-field-label d-block mb-1">台词风格</label><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(item.content.dialogue_style, 28)" x-model="item.content.dialogue_style" :disabled="!creativeResourceEditable(item)"></textarea></div><div class="col-12"><label class="workspace-field-label d-block mb-1">造型 Prompt</label><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(item.content.appearance_prompt, 28)" x-model="item.content.appearance_prompt" :disabled="!creativeResourceEditable(item)"></textarea></div><div class="col-12"><label class="workspace-field-label d-block mb-1">声音 Prompt</label><textarea class="form-control form-control-sm creative-inline-textarea" :rows="textareaRows(item.content.voice_prompt, 28)" x-model="item.content.voice_prompt" :disabled="!creativeResourceEditable(item)"></textarea></div></div>
-                    <small class="creative-save-status" :title="item.updated_at ? `保存时间：${formatDate(item.updated_at)}` : ''" x-text="creativeItemSaveLabel(item, 'character-' + item.id)"></small>
-                </article>
-            </template>
-            <div class="workspace-empty" x-show="!currentProjectCharacters().length"><div><div class="workspace-state__title">暂无角色表现设置</div><div class="small">人物卡创建后，可在这里补充外在标签、台词与声音表现。</div></div></div>
-        </div>
-    </section>
-
-    <section class="workspace-section workspace-relationship-section">
-        <div class="workspace-section__header d-flex flex-wrap align-items-baseline justify-content-between gap-2 mb-3"><div><h6 class="mb-1">人物关系</h6><span class="small text-muted">关系说明独立呈现，便于逐条编辑与保存</span></div><span class="small text-muted">每条关系独立保存</span></div>
-        <div class="workspace-card-grid workspace-relationship-card-grid">
-            <template x-for="item in currentProjectRelationships()" :key="item.id">
-                <article class="workspace-card relationship-card h-100">
-                    <div class="workspace-card__header"><div class="flex-grow-1 min-w-0"><div class="workspace-card__meta mb-1">关系卡</div><div class="d-flex flex-wrap align-items-center gap-2"><input class="form-control form-control-sm flex-grow-1" aria-label="角色 A" x-model="item.content.from" :disabled="!creativeResourceEditable(item)"><span class="text-muted" aria-hidden="true">↔</span><input class="form-control form-control-sm flex-grow-1" aria-label="角色 B" x-model="item.content.to" :disabled="!creativeResourceEditable(item)"></div></div><div class="d-flex align-items-start gap-2 flex-shrink-0"><span class="badge text-bg-secondary" x-show="!creativeResourceEditable(item)"><i class="bi bi-lock-fill me-1" aria-hidden="true"></i>已锁定</span><button class="btn btn-sm btn-outline-light" @click="saveProjectRelationship(item)" :disabled="!creativeResourceEditable(item) || creativeWorkspace.saveState['relationship-' + item.id] === 'saving'" :title="!creativeResourceEditable(item) ? '人物版本已完成并锁定' : '保存人物关系'" :aria-label="!creativeResourceEditable(item) ? '人物版本已完成并锁定' : '保存人物关系'"><i class="bi bi-save" x-show="creativeWorkspace.saveState['relationship-' + item.id] !== 'saving' && creativeWorkspace.saveState['relationship-' + item.id] !== 'saved'"></i><span class="spinner-border spinner-border-sm" x-show="creativeWorkspace.saveState['relationship-' + item.id] === 'saving'"></span><i class="bi bi-check2 text-success" x-show="creativeWorkspace.saveState['relationship-' + item.id] === 'saved'"></i></button></div></div>
-                    <div class="row g-3"><div class="col-12"><label class="workspace-field-label d-block mb-1">关系</label><input class="form-control form-control-sm" x-model="item.content.relation" :disabled="!creativeResourceEditable(item)"></div><div class="col-12 col-md-6"><label class="workspace-field-label d-block mb-1">冲突</label><textarea class="form-control form-control-sm creative-inline-textarea workspace-prose-editor" :rows="textareaRows(item.content.conflict, 28)" x-model="item.content.conflict" :disabled="!creativeResourceEditable(item)"></textarea></div><div class="col-12 col-md-6"><label class="workspace-field-label d-block mb-1">变化弧线</label><textarea class="form-control form-control-sm creative-inline-textarea workspace-prose-editor" :rows="textareaRows(item.content.change_arc, 28)" x-model="item.content.change_arc" :disabled="!creativeResourceEditable(item)"></textarea></div></div>
-                    <small class="creative-save-status" :title="item.updated_at ? `保存时间：${formatDate(item.updated_at)}` : ''" x-text="creativeItemSaveLabel(item, 'relationship-' + item.id)"></small>
-                </article>
-            </template>
-            <div class="workspace-empty" x-show="!currentProjectRelationships().length"><div><div class="workspace-state__title">暂无人物关系</div><div class="small">人物关系生成后会在这里按关系卡逐条编辑。</div></div></div>
+                </div>
+                <div class="workspace-character-editor__footer"><small class="creative-save-status" x-text="selectedProjectRelationship() ? creativeItemSaveLabel(selectedProjectRelationship(), 'relationship-' + selectedProjectRelationship().id) : ''"></small><button class="btn btn-primary btn-sm" @click="saveRelationshipEditor()" :disabled="!creativeResourceEditable(selectedProjectRelationship()) || creativeWorkspace.saveState['relationship-' + selectedProjectRelationship()?.id] === 'saving'"><i class="bi bi-save me-1"></i><span x-text="creativeWorkspace.saveState['relationship-' + selectedProjectRelationship()?.id] === 'saving' ? '保存中' : '保存关系'"></span></button></div>
+            </aside>
         </div>
     </section>
 </div>

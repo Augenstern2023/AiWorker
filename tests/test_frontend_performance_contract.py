@@ -89,11 +89,16 @@ def rendered_page(template: str) -> RenderedPage:
 
 def assert_workspace_structure(
     page: RenderedPage,
+    *,
+    include_inspector: bool = True,
 ) -> None:
-    for class_name in (
+    class_names = [
         "workspace-page-header", "workspace-context-bar", "workspace-toolbar",
-        "workspace-split", "workspace-list-pane", "workspace-inspector",
-    ):
+        "workspace-split", "workspace-list-pane",
+    ]
+    if include_inspector:
+        class_names.append("workspace-inspector")
+    for class_name in class_names:
         assert page.has_element(classes={class_name}), class_name
 
 
@@ -127,9 +132,12 @@ def test_creative_prose_typography_is_scoped_to_long_form_content():
         "writing/beats.html",
     ):
         page = rendered_page(template)
-        assert page.has_element(classes={"workspace-prose"}) or page.has_element(
-            classes={"workspace-prose-editor"}
-        ), template
+        if template == "planning/characters.html":
+            assert page.has_element(classes={"workspace-character-editor"}), template
+        else:
+            assert page.has_element(classes={"workspace-prose"}) or page.has_element(
+                classes={"workspace-prose-editor"}
+            ), template
 
 
 def test_creative_component_css_contract_has_explicit_focus_and_mobile_rules():
@@ -156,8 +164,10 @@ def test_creative_includes_render_explicit_component_surfaces():
             "workspace-card-grid", "workspace-blueprint-card", "creative-direction-grid",
         },
         "planning/characters.html": {
-            "workspace-stage-editor--characters", "workspace-prose-editor",
-            "workspace-card-grid", "character-card", "relationship-card",
+            "workspace-stage-editor--characters", "workspace-character-editor",
+            "workspace-character-workbench", "workspace-character-list-card",
+            "workspace-relationship-workbench", "workspace-relationship-editor",
+            "relationship-card",
         },
         "writing/outlines.html": {
             "workspace-stage-editor--outlines", "workspace-card-grid",
@@ -267,7 +277,13 @@ def test_workspace_layout_primitives_cover_all_workflow_families():
         page = rendered_page(template)
         # The shell only advertises these classes; verify the included content
         # renders the actual page regions and its pre-existing result surface.
-        assert_workspace_structure(page)
+        assert_workspace_structure(
+            page,
+            include_inspector=template not in {
+                "selection/hits.html",
+                "selection/ranks.html",
+            },
+        )
         assert page.has_element(classes={contract["result"]}), template
         assert contract["handler"] in page.handlers, template
         assert contract["x_attribute"] in page.x_attributes, template
@@ -285,7 +301,7 @@ def test_creative_stage_pages_render_navigation_editor_inspector_and_actions():
         },
         "planning/characters.html": {
             "openPromptLibrary('characters')", "generateProjectCharacters",
-            "saveProjectCharacter(item)", "completeProjectCharacters",
+            "saveCharacterEditor()", "completeProjectCharacters",
         },
         "writing/outlines.html": {
             "openPromptLibrary('outline')", "generateProjectOutlines",

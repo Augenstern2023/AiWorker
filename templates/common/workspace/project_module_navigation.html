@@ -1,7 +1,10 @@
 <section id="project-module-navigation" class="workspace-toolbar workspace-module-navigation" x-show="creativeWorkspace.project" x-cloak aria-label="创作模块导航">
-        <div class="d-flex flex-wrap align-items-center gap-2 w-100">
-            <span class="badge" :class="isFreeCreativeProject() ? 'text-bg-info' : 'text-bg-secondary'" x-text="creativeProjectWorkflowModeLabel(creativeWorkspace.project)"></span>
-            <nav class="d-flex flex-wrap align-items-center gap-2 flex-grow-1" aria-label="全部创作模块">
+        <div class="workspace-module-navigation__top">
+            <div class="workspace-module-navigation__mode">
+                <span class="workspace-module-navigation__kicker">WORKSPACE FLOW</span>
+                <span class="badge" :class="isFreeCreativeProject() ? 'text-bg-info' : 'text-bg-secondary'" x-text="creativeProjectWorkflowModeLabel(creativeWorkspace.project)"></span>
+            </div>
+            <nav class="workspace-module-navigation__links" aria-label="全部创作模块">
                 {% if can_open_planning_project_details %}
                 <a class="btn btn-sm {% if creative_module == 'brief' %}btn-primary{% else %}btn-outline-light{% endif %}" :href="creativeModuleUrl('brief')" {% if creative_module == 'brief' %}aria-current="page"{% endif %}>Brief</a>
                 <a class="btn btn-sm {% if creative_module == 'characters' %}btn-primary{% else %}btn-outline-light{% endif %}" :href="creativeModuleUrl('characters')" {% if creative_module == 'characters' %}aria-current="page"{% endif %}>人物</a>
@@ -21,7 +24,7 @@
                 {% endif %}
                 {% endif %}
             </nav>
-            <div class="d-flex flex-wrap align-items-center gap-2 border-start border-secondary-subtle ps-2" aria-label="提示词模板工具">
+            <div class="workspace-module-navigation__tools" aria-label="提示词模板工具">
                 <a class="btn btn-sm {% if creative_module == 'prompt-center' %}btn-info{% else %}btn-outline-info{% endif %}" :href="promptWorkspaceUrl('center')">模板中心</a>
             </div>
             <template x-if="isFreeCreativeProject() && freeStageVersionOptions('{{ creative_module }}', ['beats', 'script'].includes('{{ creative_module }}') ? creativeWorkspace.selectedEpisode : 0).length">
@@ -39,6 +42,13 @@
             <button class="btn btn-sm btn-outline-info ms-auto" type="button" x-show="creativeWorkspace.project?.workflow_mode === 'sequential'" @click="openCreativeModeMigration">
                 <i class="bi bi-copy me-1" aria-hidden="true"></i>创建自由副本
             </button>
+        </div>
+        <div class="workspace-stage-steps" aria-label="创作流程阶段">
+            <div class="workspace-stage-step {% if creative_module == 'brief' %}is-active{% endif %}"><span>01</span><strong>Brief</strong><small>方向</small></div>
+            <div class="workspace-stage-step {% if creative_module == 'characters' %}is-active{% endif %}"><span>02</span><strong>人物</strong><small>角色资产</small></div>
+            <div class="workspace-stage-step {% if creative_module == 'outline' %}is-active{% endif %}"><span>03</span><strong>大纲</strong><small>剧情弧线</small></div>
+            <div class="workspace-stage-step {% if creative_module == 'beats' %}is-active{% endif %}"><span>04</span><strong>Beats</strong><small>场次节拍</small></div>
+            <div class="workspace-stage-step {% if creative_module == 'script' %}is-active{% endif %}"><span>05</span><strong>剧本</strong><small>可拍摄稿</small></div>
         </div>
         <div class="small text-muted mt-2" x-show="isFreeCreativeProject()">模块可独立创建和生成；引用上下文默认不选择，锁定不会推进其他模块。</div>
         <div class="small text-muted mt-2" x-show="!isFreeCreativeProject()">所有模块入口均可直接进入；生成与锁定仍按标准流程校验上游内容。</div>

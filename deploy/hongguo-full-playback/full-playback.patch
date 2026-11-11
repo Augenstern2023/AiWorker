@@ -1,0 +1,276 @@
+--- a/hongguo.py
++++ b/hongguo.py
+@@ -593,7 +593,7 @@
+     out = {}
+     todo = []
+     for v in vids:
+-        c = None if force else SG.cache_get(SG.cache_key("vmodel", str(v)))
++        c = None if force else SG.cache_get(SG.cache_key("vmodel-full-v1", str(v)))
+         if c is not None:
+             out[str(v)] = c
+         else:
+@@ -615,11 +615,13 @@
+                             "size": size, "definition": meta.get("definition", "?"),
+                             # 加密信息必须透传: 否则加密流被当明文保存 → mp4 无法播放
+                             "encrypt": bool(enc.get("encrypt")), "spade_a": enc.get("spade_a")}
++        except sixgod.PlaybackError:
++            raise
+         except Exception:
+             best = None
+         if best:
+             out[v] = best
+-            SG.cache_set(SG.cache_key("vmodel", v), best, ttl=18000)  # 直链缓存5小时
++            SG.cache_set(SG.cache_key("vmodel-full-v1", v), best, ttl=18000)  # 直链缓存5小时
+         else:
+             still.append(v)
+     todo = still
+@@ -667,7 +669,7 @@
+         if v in seen:
+             continue
+         seen.add(v)
+-        c = None if force else SG.cache_get(SG.cache_key("vmtracks", v))
++        c = None if force else SG.cache_get(SG.cache_key("vmtracks-full-v1", v))
+         if c is not None:
+             out[v] = c
+         else:
+@@ -681,11 +683,13 @@
+         tracks = None
+         try:
+             tracks = video_model_tracks(sixgod.video_model(v, force=bool(force)))
++        except sixgod.PlaybackError:
++            raise
+         except Exception:
+             tracks = None
+         if tracks:
+             out[v] = tracks
+-            SG.cache_set(SG.cache_key("vmtracks", v), tracks, ttl=18000)
++            SG.cache_set(SG.cache_key("vmtracks-full-v1", v), tracks, ttl=18000)
+         else:
+             still.append(v)
+     todo = still
+--- a/offline_dl.py
++++ b/offline_dl.py
+@@ -73,19 +73,9 @@
+ 
+ # ---------- API + 下载解密 ----------
+ def _video_model(vid):
+-    """取单集 video_model。优先纯算法签名通道(sixgod, 实测可取 1080p 全清晰度),
+-    失败再回退原 unidbg 签名链路。"""
+-    try:
+-        import sixgod
+-        vm = sixgod.video_model(vid)
+-        if vm:
+-            return vm
+-    except Exception:
+-        pass
+-    if os.environ.get("HONGGUO_SESSION_API_KEY"):
+-        from desktop_video_model import get_video_model
+-        return get_video_model(H.api, vid)
+-    return _legacy_video_model(vid)
++    """Use the full-signature playback path; propagate refusals without fallback."""
++    import sixgod
++    return sixgod.video_model(vid)
+ 
+ 
+ def _legacy_video_model(vid):
+--- a/server.py
++++ b/server.py
+@@ -15,7 +15,8 @@
+   GET /stream?series_id=xxx&ep=1          ★服务端【纯离线解密】后串流, 客户端拿到可播mp4
+   GET /stream?vid=xxx&quality=1080p       也可直接按 vid + 清晰度; 支持 Range 拖动; <video>用?api_key=
+ """
+-import re, os, io, time, threading, sys
++import re, os, io, time, threading, sys, uuid
++from full_playback import PlaybackError, verify_media
+ from fastapi import FastAPI, HTTPException, Query, Depends, Request, Body
+ from fastapi.responses import StreamingResponse, JSONResponse, Response, FileResponse
+ import requests, urllib3
+@@ -26,7 +27,7 @@
+ import offline_decrypt as OD
+ import offline_dl as ODL
+ 
+-STREAM_CACHE = os.environ.get("HONGGUO_STREAM_CACHE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads", ".stream_cache")
++STREAM_CACHE = os.path.join(os.environ.get("HONGGUO_STREAM_CACHE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads", ".stream_cache"), "full-playback-v1")
+ _dec_locks = {}; _dec_guard = threading.Lock()
+ def _dec_lock(key):
+     with _dec_guard:
+@@ -45,56 +46,51 @@
+     meta = tr.get("video_meta") or {}
+     return {"url": tr.get("main_url"), "spade_a": enc.get("spade_a"),
+             "encrypt": bool(enc.get("encrypt")),
+-            "definition": meta.get("definition") or defn, "size": meta.get("size", 0)}
++            "definition": meta.get("definition") or defn, "size": meta.get("size", 0),
++            "duration": vm.get("video_duration")}
+ 
+ def _ensure_decrypted(vid, quality="best"):
+-    """下载 CDN 密文 + 纯离线解密, 返回缓存的明文 mp4 路径(已缓存则直接返回)。"""
++    """Publish only complete official episodes; never reuse old preview caches."""
++    vid = str(vid)
++    if not re.fullmatch(r"[0-9]{8,24}", vid):
++        raise HTTPException(400, "INVALID_EPISODE_ID")
+     os.makedirs(STREAM_CACHE, exist_ok=True)
+     safe_q = re.sub(r"[^\w]", "", str(quality)) or "best"
+     out = os.path.join(STREAM_CACHE, f"{vid}_{safe_q}.mp4")
+-    if os.path.exists(out) and os.path.getsize(out) > 0:
+-        return out
+-    # offline_decrypt() falls back to a `.raw.mp4` path when ffmpeg is not
+-    # installed.  Treat that returned path as the cache artifact instead of
+-    # constructing a non-existent FileResponse target.
+-    raw = os.path.splitext(out)[0] + ".raw.mp4"
+-    if os.path.exists(raw) and os.path.getsize(raw) > 0:
+-        from desktop_remux import remux
+-        with _dec_lock(f"{vid}_{safe_q}"):
+-            return out if os.path.exists(out) else remux(raw, out)
+-    with _dec_lock(f"{vid}_{safe_q}"):                  # 同集并发请求只解一次
++    with _dec_lock(f"{vid}_{safe_q}"):
+         if os.path.exists(out) and os.path.getsize(out) > 0:
+             return out
+-        if os.path.exists(raw) and os.path.getsize(raw) > 0:
+-            from desktop_remux import remux
+-            return remux(raw, out)
+-        t = None
++        partial = os.path.join(STREAM_CACHE, f"{vid}_{safe_q}.{uuid.uuid4().hex}.partial.mp4")
++        ct = partial + ".enc"
++        raw = os.path.splitext(partial)[0] + ".raw.mp4"
+         try:
+             t = _vm_track(vid, quality)
++            if not t or not t.get("url"):
++                raise PlaybackError("MISSING_FULL_EPISODE_SOURCE")
++            if not t["encrypt"]:
++                H.download_file(t["url"], partial)
++            else:
++                H.download_file(t["url"], ct)
++                r = OD.offline_decrypt(t["spade_a"], ct, partial)
++                if not (r and os.path.isfile(r) and os.path.getsize(r)):
++                    raise PlaybackError("MEDIA_DECRYPT_FAILED")
++                if os.path.abspath(r) != os.path.abspath(partial):
++                    from desktop_remux import remux
++                    remux(r, partial)
++            verify_media(partial, t.get("duration"))
++            os.replace(partial, out)
++            return out
++        except PlaybackError as ex:
++            raise HTTPException(502, str(ex)) from None
+         except Exception:
+-            t = None
+-        if not t or not t["url"]:
+-            t = ODL.mirror_track(vid)   # 官方取流失败(异常/空响应) → 镜像站明文360p兜底
+-        if not t or not t["url"]:
+-            raise HTTPException(404, "无直链/video_model")
+-        if not t["encrypt"]:
+-            H.download_file(t["url"], out)
+-            return out
+-        ct = out + ".enc"
+-        H.download_file(t["url"], ct)
+-        r = OD.offline_decrypt(t["spade_a"], ct, out)
+-        try:
+-            os.remove(ct)
+-        except OSError:
+-            pass
+-        if not (r and os.path.exists(r) and os.path.getsize(r) > 0):
+-            raise HTTPException(500, "解密失败(spade 异常或 ver2 视频?)")
+-        if os.path.abspath(r) != os.path.abspath(out):
+-            from desktop_remux import remux
+-            r = remux(r, out)
+-            if os.path.isfile(raw):
+-                os.remove(raw)
+-        return r
++            # Download/decrypt exceptions may embed signed URLs or content keys.
++            raise HTTPException(502, "FULL_EPISODE_DOWNLOAD_FAILED") from None
++        finally:
++            for path in (partial, ct, raw, partial + ".part", ct + ".part"):
++                try:
++                    os.remove(path)
++                except FileNotFoundError:
++                    pass
+ 
+ urllib3.disable_warnings()
+ app = FastAPI(title="红果短剧 API", version="1.0")
+--- a/sixgod.py
++++ b/sixgod.py
+@@ -1,15 +1,9 @@
+ # -*- coding: utf-8 -*-
+-"""取流通道（multi_video_model）。
+-
+-2026-11 官方协议换代后的最终结论（以参考下载器 hongguo-downloader 与实测为准）:
+-- model 接口**不要求签名**, 服务端拒绝的本质是「设备身份不信任」;
+-- 关键是「养熟」的设备身份: 参考下载器内置的固定身份可 0.3s 单次放行(5 档清晰度全出),
+-  官方桌面版身份需 2~5 次重试, 新随机/新注册身份会被持续拒绝;
+-- 空响应=概率风控: 按身份链轮换 + 有限重试。
+-  (早前「旧签名被服务端废弃」是误判 —— 失败源于随机身份不养熟, 与签名无关。)
+-
+-剧集列表(multi_video_detail)不在本通道能力内 —— 它只认新版有效签名(unidbg),
+-由 desktop_standalone 启动的内嵌签名服务提供。
++"""Full-signature video_tab playback facade.
++
++video_model uses full_playback exclusively. Historical private POST helpers below
++are retained for source history only and are not fallback paths.
++Episode-list signing remains provided by desktop_standalone's unidbg service.
+ """
+ import json
+ import os
+@@ -21,6 +15,7 @@
+ from urllib.parse import urlencode
+ 
+ import requests
++from full_playback import PlaybackError
+ 
+ ENDPOINT = "/novel/player/multi_video_model/v1/"
+ HOST = "https://api5-normal-sinfonlineb.fqnovel.com"
+@@ -293,29 +288,18 @@
+ 
+ 
+ def video_model(vid, force=False):
+-    """按 vid 取 video_model(含 video_list/main_url/encrypt_info)。失败返回 None。"""
++    """Full-signature video_tab playback; failures must not trigger identity/preview fallback."""
++    from full_playback import get_video_model
+     vid = str(vid)
+     if not re.fullmatch(r"[0-9]{8,24}", vid):
+-        return None
++        raise PlaybackError("INVALID_EPISODE_ID")
+     now = time.time()
+     if not force:
+         with _cache_lock:
+             hit = _cache.get(vid)
+             if hit and now - hit[0] < CACHE_TTL:
+                 return hit[1]
+-    try:
+-        try:
+-            vm = _post_model_signed(vid)   # 首选: JS 签名路线(秒过)
+-        except Exception:
+-            vm = None
+-        if not vm:
+-            vm = _post_model(vid)          # 后备: 公开游客+养熟身份轮换
+-    except Exception as ex:
+-        try:
+-            print(f"[sixgod] vid={vid} 取流失败: {ex}", flush=True)
+-        except Exception:
+-            pass
+-        return None
++    vm = get_video_model(vid)
+     if vm:
+         with _cache_lock:
+             _cache[vid] = (now, vm)
+--- a/frida/offline_decrypt.py
++++ b/frida/offline_decrypt.py
+@@ -32,9 +32,9 @@
+             print(f"[i] flag={flag} 输出异常, 改用 flag={1 - flag}")
+             key, flag = alt, 1 - flag
+         else:
+-            print(f"[X] unwrap 失败 (spade 可能是 ver2/AES-GCM 或格式异常): {key!r}")
++            print("[X] unwrap 失败 (spade 可能是 ver2/AES-GCM 或格式异常)")
+             return None
+-    print(f"[1/3] content key = {key}   (flag={flag})")
++    print(f"[1/3] content key 已在内存解析 (flag={flag})")
+ 
+     # 2) base_iv 候选: 密文 senc 首样本 (纯文件)
+     ivs = senc_iv8(ct_path)
+@@ -48,7 +48,7 @@
+     if not kh:
+         print("[X] key 与密文不匹配 (spade 与该密文不对应? 或 ver2 视频?)")
+         return None
+-    print(f"[3/3] key={kh} 校验通过 -> 全轨解密(视频+音频, 各用自身 senc base_iv)...")
++    print("[3/3] 密钥校验通过 -> 全轨解密(视频+音频, 各用自身 senc base_iv)...")
+ 
+     # 4) 全轨解密(视频+音频)。先写中间密文->明文, 再重封装剥离 CENC 信令成可播 mp4
+     raw = os.path.splitext(out_path)[0] + ".raw.mp4"

@@ -1,0 +1,4 @@
+!backend/playback_recovery/playback.jar
+!backend/playback_recovery/lib/
+!backend/playback_recovery/lib/*.jar
+__pycache__/
